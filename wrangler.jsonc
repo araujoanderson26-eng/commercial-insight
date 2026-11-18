@@ -1,34 +1,63 @@
+
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
+  "$schema": "./node_modules/wrangler/config-schema.json",
+
   "name": "comercial-insight",
   "main": "worker/index.ts",
-  "compatibility_date": "2026-11-17",
-  "compatibility_flags": ["nodejs_compat"],
-  "workers_dev": false,
+  "compatibility_date": "2026-11-18",
+
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+
+  "workers_dev": true,
   "preview_urls": false,
+
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*"],
+    "run_worker_first": [
+      "/api/*"
+    ]
   },
+
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "comercial-insight",
-      "database_id": "00000000-0000-4000-8000-000000000000",
-      "migrations_dir": "migrations",
-    },
+      "database_id": "5b333eba-7ace-4182-aa76-0d0f591a4ad6",
+      "migrations_dir": "migrations"
+    }
   ],
+
+  "r2_buckets": [
+    {
+      "binding": "BUCKET",
+      "bucket_name": "commercial-insight-arquivos"
+    }
+  ],
+
   "vars": {
-    "APP_ORIGIN": "http://localhost:8787",
+    "APP_ORIGIN": "https://comercialinsight.araujoempresarial.com.br",
     "OPENAI_MODEL": "gpt-4.1-mini",
-    "RETENTION_DAYS": "90",
+    "RETENTION_DAYS": "90"
   },
+
   "observability": {
     "enabled": true,
-    "traces": { "enabled": false },
-    "logs": { "enabled": true, "invocation_logs": false },
+    "traces": {
+      "enabled": false
+    },
+    "logs": {
+      "enabled": true,
+      "invocation_logs": false
+    }
   },
-  "triggers": { "crons": ["17 4 * * *"] },
+
+  "triggers": {
+    "crons": [
+      "17 4 * * *"
+    ]
+  }
 }
