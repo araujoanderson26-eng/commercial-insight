@@ -185,12 +185,9 @@ export function readResult(
 export async function query(e: Env, m: ModelConfig, rev: number, u: DbUser, p: Plan) {
   const dax = compile(m, publicUser(u), p);
   const t = await access(e, m, rev, u);
+  const workspace = m.workspace === "me" ? "" : "/groups/" + m.workspace;
   const resp = await fetch(
-    "https://api.powerbi.com/v1.0/myorg/groups/" +
-      m.workspace +
-      "/datasets/" +
-      m.dataset +
-      "/executeQueries",
+    "https://api.powerbi.com/v1.0/myorg" + workspace + "/datasets/" + m.dataset + "/executeQueries",
     {
       method: "POST",
       headers: { Authorization: "Bearer " + t, "Content-Type": "application/json" },

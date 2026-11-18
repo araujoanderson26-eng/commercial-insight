@@ -64,7 +64,17 @@ export type Report = {
   plan: Plan;
   asOf: string;
   truncated: boolean;
-  source: "Power BI";
+  source: "Power BI" | "Arquivo manual (D1)";
+  sourceInfo?: {
+    versionId: string;
+    extractedAt: string;
+    sourceUpdatedAt: string | null;
+    referenceDate: string;
+    coverage: { from: string; to: string };
+    publishedAt?: string;
+    model?: string;
+    metrics?: Partial<Record<Metric, { status: "validated" | "pending" | "unavailable"; reason?: string }>>;
+  };
 };
 export type Commentary = { summary: string; actions: string[] };
 export type User = {
@@ -88,6 +98,13 @@ export type Session = {
     ai: boolean;
   };
   expires: number;
+  data?: {
+    source: "manual" | "powerbi";
+    ready: boolean;
+    activeVersionId: string | null;
+    extractedAt: string | null;
+    stale: boolean;
+  };
 };
 export const identifier = z
   .string()
@@ -100,7 +117,7 @@ export const configSchema = z
   .object({
     tenant: z.uuid(),
     application: z.uuid(),
-    workspace: z.uuid(),
+    workspace: z.uuid().or(z.literal("me")),
     dataset: z.uuid(),
     mode: z.enum(["delegated", "application"]),
     factTable: identifier,
@@ -119,7 +136,10 @@ export const configSchema = z
     scopedMeasuresReviewed: z.boolean(),
     allowAI: z.boolean(),
   })
-  .strict();
+  .strict()
+  .refine((m) => m.workspace !== "me" || m.mode === "delegated", {
+    path: ["workspace"], message: "Meu workspace requer uma conta Microsoft vinculada no modo delegado.",
+  });
 export type ModelConfig = z.infer<typeof configSchema>;
 export function change(p: Pair, m: Metric) {
   if (p.current === null || p.previous === null) return null;

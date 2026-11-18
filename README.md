@@ -2,7 +2,9 @@
 
 **Desenvolvido por Anderson de Araujo**
 
-Aplicativo web instalável para consultar um modelo semântico publicado no Power BI Service e interpretar seus resultados em português. O projeto reúne frontend React, API Cloudflare Workers e banco D1 no mesmo domínio. A pasta `dist/` no pacote contém o frontend compilado. Login, consultas e conversas precisam do Worker e do banco.
+Aplicativo web instalável para consultar snapshots comerciais no D1 ou um modelo semântico no Power BI Service e interpretar seus resultados em português. O projeto reúne frontend React, API Cloudflare Workers, banco D1 e arquivos privados R2 no mesmo domínio. Login, consultas e conversas precisam do Worker e do banco.
+
+A rotina de atualização manual, instalação do preparador Windows, restauração e limites semânticos estão em [Atualização de dados](docs/ATUALIZACAO-DADOS.md). A tela administrativa usa `/admin/atualizacao-dados`. O modo manual usa o login próprio e só publica depois de validar integralmente o pacote. O primeiro aceite do modelo real ainda depende do PBIX e da conciliação de suas medidas.
 
 ## Primeira execução no computador
 
@@ -41,16 +43,17 @@ Acesse **http://localhost:8787** no mesmo computador. Para que o navegador envie
 | Início | Saudação em horário de Brasília, campo de pergunta, seis atalhos e indicadores do recorte ativo. |
 | Filtros | Selecione o primeiro e o último mês, regional, cliente ou produto. Os nomes devem corresponder à dimensão publicada. O padrão utiliza os seis meses completos anteriores. |
 | Conversas | Faça perguntas como “Quais clientes mais perderam faturamento?”. A resposta combina totais calculados pelo modelo, gráfico, interpretação e ações. Perguntas subsequentes podem referenciar as três últimas consultas. |
-| Histórico | Reabra a conversa e selecione “Consultar valores atuais no Power BI”. O servidor confirma o acesso e consulta os números de novo. Quando os dados coincidem, recupera a interpretação original. |
+| Histórico | No modo manual, reabra os valores da versão original. O servidor reaplica as permissões atuais. A fonte online reconsulta o modelo e reutiliza a interpretação apenas quando os valores coincidem. |
 | Relatórios | Alterne indicador, agrupamento, gráfico e tabela. A evolução mensal compara períodos homólogos. Rankings exibem até 30 resultados. |
 | Carteira e produtos | Consulte rankings e clique no cliente, produto ou regional para analisar sua evolução mensal. |
 | Preparar visita | Selecione um cliente e obtenha uma pauta baseada no histórico disponível. |
 | Alertas e ações | Veja quedas, avanços e variações de margem. Clique em um sinal para discutir o recorte com a IA. Os alertas são calculados ao consultar a tela. |
 | Equipe e permissões | O administrador cria usuários, define papel e escopo, ajusta o vínculo Microsoft, altera a senha ou desativa a conta. |
 | Integrações | Informe IDs e nomes exatos do modelo. A tela informa quais segredos já foram cadastrados, sem exibir seus valores. |
+| Atualização de dados | Selecione a fonte, envie o pacote completo, acompanhe validações e restaure uma versão anterior. Exclusivo de administradores. |
 | Auditoria | Eventos recentes de acesso, consulta, alteração de usuário e configuração. |
 
-Os indicadores mapeáveis nesta versão são faturamento, margem comercial, clientes compradores e devoluções monetárias. A margem e a quantidade de compradores vêm das respectivas medidas do modelo. O total do período é calculado diretamente pelo Power BI. A variação da margem aparece em pontos percentuais. A ordenação por ganho ou queda usa diferença absoluta. Estoque, ruptura, meta, market share, roteirização e previsões exigem dados e medidas adicionais.
+Os indicadores da interface são faturamento, margem comercial, clientes compradores e devoluções monetárias. No modo online, vêm das medidas do modelo. No modo manual, apenas implementações explicitamente mapeadas e reconciliadas são calculadas no D1; as demais aparecem indisponíveis. O preparador inicial suporta valores aditivos e clientes distintos de um fato. Margem, estoque, litros, metas e medidas especiais exigem implementação e aceite específicos. A variação da margem aparece em pontos percentuais; rankings por ganho ou queda usam diferença absoluta.
 
 ## Publicação e integrações
 
@@ -86,6 +89,6 @@ No Android e nos navegadores desktop compatíveis, abra o endereço HTTPS public
 
 ## Validação da entrega
 
-Os nove testes automatizados passaram. O build de produção e o ensaio de deploy com Wrangler foram concluídos. Em navegador Chromium, foram verificados o login, os filtros, a navegação, o modo offline e a exibição de gráficos e respostas em larguras de 320, 390, 768, 1024 e 1440 pixels.
+O estado de testes, implantação e pendências da atualização manual está em [Relatório de validação](docs/VALIDACAO-ATUALIZACAO-DADOS.md). Execute `npm test`, `npm run typecheck`, `npm run build` e `npm run test:ui` (Edge Windows ou `UI_SMOKE_BROWSER` com o executável Chromium). Nenhum teste sintético comprova a equivalência do modelo Panizzon real.
 
 O login independente, as migrações e o cadastro inicial foram executados em D1 local com Wrangler. Os testes de contrato usam respostas controladas de Microsoft, Power BI, OpenAI e e-mail. A conferência contábil de uma medida, a validação de RLS com usuários da empresa, a entrega de e-mail pelo remetente real e a instalação em aparelhos físicos fazem parte da homologação da empresa.

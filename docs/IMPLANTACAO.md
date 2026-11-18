@@ -4,7 +4,9 @@
 
 Use um repositório dedicado no GitHub e um Worker e D1 exclusivos deste aplicativo. O pacote pode ser desenvolvido e publicado diretamente com Wrangler. Os arquivos de ambiente e o estado local estão excluídos pelo `.gitignore`.
 
-O endereço sugerido é **comercialinsight.araujoempresarial.com.br**. Confirme a zona na conta Cloudflare e verifique se o subdomínio já atende outro serviço antes de associá-lo. Os demais portais comerciais utilizam recursos próprios.
+O projeto está configurado para **commercial-insight.araujoempresarial.com.br**, Worker `commercial-insight`, D1 `comercial-insight-db` (binding `DB`) e bucket privado `commercial-insight-arquivos` (binding `BUCKET`). Confirme UUIDs em `wrangler.jsonc` e a conta autenticada antes de operar. Os demais portais comerciais utilizam recursos próprios.
+
+A atualização manual e o preparo do PBIX estão em [ATUALIZACAO-DADOS.md](ATUALIZACAO-DADOS.md). A migração é aditiva; registre um ponto de recuperação e mantenha backup privado antes de aplicá-la em produção. O cron de minuto processa checkpoints e o cron diário mantém a limpeza existente.
 
 **Autentique o Wrangler na sua conta.**
 
@@ -21,7 +23,7 @@ npx wrangler whoami
 **Crie o banco dedicado.** Se já existir um banco criado especificamente para este projeto, use o seu identificador.
 
 ```bash
-npx wrangler d1 create comercial-insight
+npx wrangler d1 create comercial-insight-db
 ```
 
 Em `wrangler.jsonc`, substitua o UUID de exemplo em `d1_databases[0].database_id`. Mantenha o binding `DB` e o diretório `migrations`. Se a CLI oferecer escrita automática, confira que há apenas um binding `DB`.
@@ -30,7 +32,7 @@ Defina `vars.APP_ORIGIN` com a origem HTTPS final sem barra no fim. Acrescente a
 
 ```json
 "routes": [
-  { "pattern": "comercialinsight.araujoempresarial.com.br", "custom_domain": true }
+  { "pattern": "commercial-insight.araujoempresarial.com.br", "custom_domain": true }
 ]
 ```
 
@@ -63,7 +65,7 @@ npm run admin -- anderson@example.com "Anderson de Araujo" --remote
 node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
 ```
 
-**Cadastre cada segredo usando o prompt protegido do Wrangler.** Os comandos abaixo enviam os valores para o Worker `comercial-insight`. Na primeira implantação, a CLI pode pedir para criar o Worker com esse nome. O segredo deve ser digitado no prompt, sem integrar o comando ou o Git.
+**Cadastre cada segredo usando o prompt protegido do Wrangler.** Os comandos abaixo enviam os valores para o Worker `commercial-insight`. Na primeira implantação, a CLI pode pedir para criar o Worker com esse nome. O segredo deve ser digitado no prompt, sem integrar o comando ou o Git.
 
 ```bash
 npx wrangler secret put MS_CLIENT_SECRET

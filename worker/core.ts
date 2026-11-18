@@ -1,16 +1,12 @@
 import { z } from "zod";
 import { configSchema, type ModelConfig, type User } from "../shared/domain";
-export interface Env {
-  DB: D1Database;
-  ASSETS: Fetcher;
-  APP_ORIGIN: string;
-  OPENAI_MODEL: string;
-  RETENTION_DAYS: string;
+export interface Env extends CloudflareBindings {
   MS_CLIENT_SECRET?: string;
   TOKEN_ENCRYPTION_KEY?: string;
   OPENAI_API_KEY?: string;
   RESEND_API_KEY?: string;
   MAIL_FROM?: string;
+  MANUAL_ALLOW_SYNTHETIC?: string;
 }
 export class Problem extends Error {
   constructor(

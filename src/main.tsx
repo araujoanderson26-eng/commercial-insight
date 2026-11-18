@@ -22,10 +22,11 @@ import { Audit, Integrations, Team } from "./Admin";
 import Auth from "./Auth";
 import Chat, { type Seed } from "./Chat";
 import Profile from "./Profile";
+import { DataUpdates } from "./DataUpdates";
 import "./style.css";
 import { api, Brand, Busy, Credit, Empty, ErrorBox, message, period } from "./ui";
 import { adminNav, Home, mainNav, navs, Reports } from "./WorkspaceViews";
-const cleanPath = () => location.pathname.split("/")[1] || "inicio";
+const cleanPath = () => location.pathname === "/admin/atualizacao-dados" ? "atualizacao-dados" : location.pathname.split("/")[1] || "inicio";
 function Modal({
   title,
   close,
@@ -73,7 +74,14 @@ function FilterForm({
   focusClient?: boolean;
 }) {
   const [f, F] = useState(value),
-    [err, E] = useState("");
+    [err, E] = useState(""),
+    [options, O] = useState<Partial<Record<"region" | "client" | "product", string[]>>>({});
+  useEffect(() => {
+    if (s.data?.source !== "manual" || !s.data.ready) return;
+    let alive = true;
+    api<{ values: typeof options }>("data/options", "POST", value).then((v) => { if (alive) O(v.values); }).catch((e) => { if (alive) E(message(e)); });
+    return () => { alive = false; };
+  }, [s.data?.activeVersionId]);
   function save(e: FormEvent) {
     e.preventDefault();
     const parsed = filtersSchema.safeParse(f);
@@ -113,6 +121,7 @@ function FilterForm({
               </select>
             ) : (
               <input
+                list={"source-options-" + k}
                 autoFocus={focusClient && k === "client"}
                 maxLength={140}
                 value={f[k]}
@@ -120,6 +129,9 @@ function FilterForm({
                 placeholder={"Todos · ou nome exato no modelo"}
               />
             )}
+            <datalist id={"source-options-" + k}>
+              {(options[k] ?? []).map((v) => <option key={v} value={v} />)}
+            </datalist>
           </label>
         );
       })}
@@ -144,12 +156,12 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
     [chatKey, K] = useState(0),
     [reportGroup, G] = useState<Group>("month");
   const ready =
-      s.integrations.configured && (s.integrations.mode === "application" || s.integrations.linked),
+      s.data?.ready ?? (s.integrations.configured && (s.integrations.mode === "application" || s.integrations.linked)),
     admin = s.user.role === "admin";
   function go(p: string) {
     W("");
     if (p !== page) {
-      history.pushState({}, "", p === "inicio" ? "/" : "/" + p);
+      history.pushState({}, "", p === "inicio" ? "/" : p === "atualizacao-dados" ? "/admin/atualizacao-dados" : "/" + p);
       V(p);
       window.scrollTo(0, 0);
     }
@@ -250,7 +262,13 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
           </div>
         </header>
         <div className="content">
-          {!["integracoes", "equipe", "auditoria", "perfil", "mais"].includes(page) && (
+          {s.data?.source === "manual" && (
+            <div className="notice" role="status">
+              {s.data.extractedAt ? "Arquivo manual · base extraída em " + new Date(s.data.extractedAt).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" }) : "Arquivo manual · nenhuma versão válida publicada."}
+              {s.data.stale ? " · Base desatualizada: solicite uma atualização ao administrador." : ""}
+            </div>
+          )}
+          {!["integracoes", "atualizacao-dados", "equipe", "auditoria", "perfil", "mais"].includes(page) && (
             <div className="filterbar">
               <div className="filterdate">
                 <CalendarDays size={15} />
@@ -302,6 +320,8 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
             <Profile s={s} logout={logout} reload={reload} />
           ) : page === "integracoes" && admin ? (
             <Integrations changed={reload} />
+          ) : page === "atualizacao-dados" && admin ? (
+            <DataUpdates changed={reload} />
           ) : page === "equipe" && admin ? (
             <Team self={s.user.id} />
           ) : page === "auditoria" && admin ? (

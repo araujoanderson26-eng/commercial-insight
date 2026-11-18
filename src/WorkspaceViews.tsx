@@ -47,6 +47,7 @@ export const mainNav = [
   { p: "alertas", label: "Alertas e ações", icon: Bell },
 ];
 export const adminNav = [
+  { p: "atualizacao-dados", label: "Atualização de dados", icon: RefreshCw },
   { p: "integracoes", label: "Integrações", icon: Link2 },
   { p: "equipe", label: "Equipe e permissões", icon: ShieldCheck },
   { p: "auditoria", label: "Auditoria", icon: BookOpen },
@@ -103,6 +104,12 @@ const cards = [
   },
 ];
 function Connection({ s, go }: { s: Session; go: Go }) {
+  if (s.data?.source === "manual") return (
+    <div className="connectbox">
+      <div><b>Nenhuma versão válida publicada</b><p>Os indicadores estarão disponíveis após a importação e validação do pacote.</p></div>
+      {s.user.role === "admin" && <button className="soft compact" onClick={() => go("atualizacao-dados")}>Atualizar dados<ArrowRight size={14} /></button>}
+    </div>
+  );
   const config = !s.integrations.configured;
   const title = config ? "Conecte o modelo semântico" : "Vincule sua conta Microsoft";
   return (
@@ -146,7 +153,7 @@ export function Home({
 }) {
   const [q, Q] = useState(""),
     [refresh, R] = useState(0),
-    report = useReport(planFor(filters), ready, refresh);
+    report = useReport(planFor(filters), ready, refresh, (s.data?.source ?? "powerbi") + "|" + (s.data?.activeVersionId ?? ""));
   const hour = Number(
     new Intl.DateTimeFormat("pt-BR", {
       hour: "2-digit",
@@ -170,7 +177,7 @@ export function Home({
           </h1>
           <p>
             Analise resultados, clientes e oportunidades
-            <br className="wideonly" /> com os dados do seu Power BI.
+            <br className="wideonly" /> com os dados da sua fonte comercial.
           </p>
         </div>
         <form
@@ -189,7 +196,8 @@ export function Home({
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.nativeEvent.isComposing) {
                 e.preventDefault();
-                q.trim().length > 1 ? ask(q) : card("pergunta");
+                if (q.trim().length > 1) ask(q);
+                else card("pergunta");
               }
             }}
             value={q}
@@ -285,7 +293,8 @@ export function Reports({
     [metric, M] = useState<Metric>("revenue"),
     [order, O] = useState<Plan["order"]>("current"),
     [refresh, R] = useState(0);
-  const report = useReport({ ...planFor(filters, group, metric), order }, ready, refresh);
+  const report = useReport({ ...planFor(filters, group, metric), order }, ready, refresh,
+    (s.data?.source ?? "powerbi") + "|" + (s.data?.activeVersionId ?? ""));
   const title = navs.find((n) => n.p === page)?.label || "Relatórios";
   return (
     <div className="stack">

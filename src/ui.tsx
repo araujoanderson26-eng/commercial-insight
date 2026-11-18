@@ -101,7 +101,7 @@ export const monthName = (s: string, long = false) =>
     .replace(". de ", "/")
     .replace(" de ", "/");
 export const period = (f: Filters) => monthName(f.from) + " – " + monthName(f.to);
-export function useReport(plan: Plan, enabled: boolean, refresh = 0) {
+export function useReport(plan: Plan, enabled: boolean, refresh = 0, sourceKey = "") {
   const [state, set] = useState<{ data?: Report; error?: string; loading: boolean }>({
     loading: enabled,
   });
@@ -120,7 +120,7 @@ export function useReport(plan: Plan, enabled: boolean, refresh = 0) {
     return () => {
       alive = false;
     };
-  }, [key, enabled, refresh]);
+  }, [key, enabled, refresh, sourceKey]);
   return state;
 }
 export function Delta({ r, m }: { r: Report["total"]; m: Metric }) {
@@ -147,6 +147,7 @@ export function Kpis({ r }: { r: Report }) {
           <strong title={pretty(r.total.values[m].current, m)}>
             {pretty(r.total.values[m].current, m, true)}
           </strong>
+          {r.sourceInfo?.metrics?.[m]?.status !== undefined && r.sourceInfo.metrics[m]?.status !== "validated" && <small className="muted">{r.sourceInfo.metrics[m]?.reason ?? "Indicador sem equivalência validada"}</small>}
           <Delta r={r.total} m={m} />
         </div>
       ))}
@@ -248,8 +249,7 @@ export function Graph({ r, metric = r.plan.metric }: { r: Report; metric?: Metri
       )}
       <div className="source">
         <span>
-          <Database size={12} /> Power BI · consulta{" "}
-          {new Date(r.asOf).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}
+          <Database size={12} /> {r.source} · {r.sourceInfo ? "extração " + new Date(r.sourceInfo.extractedAt).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" }) + " · versão " + r.sourceInfo.versionId.slice(0, 8) : "consulta " + new Date(r.asOf).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}
         </span>
         <span>
           {yr(f.to)} × {+yr(f.to) - 1}

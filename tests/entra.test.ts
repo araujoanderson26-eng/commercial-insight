@@ -35,6 +35,7 @@ test("OAuth delegado usa PKCE, sessão, nonce, identidade cadastrada e token cif
     const id_token = await new SignJWT({ tid: m.tenant, oid, nonce })
       .setProtectedHeader({ alg: "RS256", kid: "local" })
       .setAudience(m.application)
+      .setSubject(u.id)
       .setIssuer("https://login.microsoftonline.com/" + m.tenant + "/v2.0")
       .setIssuedAt()
       .setExpirationTime("5m")

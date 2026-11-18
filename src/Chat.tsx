@@ -23,6 +23,8 @@ type Turn = {
   question: string;
   plan: Plan;
   created: number;
+  source_type?: string;
+  source_version?: string | null;
   report?: Report;
   commentary?: Commentary;
 };
@@ -92,7 +94,7 @@ function Answer({ turn, onLoad }: { turn: Turn; onLoad: (r: Report, c: Commentar
           </>
         ) : (
           <button className="soft" onClick={refresh} disabled={busy}>
-            {busy ? "Consultando…" : "Consultar valores atuais no Power BI"}
+            {busy ? "Consultando…" : turn.source_type === "manual" ? "Reabrir valores da versão original" : "Consultar valores na fonte online"}
             <ChevronRight size={15} />
           </button>
         )}

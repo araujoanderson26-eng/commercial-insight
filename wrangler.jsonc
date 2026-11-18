@@ -25,7 +25,7 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "comercial-insight",
+      "database_name": "comercial-insight-db",
       "database_id": "5b333eba-7ace-4182-aa76-0d0f591a4ad6",
       "migrations_dir": "migrations"
     }
@@ -39,15 +39,18 @@
   ],
 
   "vars": {
-    "APP_ORIGIN": "https://commercial-insight.araujo-anderson26.workers.dev",
+   "APP_ORIGIN": "https://commercial-insight.araujoempresarial.com.br",
     "OPENAI_MODEL": "gpt-4.1-mini",
-    "RETENTION_DAYS": "90"
+    "RETENTION_DAYS": "90",
+    "MANUAL_MAX_BYTES": "134217728",
+    "MANUAL_D1_CAPACITY_BYTES": "471859200"
   },
 
   "observability": {
     "enabled": true,
     "traces": {
-      "enabled": false
+      "enabled": true,
+      "head_sampling_rate": 0.01
     },
     "logs": {
       "enabled": true,
@@ -57,6 +60,7 @@
 
   "triggers": {
     "crons": [
+      "* * * * *",
       "17 4 * * *"
     ]
   }

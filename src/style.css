@@ -1525,6 +1525,331 @@ dialog::backdrop {
 .askbox textarea::placeholder {
   opacity: 1;
 }
+.data-updates .du-metadata {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px 24px;
+  margin: 20px 0;
+}
+.data-updates .errorbox > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.data-updates .du-metadata dt {
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 5px;
+}
+.data-updates .du-metadata dd {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.data-updates .du-metadata .du-version {
+  grid-column: 1 / -1;
+}
+.data-updates .du-version dd {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 450;
+}
+.data-updates .du-callout {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  border: 1px solid #f0dfb8;
+  background: #fff7e5;
+  color: #805d20;
+  border-radius: 10px;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 15px 0;
+}
+.data-updates .du-callout svg {
+  flex-shrink: 0;
+}
+.data-updates .du-settings {
+  border-top: 1px solid var(--line);
+  margin-top: 20px;
+  padding-top: 20px;
+  display: grid;
+  gap: 16px;
+}
+.data-updates .du-settings > button {
+  justify-self: start;
+}
+.data-updates .du-steps {
+  list-style: decimal;
+  margin: 12px 0 16px;
+  padding-left: 20px;
+  font-size: 13px;
+  color: #54647e;
+  line-height: 1.8;
+}
+.data-updates .du-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 20px;
+  margin: 0 0 20px;
+}
+.data-updates a {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  color: #5141ba;
+  font-size: 12px;
+  font-weight: 600;
+}
+.data-updates a:hover {
+  text-decoration: underline;
+}
+.data-updates .du-drop {
+  padding: 28px 18px;
+  display: grid;
+  justify-items: center;
+  gap: 9px;
+  border: 1px dashed #b9c5de;
+  border-radius: 13px;
+  background: #f8f9fd;
+  text-align: center;
+  transition: background 0.15s, border-color 0.15s;
+}
+.data-updates .du-drop > svg {
+  color: #6956c7;
+  margin-bottom: 3px;
+}
+.data-updates .du-drop b {
+  font-size: 14px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.data-updates .du-drop > span {
+  font-size: 11px;
+  color: var(--muted);
+}
+.data-updates .du-drop .soft {
+  margin-top: 4px;
+}
+.data-updates .du-dragging {
+  background: #eeebff;
+  border-color: #7965db;
+}
+.data-updates .du-file {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+.data-updates .du-upload-note {
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 14px 0;
+}
+.data-updates .du-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+}
+.data-updates .du-progress,
+.data-updates .du-job {
+  margin: 17px 0;
+  padding: 15px;
+  border-radius: 10px;
+  background: #f3f4fd;
+  border: 1px solid #e1e4f7;
+}
+.data-updates .du-progress > div {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+}
+.data-updates .du-progress > div > span {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+.data-updates progress {
+  display: block;
+  width: 100%;
+  height: 7px;
+  appearance: none;
+  accent-color: #6550cc;
+  border: 0;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #dfe2f1;
+  margin: 11px 0;
+}
+.data-updates progress::-webkit-progress-bar {
+  border-radius: 10px;
+  background: #dfe2f1;
+}
+.data-updates progress::-webkit-progress-value {
+  border-radius: 10px;
+  background: #6550cc;
+}
+.data-updates progress::-moz-progress-bar {
+  border-radius: 10px;
+  background: #6550cc;
+}
+.data-updates .du-job .sectionhead {
+  margin-bottom: 5px;
+  gap: 12px;
+}
+.data-updates .du-job b {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+}
+.data-updates .du-job p {
+  font-size: 12px;
+  color: #53647f;
+  overflow-wrap: anywhere;
+  margin: 4px 0;
+}
+.data-updates .du-job small,
+.data-updates .du-progress small {
+  display: block;
+  font-size: 11px;
+  line-height: 1.6;
+  color: #626d88;
+}
+.data-updates .du-history {
+  margin-top: 8px;
+}
+.data-updates .du-history-item {
+  padding: 18px 0;
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 12px;
+}
+.data-updates .du-history-item:first-child {
+  border: 0;
+}
+.data-updates .du-history-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.data-updates .du-history-head > div {
+  flex: 1;
+  min-width: 0;
+}
+.data-updates .du-history-head b {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.data-updates .du-history-head small {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 5px;
+}
+.data-updates .du-history-head .pill {
+  flex-shrink: 0;
+  max-width: 50%;
+  text-align: center;
+}
+.data-updates .du-details {
+  border: 1px solid #e2e7f1;
+  border-radius: 10px;
+  padding: 13px;
+  background: #fafbfe;
+}
+.data-updates .du-details > small {
+  font-size: 10px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+  color: #677690;
+}
+.data-updates .du-details > a {
+  margin-top: 12px;
+}
+.data-updates .du-checks {
+  list-style: none;
+  display: grid;
+  gap: 11px;
+  margin: 15px 0;
+  padding: 0;
+}
+.data-updates .du-checks li {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+}
+.data-updates .du-checks svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.data-updates .du-checks p {
+  color: #64718a;
+  margin-top: 3px;
+  line-height: 1.5;
+}
+.data-updates .du-passed {
+  color: #247651;
+}
+.data-updates .du-warning {
+  color: #a06a1c;
+}
+.data-updates .du-validation details {
+  margin: 15px 0;
+}
+.data-updates .du-validation summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #5141a8;
+  font-weight: 600;
+}
+.data-updates .du-validation table small {
+  display: block;
+  max-width: 340px;
+  overflow-wrap: anywhere;
+  margin-top: 4px;
+  color: #68748c;
+}
+.data-updates .du-validation caption {
+  font-size: 12px;
+  text-align: left;
+  font-weight: 600;
+  color: #8a4038;
+  padding-top: 10px;
+}
+@media (max-width: 760px) {
+  .data-updates .du-metadata {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 15px;
+  }
+  .data-updates .du-history-head {
+    flex-wrap: wrap;
+  }
+  .data-updates .du-history-head .pill {
+    max-width: 100%;
+  }
+  .data-updates .du-settings .formgrid {
+    grid-template-columns: 1fr;
+  }
+  .data-updates .du-job .sectionhead {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .data-updates .du-actions > .primary {
+    width: 100%;
+  }
+  .data-updates .du-progress > div {
+    flex-wrap: wrap;
+  }
+  .data-updates .du-progress > div > b {
+    flex: 1;
+  }
+}
 @media (max-width: 760px) {
   .askbox textarea {
     height: 41px;

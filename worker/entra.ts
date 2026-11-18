@@ -2,7 +2,7 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 import { Buffer } from "node:buffer";
 import { type ModelConfig } from "../shared/domain";
 import { origin } from "./auth";
-import { audit, digest, fail, now, stmt, token, type DbUser, type Env } from "./core";
+import { audit, digest, fail, now, Problem, stmt, token, type DbUser, type Env } from "./core";
 const resource = "https://analysis.windows.net/powerbi/api/";
 const scope = "openid offline_access " + resource + "Dataset.Read.All";
 const redirect = (e: Env) => origin(e) + "/api/microsoft/callback";
@@ -12,6 +12,13 @@ type Tokens = {
   id_token?: string;
   expires_in: number;
 };
+export class MicrosoftProblem extends Problem {
+  constructor(readonly providerStatus: number, readonly providerCode: string) {
+    super(providerStatus === 429 ? 429 : 409,
+      "A Microsoft recusou a autorização. Verifique a credencial, o consentimento e o vínculo no Perfil.");
+  }
+}
+export type CallbackStage = { stage: string };
 async function exchange(e: Env, m: ModelConfig, params: Record<string, string>): Promise<Tokens> {
   if (!e.MS_CLIENT_SECRET) fail(503, "Cadastre o segredo do aplicativo Microsoft no Worker.");
   const res = await fetch("https://login.microsoftonline.com/" + m.tenant + "/oauth2/v2.0/token", {
@@ -23,11 +30,11 @@ async function exchange(e: Env, m: ModelConfig, params: Record<string, string>):
     }),
     signal: AbortSignal.timeout(15000),
   });
-  if (!res.ok)
-    fail(
-      res.status === 429 ? 429 : 409,
-      "A Microsoft recusou a autorização. Verifique a credencial, o consentimento e o vínculo no Perfil.",
-    );
+  if (!res.ok) {
+    const detail = await res.json<{ error?: unknown }>().catch(() => ({} as { error?: unknown }));
+    const code = typeof detail.error === "string" && /^[a-z_]{1,80}$/.test(detail.error) ? detail.error : "unknown";
+    throw new MicrosoftProblem(res.status, code);
+  }
   const v = await res.json<Tokens>();
   if (!v.access_token) fail(502, "Resposta Microsoft incompleta.");
   return v;
@@ -107,7 +114,9 @@ export async function finish(
   u: DbUser,
   session: string,
   url: URL,
+  diagnostic: CallbackStage = { stage: "state" },
 ) {
+  diagnostic.stage = "state";
   const state = url.searchParams.get("state") || "",
     code = url.searchParams.get("code");
   const row = await stmt(
@@ -119,7 +128,10 @@ export async function finish(
     rev,
     now(),
   ).first<{ verifier: string; nonce: string }>();
-  if (!row || !code || m.mode !== "delegated") fail(400, "Autorização expirada ou cancelada.");
+  if (!row || m.mode !== "delegated") fail(400, "Autorização expirada ou cancelada.");
+  diagnostic.stage = "authorization";
+  if (!code || url.searchParams.has("error")) fail(400, "Autorização expirada ou cancelada.");
+  diagnostic.stage = "exchange";
   const t = await exchange(e, m, {
     grant_type: "authorization_code",
     code,
@@ -127,6 +139,7 @@ export async function finish(
     code_verifier: row.verifier,
     scope,
   });
+  diagnostic.stage = "id_token";
   const jwks = createRemoteJWKSet(
     new URL("https://login.microsoftonline.com/" + m.tenant + "/discovery/v2.0/keys"),
   );
@@ -136,9 +149,14 @@ export async function finish(
     issuer: "https://login.microsoftonline.com/" + m.tenant + "/v2.0",
     audience: m.application,
     algorithms: ["RS256"],
+    requiredClaims: ["exp", "iat", "sub"],
   }).catch(() => fail(403, "Identidade Microsoft inválida."));
-  if (payload.oid !== u.entra_oid || payload.tid !== m.tenant || payload.nonce !== row.nonce)
+  diagnostic.stage = "nonce";
+  if (payload.nonce !== row.nonce) fail(403, "Identidade Microsoft inválida.");
+  diagnostic.stage = "identity";
+  if (!u.entra_oid || typeof payload.oid !== "string" || payload.oid.toLowerCase() !== u.entra_oid.toLowerCase() || payload.tid !== m.tenant)
     fail(403, "Esta identidade não corresponde ao cadastro.");
+  diagnostic.stage = "storage";
   const bundle = {
     access: t.access_token,
     refresh: t.refresh_token,
