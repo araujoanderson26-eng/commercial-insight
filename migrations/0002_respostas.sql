@@ -1,0 +1,2 @@
+ALTER TABLE turns ADD COLUMN answer TEXT;
+ALTER TABLE turns ADD COLUMN evidence_hash TEXT;
