@@ -2,7 +2,7 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
 
-  "name": "comercial-insight",
+  "name": "commercial-insight",
   "main": "worker/index.ts",
   "compatibility_date": "2026-11-18",
 
@@ -39,7 +39,7 @@
   ],
 
   "vars": {
-    "APP_ORIGIN": "https://comercialinsight.araujoempresarial.com.br",
+    "APP_ORIGIN": "https://commercial-insight.araujo-anderson26.workers.dev",
     "OPENAI_MODEL": "gpt-4.1-mini",
     "RETENTION_DAYS": "90"
   },
