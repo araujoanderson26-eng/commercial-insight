@@ -1,5 +1,6 @@
 import { fail, now, stmt, type Env } from "./core";
 import { controlledHmlAIRequest, controlledHmlAdminId, controlledHmlPolicy } from "./real-hml-policy";
+import { productionAIControlled, reserveProductionAI, finishProductionAI } from './production-ai-budget';
 
 // This allowance is deliberately cumulative across deployments and users. No automatic reset.
 // Preserve the credential diagnostic and six calls from the first run; allow four focused rechecks.
@@ -8,8 +9,9 @@ const hmlOrigin = "https://commercial-insight-hml.araujo-anderson26.workers.dev"
 const models = new Set(["gpt-4.1-mini", "gpt-4.1-mini-2025-04-14"]);
 const inputNanoUsd = 400, cachedInputNanoUsd = 100, outputNanoUsd = 1600;
 export const hmlOpenAIOutputLimit = 1200;
-export type OpenAIBudgetReservation = { id: string; inputTokens: number; nanoUsd: number; controlledReal?: true };
-type Outcome = {
+export type OpenAIBudgetReservation = { id: string; inputTokens: number; nanoUsd: number; controlledReal?: true;
+  production?: true; organizationId?: string; projectId?: string };
+export type Outcome = {
   status: "completed" | "http_error" | "transport_error" | "response_error";
   httpStatus?: number;
   requestId?: string | null;
@@ -18,7 +20,8 @@ type Outcome = {
   usage?: { input_tokens: number; output_tokens: number; input_tokens_details?: { cached_tokens?: number } };
 };
 const providerCodes = new Set(["insufficient_quota", "model_not_found", "invalid_json_schema", "invalid_api_key",
-  "rate_limit_exceeded", "access_terminated", "billing_hard_limit_reached", "unsupported_parameter", "invalid_parameter"]);
+  "rate_limit_exceeded", "access_terminated", "billing_hard_limit_reached", "unsupported_parameter", "invalid_parameter",
+  "credit_balance_exhausted", "organization_spend_limit_exceeded", "project_spend_limit_exceeded", "organization_usage_limit_exceeded"]);
 
 /** Only retain known diagnostic codes; never a provider message, key, request body or arbitrary string. */
 export async function hmlOpenAIErrorCode(response: Response) {
@@ -50,6 +53,7 @@ export function estimateHmlOpenAIRequest(body: string) {
 }
 
 export async function reserveHmlOpenAI(e: Env, body: string, purpose: string, actorId?: string): Promise<OpenAIBudgetReservation | null> {
+  if (productionAIControlled(e)) return reserveProductionAI(e,body,purpose,actorId);
   const policy = controlledHmlPolicy(e);
   if (e.HML_OPENAI_BUDGET_USD === undefined) {
     if (e.HML_SYNTHETIC_ONLY === "true" || e.APP_ORIGIN === hmlOrigin)
@@ -108,6 +112,7 @@ export async function controlledHmlModelPreflight(e:Env,actorId:string) {
 /** Keep the entire reservation after every outcome, including timeout or unknown usage. */
 export async function finishHmlOpenAI(e: Env, reservation: OpenAIBudgetReservation | null, outcome: Outcome) {
   if (!reservation) return;
+  if (reservation.production) return finishProductionAI(e,reservation,outcome);
   const usage = outcome.usage;
   const validUsage = usage && Number.isSafeInteger(usage.input_tokens) && usage.input_tokens >= 0
     && Number.isSafeInteger(usage.output_tokens) && usage.output_tokens >= 0;
