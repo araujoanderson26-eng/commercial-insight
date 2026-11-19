@@ -28,7 +28,8 @@
     "MANUAL_MAX_BYTES": "16777216",
     "MANUAL_D1_CAPACITY_BYTES": "134217728",
     "MANUAL_ALLOW_SYNTHETIC": "true",
-    "HML_SYNTHETIC_ONLY": "true"
+    "HML_SYNTHETIC_ONLY": "true",
+    "HML_OPENAI_BUDGET_USD": "0.10"
   },
   "observability": { "enabled": true, "traces": { "enabled": true, "head_sampling_rate": 0.01 }, "logs": { "enabled": true, "invocation_logs": false } },
   "triggers": { "crons": ["*/15 * * * *", "17 4 * * *"] }

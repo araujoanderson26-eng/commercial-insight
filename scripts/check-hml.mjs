@@ -5,6 +5,7 @@ const prod = parse(readFileSync("wrangler.jsonc", "utf8"));
 if (hml.name !== "commercial-insight-hml" || hml.name === prod.name) throw Error("Worker de homologação inválido.");
 if (hml.account_id !== "433083d760ae0e02f3962044e6f2152f") throw Error("Conta Cloudflare diferente da autorizada para a homologação.");
 if (hml.vars.HML_SYNTHETIC_ONLY !== "true" || hml.vars.MANUAL_ALLOW_SYNTHETIC !== "true") throw Error("A homologação inicial deve aceitar somente dados sintéticos.");
+if (hml.vars.HML_OPENAI_BUDGET_USD !== "0.10") throw Error("O ensaio OpenAI de homologação deve preservar o orçamento autorizado de US$ 0,10.");
 if (hml.d1_databases.length !== 1 || hml.d1_databases[0].database_name !== "commercial-insight-hml-db") throw Error("Banco fora da lista autorizada.");
 if (hml.r2_buckets.length !== 1 || hml.r2_buckets[0].bucket_name !== "commercial-insight-hml-arquivos") throw Error("Bucket fora da lista autorizada.");
 if (hml.queues.producers.length !== 1 || hml.queues.consumers.length !== 1 || [...hml.queues.producers,...hml.queues.consumers].some(binding=>binding.queue !== "commercial-insight-hml-jobs")) throw Error("Fila fora da lista autorizada.");

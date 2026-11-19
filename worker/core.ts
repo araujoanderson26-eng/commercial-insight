@@ -8,6 +8,7 @@ export interface Env extends CloudflareBindings {
   MAIL_FROM?: string;
   MANUAL_ALLOW_SYNTHETIC?: string;
   HML_SYNTHETIC_ONLY?: string;
+  HML_OPENAI_BUDGET_USD?: string;
 }
 export class Problem extends Error {
   constructor(

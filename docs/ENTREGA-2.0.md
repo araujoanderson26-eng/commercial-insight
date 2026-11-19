@@ -58,7 +58,7 @@ O primeiro ensaio de testes encontrou restrições de leitura do sandbox e depoi
 
 ## Limitações e aceite pendente
 
-1. **OpenAI real:** falta cadastrar a chave, autorizar a fonte e validar uma chamada real com saldo/modelo disponíveis. Os testes de provedor usam mocks; não comprovam conectividade ou cobrança da conta.
+1. **OpenAI real:** a chave foi cadastrada pelo titular e o primeiro ensaio real recebeu HTTP 401 `invalid_api_key`. A execução parou, restaurou a política de IA e manteve a reserva conservadora do orçamento de US$ 0,10. Faltam recadastro seguro de uma chave válida e teste bem-sucedido de modelo/uso. [Protocolo e evidência](HOMOLOGACAO-OPENAI.md).
 2. **Operação de homologação:** [ambiente isolado publicado](https://commercial-insight-hml.araujo-anderson26.workers.dev), após conferência financeira manual e autorização do titular; somente dados sintéticos. Resultados, acesso, limites, consumo observado e execução dos agendamentos estão em [Homologação](HOMOLOGACAO-EXECUCAO.md) e [Custos](HOMOLOGACAO-CUSTOS.md). A observação da limpeza diária e o aceite com dados reais continuam separados desta validação sintética.
 3. **Exemplo financeiro original:** janeiro–outubro de 2026 já foi conferido; ainda requer os demais filtros combinados, usuário/escopo e versão da tela observada. O diagnóstico privado registra exatamente os recortes reproduzidos.
 4. **Narrativa de IA:** guardas rejeitam números não sustentados e percentuais inválidos; não constituem prova formal de todas as associações e causas descritas pelo modelo. Gráficos/tabelas permanecem a evidência verificável; causas comerciais exigem confirmação.

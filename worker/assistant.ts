@@ -15,6 +15,7 @@ import {
   deltaTitle,
 } from "../shared/domain";
 import { fail, Problem, type Env } from "./core";
+import { finishHmlOpenAI, hmlOpenAIErrorCode, hmlOpenAIOutputLimit, reserveHmlOpenAI } from "./openai-budget";
 const str = { type: "string" };
 function shape(properties: Record<string, unknown>) {
   return {
@@ -57,27 +58,32 @@ async function structured(
   input: unknown,
 ) {
   if (!e.OPENAI_API_KEY) fail(409, "Cadastre a chave OpenAI no Worker para ativar o assistente.");
+  const requestBody = JSON.stringify({
+    model: e.OPENAI_MODEL,
+    store: false,
+    max_output_tokens: hmlOpenAIOutputLimit,
+    instructions,
+    input: JSON.stringify(input),
+    text: { format: { type: "json_schema", name, strict: true, schema } },
+  });
+  const reservation = await reserveHmlOpenAI(e, requestBody, name);
   let res: Response;
   try {
     res = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: { Authorization: "Bearer " + e.OPENAI_API_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: e.OPENAI_MODEL,
-      store: false,
-      max_output_tokens: 1200,
-      instructions,
-      input: JSON.stringify(input),
-      text: { format: { type: "json_schema", name, strict: true, schema } },
-    }),
+    body: requestBody,
     signal: AbortSignal.timeout(45000),
     });
   } catch (error) {
+    await finishHmlOpenAI(e, reservation, { status: "transport_error" });
     fail(error instanceof Error && /timeout|abort/i.test(error.name) ? 504 : 502,
       "Não foi possível conectar à OpenAI. Tente novamente em instantes; seus dados não foram alterados.");
   }
   if (!res.ok) {
-    await res.body?.cancel();
+    const providerCode = reservation ? await hmlOpenAIErrorCode(res) : null;
+    await finishHmlOpenAI(e, reservation, { status: "http_error", httpStatus: res.status, requestId: res.headers.get("x-request-id"), providerCode });
+    if (!reservation) await res.body?.cancel();
     fail(
       res.status === 429 ? 429 : [401, 403].includes(res.status) ? 409 : 502,
       res.status === 429 ? "A OpenAI atingiu o limite de uso. Aguarde e consulte o administrador sobre a cota."
@@ -85,7 +91,15 @@ async function structured(
         : "A OpenAI não concluiu a solicitação. Verifique modelo, cotas e credencial.",
     );
   }
-  const data = await readProviderResponse(res);
+  let data: Awaited<ReturnType<typeof readProviderResponse>>;
+  try {
+    data = await readProviderResponse(res);
+  } catch (error) {
+    await finishHmlOpenAI(e, reservation, { status: "response_error", httpStatus: res.status, requestId: res.headers.get("x-request-id") });
+    throw error;
+  }
+  await finishHmlOpenAI(e, reservation, { status: data.status === "completed" ? "completed" : "response_error",
+    httpStatus: res.status, requestId: res.headers.get("x-request-id"), model: data.model, usage: data.usage });
   if (data.status !== "completed")
     fail(502, "A resposta da IA ficou incompleta. Tente uma pergunta mais específica.");
   const value = data.output
@@ -120,7 +134,9 @@ async function readProviderResponse(response: Response) {
     // Never include transport diagnostics, request bodies or credentials in public errors.
     fail(502, "Não foi possível ler a resposta da OpenAI.");
   }
-  const schema = z.object({ status: z.string(), output: z.array(z.object({ type: z.string(),
+  const schema = z.object({ status: z.string(), model: z.string().max(160).optional(),
+    usage: z.object({ input_tokens: z.number().int().nonnegative(), output_tokens: z.number().int().nonnegative() }).optional(),
+    output: z.array(z.object({ type: z.string(),
     content: z.array(z.object({ type: z.string(), text: z.string().optional() })).optional(),
   })).optional() });
   try {

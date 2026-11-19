@@ -67,7 +67,7 @@ Os limites operacionais não são um teto financeiro global. Não houve contrata
 
 ## Próxima etapa: OpenAI
 
-O ambiente está preparado com `OPENAI_MODEL=gpt-4.1-mini`, mas **sem `OPENAI_API_KEY` e com IA desautorizada na fonte**. Os relatórios e as visitas determinísticas já funcionam sem o modelo.
+Na implantação inicial, o ambiente usava `OPENAI_MODEL=gpt-4.1-mini`, sem `OPENAI_API_KEY` e com IA desautorizada na fonte. Posteriormente, o titular cadastrou a chave exclusiva da homologação e autorizou um ensaio com orçamento inicial de **US$ 0,10**. O protocolo, a estimativa e os resultados estão em [Ensaio OpenAI](HOMOLOGACAO-OPENAI.md). Os relatórios e as visitas determinísticas funcionam sem o modelo.
 
 Na consulta de 19/11/2026, o [catálogo oficial do modelo](https://developers.openai.com/api/docs/models/gpt-4.1-mini) marca GPT-4.1 mini como descontinuado (`Deprecated`). Isso exige conferir a disponibilidade na conta e, se necessário, validar um modelo substituto compatível antes de ativar chamadas. Nenhuma disponibilidade foi presumida ou troca de modelo foi implantada nesta etapa.
 
