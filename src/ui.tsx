@@ -37,7 +37,8 @@ export const groupLabel = (group: Group, capabilities?: DataCapabilities) => cap
 export const metricLabel = (metric: Metric, capabilities?: DataCapabilities) => capabilities?.labels?.[metric] ?? metrics[metric].label;
 const reportMetricKeys = (report: Report) => (report.sourceInfo?.capabilities?.metrics ?? metricKeys.filter((metric) => metric !== "gross" || report.sourceInfo?.metrics?.gross?.status === "validated" || report.total.values.gross?.current != null || report.total.values.gross?.previous != null)).slice().sort((a, b) => ["revenue", "gross", "returns", "buyers", "margin"].indexOf(a) - ["revenue", "gross", "returns", "buyers", "margin"].indexOf(b));
 const pair = (row: Report["total"], metric: Metric) => row.values[metric] ?? { current: null, previous: null };
-export async function api<T>(path: string, method = "GET", payload?: unknown): Promise<T> {
+export const isAbortError = (error: unknown) => error !== null && typeof error === "object" && "name" in error && error.name === "AbortError";
+export async function api<T>(path: string, method = "GET", payload?: unknown, signal?: AbortSignal): Promise<T> {
   let response: Response;
   try {
     response = await fetch("/api/" + path, {
@@ -46,11 +47,16 @@ export async function api<T>(path: string, method = "GET", payload?: unknown): P
       cache: "no-store",
       headers: payload === undefined ? {} : { "Content-Type": "application/json" },
       body: payload === undefined ? undefined : JSON.stringify(payload),
+      signal,
     });
-  } catch {
+  } catch (error) {
+    if (signal?.aborted || isAbortError(error)) throw error;
     throw Error("Conexão indisponível. Conecte-se à internet e tente novamente.");
   }
-  const data = await response.json().catch(() => ({ error: "Resposta do servidor indisponível." }));
+  const data = await response.json().catch(error => {
+    if (signal?.aborted || isAbortError(error)) throw error;
+    return { error: "Resposta do servidor indisponível." };
+  });
   if (!response.ok) {
     if (response.status === 401 && !["auth/login", "me"].includes(path))
       window.dispatchEvent(new Event("session-ended"));

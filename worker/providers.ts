@@ -3,6 +3,7 @@ import type { CustomerDetails } from "../shared/commercial";
 import { query as powerBIQuery } from "./analysis";
 import { config, fail, required, type DbUser, type Env } from "./core";
 import { manualContext, manualCustomerDetails, manualSearch, queryManual, sourceSettings } from "./manual";
+import { assertControlledHmlAISource, assertControlledHmlUser, controlledHmlPolicy } from "./real-hml-policy";
 
 export interface DataProvider {
   sourceType: "manual" | "powerbi";
@@ -15,6 +16,7 @@ export interface DataProvider {
 
 /** Re-read policy at each outbound AI boundary; the data snapshot stays pinned. */
 export async function assertAssistantAccess(env: Env, provider: DataProvider) {
+  await assertControlledHmlAISource(env);
   const allowed = provider.sourceType === "manual"
     ? (await sourceSettings(env)).allowAI
     : (await config(env)).model?.allowAI;
@@ -73,7 +75,9 @@ export async function resolvePlanEntities(provider: DataProvider, plan: Plan, ac
 /** Resolve once per request so totals, charts and AI all use one immutable snapshot. */
 export async function dataProvider(env: Env, model: ModelConfig | null, revision: number, user: DbUser,
   historical?: { sourceType: "manual" | "powerbi"; versionId: string | null }): Promise<DataProvider> {
+  assertControlledHmlUser(env,user.id);
   const settings = await sourceSettings(env);
+  if (controlledHmlPolicy(env) && (historical?.sourceType ?? settings.source) !== "manual") fail(403,"Esta validação usa somente o snapshot manual autorizado.");
   if ((historical?.sourceType ?? settings.source) === "powerbi")
     return new PowerBIProvider(env, model, revision, user);
   const context = await manualContext(env, historical?.versionId ?? undefined);

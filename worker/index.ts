@@ -6,6 +6,9 @@ import { dataStatus, manualRoute, processManualJobs, processManualQueue, type Ma
 import { comment, commentaryGrounded, factualCommentary, interpret } from "./assistant";
 import { assistantStatus, isVisitRequest, prepareVisit } from "./commercial";
 import { authenticate, authRoute, origin } from "./auth";
+import { assertControlledHmlUser } from "./real-hml-policy";
+import { controlledHmlModelPreflight } from "./openai-budget";
+import { classifyWorkerError, classifyWorkerErrorDetail } from "./error-diagnostics";
 import {
   audit,
   body,
@@ -55,6 +58,8 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
   const { user: u, hash } = await authenticate(e, req),
     { model, revision } = await config(e);
   const owner = u.id;
+  if (p !== "/auth/profile") assertControlledHmlUser(e, owner);
+  if (p === "/hml-real/preflight" && method === "GET") return json(await controlledHmlModelPreflight(e,owner));
   if (p === "/me" && method === "GET") {
     const data = await dataStatus(e);
     const linked = await stmt(
@@ -310,7 +315,9 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
             actions: [],
           };
     const hadVisit = Boolean(commentary.visit);
-    if (!commentaryGrounded(commentary, report)) commentary = factualCommentary(report);
+    // Computed fallback text is rebuilt with current presentation rules; saved evidence stays immutable.
+    if ((typeof commentary.summary === "string" && commentary.summary.startsWith("Fato verificado:"))
+      || !commentaryGrounded(commentary, report)) commentary = factualCommentary(report);
     // Recompute saved briefings against the pinned source and current ACL; never return cached customer details directly.
     const visit = same && hadVisit ? await prepareVisit(provider, report.plan.filters) : undefined;
     delete commentary.visit;
@@ -359,7 +366,7 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
       : [];
     await checkAccess(e, u, revision, hash);
     await assertAssistantAccess(e, provider);
-    const interpreted = await interpret(e, provider.semantics, v.question, v.filters, previous);
+    const interpreted = await interpret(e, provider.semantics, v.question, v.filters, previous, owner);
     const plan = await resolvePlanEntities(provider, interpreted, v.filters);
     const visitRequested = isVisitRequest(v.question);
     if (visitRequested && !plan.filters.client) fail(422, "Selecione um cliente ou informe seu código/nome para preparar a visita. Cadastros semelhantes exigem a escolha do código correto.");
@@ -367,7 +374,7 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
     const visit = visitRequested ? await prepareVisit(provider, plan.filters) : undefined;
     await checkAccess(e, u, revision, hash);
     await assertAssistantAccess(e, provider);
-    const commentary = await comment(e, v.question, report).catch(() => ({
+    const commentary = await comment(e, v.question, report, owner).catch(() => ({
       summary:
         "Os indicadores foram consultados na fonte identificada. A interpretação da OpenAI está temporariamente indisponível.",
       actions: [],
@@ -454,7 +461,9 @@ export default {
           type: err instanceof Error ? err.name : "unknown",
         }),
       );
-      return json({ error: "Não foi possível concluir a operação." }, 500);
+      const diagnostic: HeadersInit = e.APP_ORIGIN === "https://commercial-insight-hml.araujo-anderson26.workers.dev"
+        && e.HML_REAL_DATA_AUTHORIZATION !== undefined ? { "X-Hml-Diagnostic": classifyWorkerError(err), "X-Hml-Diagnostic-Detail": classifyWorkerErrorDetail(err) } : {};
+      return json({ error: "Não foi possível concluir a operação." }, 500, diagnostic);
     }
   },
   async scheduled(event: ScheduledController, e: Env) {

@@ -16,6 +16,7 @@ import {
 } from "../shared/domain";
 import { fail, Problem, type Env } from "./core";
 import { finishHmlOpenAI, hmlOpenAIErrorCode, hmlOpenAIOutputLimit, reserveHmlOpenAI } from "./openai-budget";
+import { controlledHmlPlan, controlledHmlPolicy, minimizeControlledHmlInput, restoreControlledHmlAliases } from "./real-hml-policy";
 const str = { type: "string" };
 function shape(properties: Record<string, unknown>) {
   return {
@@ -50,23 +51,19 @@ function stateMention(question: string) {
   if (matches.length > 1) fail(422, "A pergunta menciona mais de uma UF. Selecione um estado ou compare pelo agrupamento UF sem filtro único.");
   return matches[0]?.[0];
 }
-async function structured(
-  e: Env,
-  name: string,
-  schema: unknown,
-  instructions: string,
-  input: unknown,
-) {
-  if (!e.OPENAI_API_KEY) fail(409, "Cadastre a chave OpenAI no Worker para ativar o assistente.");
-  const requestBody = JSON.stringify({
+export function buildStructuredOpenAIRequest(e: Env,name: string,schema: unknown,instructions: string,input: unknown,actorId?: string) {
+  return JSON.stringify({
     model: e.OPENAI_MODEL,
     store: false,
     max_output_tokens: hmlOpenAIOutputLimit,
-    instructions,
-    input: JSON.stringify(input),
+    instructions: instructions + (controlledHmlPolicy(e) ? " O recorte autorizado é fixo: janeiro a outubro de 2026, comparado aos mesmos meses de 2025. Não amplie o período nem troque os códigos do filtro. CARTEIRA_AUTORIZADA é um identificador opaco de escopo; preserve-o." : ""),
+    input: JSON.stringify(minimizeControlledHmlInput(e,name,input,actorId)),
     text: { format: { type: "json_schema", name, strict: true, schema } },
   });
-  const reservation = await reserveHmlOpenAI(e, requestBody, name);
+}
+async function structuredBody(e: Env,name: string,requestBody: string,actorId?: string) {
+  if (!e.OPENAI_API_KEY) fail(409, "Cadastre a chave OpenAI no Worker para ativar o assistente.");
+  const reservation = await reserveHmlOpenAI(e, requestBody, name, actorId);
   let res: Response;
   try {
     res = await fetch("https://api.openai.com/v1/responses", {
@@ -93,7 +90,7 @@ async function structured(
   }
   let data: Awaited<ReturnType<typeof readProviderResponse>>;
   try {
-    data = await readProviderResponse(res);
+    data = await readProviderResponse(res, reservation?.controlledReal === true);
   } catch (error) {
     await finishHmlOpenAI(e, reservation, { status: "response_error", httpStatus: res.status, requestId: res.headers.get("x-request-id") });
     throw error;
@@ -113,7 +110,7 @@ async function structured(
   }
 }
 
-async function readProviderResponse(response: Response) {
+async function readProviderResponse(response: Response, recordCache = false) {
   const reader = response.body?.getReader();
   if (!reader) fail(502, "A OpenAI retornou uma resposta vazia.");
   const chunks: Uint8Array[] = [];
@@ -134,8 +131,13 @@ async function readProviderResponse(response: Response) {
     // Never include transport diagnostics, request bodies or credentials in public errors.
     fail(502, "Não foi possível ler a resposta da OpenAI.");
   }
+  const baseUsageSchema = z.object({ input_tokens: z.number().int().nonnegative(), output_tokens: z.number().int().nonnegative() });
+  const usageSchema = recordCache ? baseUsageSchema.extend({
+    input_tokens_details: z.object({ cached_tokens: z.number().int().nonnegative().optional() }).optional(),
+  }).refine(usage => usage.input_tokens_details?.cached_tokens === undefined
+    || usage.input_tokens_details.cached_tokens <= usage.input_tokens) : baseUsageSchema;
   const schema = z.object({ status: z.string(), model: z.string().max(160).optional(),
-    usage: z.object({ input_tokens: z.number().int().nonnegative(), output_tokens: z.number().int().nonnegative() }).optional(),
+    usage: usageSchema.optional(),
     output: z.array(z.object({ type: z.string(),
     content: z.array(z.object({ type: z.string(), text: z.string().optional() })).optional(),
   })).optional() });
@@ -157,12 +159,13 @@ export function conversationContext(prior: { question: string; plan: string }[])
   }
   return valid;
 }
-export async function interpret(
+export function buildInterpretOpenAIRequest(
   e: Env,
   m: Pick<ModelConfig, "allowAI" | "measures"> & { capabilities?: DataCapabilities },
   question: string,
   filters: Filters,
   prior: { question: string; plan: string }[],
+  actorId?: string,
 ) {
   if (!m.allowAI) fail(409, "A análise com OpenAI precisa ser habilitada pelo administrador.");
   const allowed = Object.entries(m.measures)
@@ -181,7 +184,7 @@ export async function interpret(
       ...Object.fromEntries((m.capabilities?.filters ?? []).filter(k => !["region", "client", "product"].includes(k)).map(k => [k,str])),
     }),
   });
-  const result = await structured(
+  return buildStructuredOpenAIRequest(
     e,
     "plano_comercial",
     schema,
@@ -194,7 +197,19 @@ export async function interpret(
       measures: allowed,
       dimensions: m.capabilities,
     },
+    actorId,
   );
+}
+export async function interpret(
+  e: Env,
+  m: Pick<ModelConfig, "allowAI" | "measures"> & { capabilities?: DataCapabilities },
+  question: string,
+  filters: Filters,
+  prior: { question: string; plan: string }[],
+  actorId?: string,
+) {
+  const context = conversationContext(prior);
+  const result = await structuredBody(e,"plano_comercial",buildInterpretOpenAIRequest(e,m,question,filters,prior,actorId),actorId);
   if (result.supported !== true)
     fail(
       422,
@@ -204,7 +219,7 @@ export async function interpret(
     group: result.group,
     order: result.order,
     metric: result.metric,
-    filters: result.filters,
+    filters: restoreControlledHmlAliases(e,result.filters),
   });
   if (!plan.success)
     fail(422, "O recorte solicitado precisa de um período entre 1 e 24 meses completos.");
@@ -232,12 +247,12 @@ export async function interpret(
       fail(422, "Altere o filtro ativo para analisar outra entidade.");
     if (filters[k]) plan.data.filters[k] = filters[k];
   }
+  plan.data.filters=controlledHmlPlan(e,question,actorId,plan.data.filters);
   return plan.data;
 }
-export async function comment(e: Env, question: string, r: Report): Promise<Commentary> {
-  if (nonAdditiveBreakdownDiff(r)) return factualCommentary(r);
+export function buildCommentOpenAIRequest(e:Env,question:string,r:Report,actorId?:string) {
   const schema = shape({ summary: str, actions: { type: "array", items: str } });
-  const v = await structured(
+  return buildStructuredOpenAIRequest(
     e,
     "leitura_comercial",
     schema,
@@ -250,12 +265,17 @@ export async function comment(e: Env, question: string, r: Report): Promise<Comm
       ranking: r.plan,
       metricLabels: Object.fromEntries(metricKeys.map(metric => [metric, metrics[metric].label])),
       totals: r.total.values,
-      rows: r.rows.slice(0, 12).map((row) => ({ name: row.name, ...row.values[r.plan.metric] })),
+      rows: r.rows.slice(0, 12).map((row) => ({ name: row.name, ...(controlledHmlPolicy(e)?{key:row.key}:{}), ...row.values[r.plan.metric] })),
       comparison: r.comparison,
       warnings: r.warnings,
       limited: r.truncated || r.rows.length > 12,
     },
+    actorId,
   );
+}
+export async function comment(e: Env, question: string, r: Report, actorId?:string): Promise<Commentary> {
+  if (nonAdditiveBreakdownDiff(r)) return factualCommentary(r);
+  const v = await structuredBody(e,"leitura_comercial",buildCommentOpenAIRequest(e,question,r,actorId),actorId);
   const validated = z
     .object({ summary: z.string().max(2500), actions: z.array(z.string().max(700)).max(8) })
     .parse(v);
@@ -365,10 +385,32 @@ export function commentaryGrounded(commentary: Commentary, report: Report) {
 export function factualCommentary(report: Report): Commentary {
   const metric = report.plan.metric;
   const pair = report.total.values[metric];
-  const compare = pair.previous === null ? "Valor anterior indisponível."
-    : `Período equivalente anterior: ${pretty(pair.previous, metric)}. ${deltaTitle(change(pair, metric), metric)}.`;
+  const value = (number: number | null, key: typeof metric) => number === null ? "indisponível" : pretty(number,key);
+  const absolute = pair.current !== null && pair.previous !== null ? pair.current-pair.previous : null;
+  const percent = change(pair,metric);
+  const variation = percent !== null ? `Variação: ${deltaTitle(percent,metric)}.`
+    : pair.current === null || pair.previous === null ? "Variação percentual indisponível: falta valor em um dos períodos."
+    : pair.previous === 0 ? "Variação percentual não calculada porque a base anterior é zero."
+    : "Variação percentual não calculada porque a base anterior é negativa.";
   const period = report.comparison?.current;
+  const previousPeriod = report.comparison?.previous;
+  const compare = `Período equivalente anterior${previousPeriod ? " ("+previousPeriod.from+" a "+previousPeriod.to+")" : ""}: ${value(pair.previous,metric)}. Diferença absoluta: ${metric==="margin"?deltaTitle(absolute,metric):value(absolute,metric)}. ${variation}`;
+  const components = metric === "revenue" ? (["gross","returns"] as const).map(key=>
+    `${metrics[key].label}: atual ${value(report.total.values[key].current,key)}; anterior ${value(report.total.values[key].previous,key)}.`).join(" ") : "";
+  const ranking = (report.plan.group === "client" || report.plan.group === "product") && report.plan.order === "decline";
+  const declines = ranking ? report.rows.flatMap(row=>{
+    const values=row.values[metric];
+    if(values.current===null||values.previous===null||values.current>=values.previous)return [];
+    const name=row.name===row.key&&row.description?row.name+" — "+row.description:row.name;
+    const label=row.key&&name!==row.key&&!name.startsWith(row.key+" — ")?row.key+" — "+name:name;
+    return [{label,current:values.current,previous:values.previous,difference:values.current-values.previous}];
+  }).sort((a,b)=>a.difference-b.difference||a.label.localeCompare(b.label,"pt-BR")).slice(0,3) : [];
+  const detail = !ranking ? "" : declines.length ? "Quedas observadas nas linhas exibidas: "+declines.map(row=>
+    `${row.label}: atual ${value(row.current,metric)}, anterior ${value(row.previous,metric)}, diferença absoluta ${value(row.difference,metric)}`).join("; ")+"."
+    : "Nas linhas exibidas não há quedas com valores atuais e anteriores comparáveis; isso não comprova perdas de clientes ou produtos fora do ranking.";
+  const nonAdditive = report.warnings?.some(warning=>/muitos.para.muitos|nao some/iu.test(folded(warning)))
+    ? "Linhas e total têm contextos próprios e podem ser não aditivos; não some as quedas para explicar o total." : "";
   const active = filterDimensions.filter(dimension => report.plan.filters[dimension]).map(dimension => `${dimension}: ${report.plan.filters[dimension]}`).join("; ");
-  return { summary: `Fato verificado: ${metrics[metric].label} de ${pretty(pair.current, metric)} entre ${period?.from ?? report.plan.filters.from} e ${period?.to ?? report.plan.filters.to}. ${compare} Fonte: ${report.source}.${report.sourceInfo ? " Base extraída em " + report.sourceInfo.extractedAt + "." : ""}${active ? " Filtros: " + active + "." : ""}${report.truncated ? " Ranking limitado aos primeiros 30 resultados." : ""}${report.comparison?.reason ? " " + report.comparison.reason : ""} A interpretação automática não foi aproveitada; causas comerciais precisam ser confirmadas.`,
-    actions: ["Revisar os clientes e produtos do recorte autorizado antes de definir as próximas ações."] };
+  return { summary: `Fato verificado: ${metric==="revenue"?"Faturamento líquido":metrics[metric].label} de ${value(pair.current,metric)} entre ${period?.from ?? report.plan.filters.from} e ${period?.to ?? report.plan.filters.to}. ${compare}${components ? " "+components : ""}${detail ? " "+detail : ""}${nonAdditive ? " "+nonAdditive : ""} Fonte: ${report.source}.${report.sourceInfo ? " Base extraída em " + report.sourceInfo.extractedAt + "." : ""}${active ? " Filtros: " + active + "." : ""}${report.truncated ? " Ranking limitado aos primeiros 30 resultados; a lista de quedas usa somente as linhas exibidas." : ""}${report.comparison?.reason ? " " + report.comparison.reason : ""} Resumo factual automático calculado pela aplicação. A interpretação automática não foi aproveitada; causas comerciais precisam ser confirmadas.`,
+    actions: [declines.length ? "Revisar os itens destacados no recorte autorizado e confirmar as causas antes de definir ações comerciais." : "Revisar os clientes e produtos do recorte autorizado antes de definir as próximas ações."] };
 }

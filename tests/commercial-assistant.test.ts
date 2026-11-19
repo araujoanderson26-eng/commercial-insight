@@ -177,6 +177,42 @@ test("divergência de agrupamento M:M usa fatos calculados sem pagar chamada de 
   assert.equal(fetch.mock.callCount(), 0);
 });
 
+test("resumo factual de líquido decompõe bruto/devoluções e informa comparação absoluta e percentual válida",()=>{
+  const r=report({...plan,filters:{...plan.filters}});r.comparison={current:{from:"2026-01-01",to:"2026-03-31"},previous:{from:"2025-01-01",to:"2025-03-31"},status:"comparable"};
+  r.plan.filters.client="0001";
+  const result=factualCommentary(r);
+  assert.match(result.summary,/^Fato verificado:/);
+  assert.match(result.summary,/Faturamento líquido[^.]*70,00/);
+  assert.match(result.summary,/Faturamento bruto[^.]*80,00[^.]*135,00/);
+  assert.match(result.summary,/Devoluções[^.]*10,00[^.]*5,00/);
+  assert.match(result.summary,/Diferença absoluta[^.]*60,00/);assert.match(result.summary,/-46,15%/);
+  assert.match(result.summary,/2025-01-01 a 2025-03-31/);assert.match(result.summary,/2026-11-18T12:00:00Z/);
+  assert.match(result.summary,/client: 0001/);assert.match(result.summary,/Resumo factual automático calculado pela aplicação/);
+  assert.equal(commentaryGrounded(result,r),true);
+  for(const previous of [0,-50,null]){
+    r.total.values.revenue.previous=previous;
+    const summary=factualCommentary(r).summary;
+    assert.doesNotMatch(summary,/%/);
+    assert.match(summary,previous===0?/base anterior é zero/:previous===null?/falta valor/:/base anterior é negativa/);
+  }
+});
+
+test("resumo de quedas cita até três itens efetivamente menores sem inferir causas ou somar atribuições M:M",()=>{
+  for(const group of ["client","product"] as const){
+    const r=report({...plan,group,order:"decline"});
+    r.rows=[row("Menor",90,100),{...row("Descrição autorizada",10,100),key:"0002"},row("Terceiro",40,100),
+      row("Quarto",50,100),row("Cresceu",200,100),row("Sem comparação",null,300)];
+    r.warnings=["Os relacionamentos muitos-para-muitos podem atribuir valores a mais de um grupo. Não some as linhas."];r.truncated=true;
+    const result=factualCommentary(r);
+    assert.match(result.summary,/0002 — Descrição autorizada: atual[^.]*10,00[^.]*100,00[^.]*90,00/);
+    assert.match(result.summary,/Terceiro: atual/);assert.match(result.summary,/Quarto: atual/);
+    assert.doesNotMatch(result.summary,/Menor: atual|Cresceu: atual|Sem comparação: atual/);
+    assert.ok(result.summary.indexOf("0002 —")<result.summary.indexOf("Terceiro: atual"));
+    assert.match(result.summary,/não some as quedas para explicar o total/);assert.match(result.summary,/somente as linhas exibidas/);
+    assert.match(result.summary,/causas comerciais precisam ser confirmadas/);assert.equal(commentaryGrounded(result,r),true);
+  }
+});
+
 test("comentário aceita formatos monetários válidos e rejeita números ou percentuais inventados", async t => {
   const r = report(plan);
   assert.equal(commentaryGrounded({ summary: "Faturamento de R$ 70,00 ante R$ 130,00; queda de 46,15%.", actions: [] }, r), true);

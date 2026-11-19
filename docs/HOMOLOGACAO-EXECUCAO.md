@@ -1,5 +1,7 @@
 # Commercial Insight 2.0 — Homologação isolada
 
+O registro abaixo descreve o provisionamento e os testes sintéticos iniciais. A etapa posterior, com migrações aditivas `0008`/`0009`, autorização temporária para dados reais e encerramento, está em [Homologação real](HOMOLOGACAO-REAL.md).
+
 Estado em 19/11/2026. O titular conferiu manualmente **Workers Paid**, **R2 Paid** e **US$ 0 de consumo faturável adicional no período consultado**, dispensou repetir a checagem por Billing Read e autorizou criar os três recursos e implantar somente o Worker de homologação. Essa é a origem da conferência financeira; não é uma atestação de Billing API nem garantia de franquias ilimitadas.
 
 ## Ambiente efetivamente criado

@@ -1,5 +1,7 @@
 # OpenAI — ensaio autorizado de homologação
 
+Este documento conserva a etapa sintética. A etapa posterior com autorização específica para dados reais, o consumo cumulativo atualizado e as limitações de aceite estão em [Homologação real](HOMOLOGACAO-REAL.md).
+
 Em 19/11/2026, o titular definiu **US$ 0,10** como orçamento inicial e informou ter cadastrado `OPENAI_API_KEY` exclusivamente em `commercial-insight-hml`. A conexão confirmou somente o nome do secret; seu conteúdo não foi lido, copiado ou incluído em arquivos. A implantação e os dados de produção permanecem fora deste ensaio.
 
 ## Estimativa anterior às chamadas

@@ -100,6 +100,12 @@ try {
   await page.emulateMedia({ media: "print" });
   await expect(page.locator(".sidebar")).not.toBeVisible();
   await expect(page.locator(".visit-selector")).not.toBeVisible();
+  await page.evaluate(() => new Promise<void>(done => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+  await expect.poll(() => page.locator(".content").evaluate(element => element.getBoundingClientRect().width)).toBeLessThanOrEqual(182 / 25.4 * 96 + 1);
+  await expect.poll(() => page.locator(".chart").evaluateAll(elements => elements.every(element => {
+    const svg = element.querySelector("svg"), width = svg?.getBoundingClientRect().width ?? 0;
+    return width > 0 && width <= element.clientWidth + 1;
+  }))).toBe(true);
   await page.pdf({ path: resolve(artifact, "visita-sintetica.pdf"), format: "A4", printBackground: true });
   await page.emulateMedia({ media: "screen" });
   await page.setViewportSize({ width: 390, height: 844 });

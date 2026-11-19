@@ -1,5 +1,7 @@
 # Commercial Insight 2.0 — Entrega para revisão
 
+Atualização de aceite: a etapa controlada com dados reais e seu parecer de prontidão estão em [Homologação real](HOMOLOGACAO-REAL.md). Os resultados iniciais abaixo não constituem autorização para substituir produção.
+
 Desenvolvido por Anderson de Araujo. Estado em 19/11/2026. Branch `feat/commercial-insight-2`, baseada no merge do PR #1. **Produção e PBIX original não foram alterados nesta evolução.**
 
 ## Diagnóstico e correções

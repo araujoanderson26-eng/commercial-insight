@@ -353,15 +353,33 @@ export async function nativeOptions(e:Env,u:DbUser,filters:Filters,m:ManualManif
 }
 export function compileNativeOptions(version:string,context:NativeContext,groups:readonly Exclude<Group,"month">[]):Sql{
   if(groups.length===0)throw Error("Nenhuma dimensão de opções foi solicitada.");
-  const base=compileNativeContexts(version,[context],true),prefix=base.sql.slice(0,base.sql.lastIndexOf("\nSELECT c.k,c.name,")),tails:string[]=[],selects:string[]=[];
+  const base=compileNativeContexts(version,[context],true),tails:string[]=[],selects:string[]=[];
+  // Options need membership and display names, never fact amounts or fact multiplicity.
+  // Keep the existing date/ACL graph, then materialize only the necessary distinct tuples.
+  // In particular, geographic membership must not re-run correlated joins for every fact.
+  const names=(["client","product","category","state"] as const).map(field=>"MIN(json_extract(s.display,'$."+field+"')) AS "+field+"_name").join(",");
+  let prefix=base.sql.slice(0,base.sql.indexOf(",\nsale_totals AS"));
+  prefix=prefix.replace(/visible_sales AS \(SELECT s\.\* FROM sales0 s([\s\S]*?)\),\nsales_client_keys/,(_,tail:string)=>"visible_sales AS MATERIALIZED (SELECT s.k,s.client,s.product,s.category,s.state,"+names+" FROM sales0 s"+tail+" GROUP BY s.k,s.client,s.product,s.category,s.state),\nsales_client_keys");
+  prefix=prefix.replace("visible_returns AS (SELECT c.k,r.row_no,r.client,r.state,r.amount","visible_returns AS MATERIALIZED (SELECT DISTINCT c.k,r.client,r.state");
+  prefix+=",o_sales_clients AS MATERIALIZED (SELECT DISTINCT k,client,state FROM visible_sales)";
   for(const [index,group]of groups.entries()){
-    const compiled=compileNativeGroups(version,[context],group,true),split=compiled.sql.lastIndexOf(" SELECT MIN(name) AS name FROM "),rename=(sql:string)=>sql.replace(/\bg_/g,"o"+index+"_");
-    tails.push(rename(compiled.sql.slice(prefix.length,split)));selects.push("SELECT '"+group+"' AS dimension,name FROM ("+rename(compiled.sql.slice(split+1))+")");
+    const p="o"+index;let values:string;
+    if(group==="client"||group==="product"||group==="category"||group==="state")values="SELECT "+group+" AS g,"+group+"_name AS name FROM visible_sales";
+    else if(group==="region"){
+      tails.push(","+p+"_activity_keys AS MATERIALIZED (SELECT k,client FROM visible_sales UNION SELECT k,client FROM visible_returns)");
+      values="SELECT b.representative AS g,json_extract(b.display,'$.representative') AS name FROM customer0 b JOIN "+p+"_activity_keys a ON a.k=b.k AND a.client IS b.client";
+    }else if(group==="regional"||group==="manager"){
+      tails.push(","+p+"_sales AS MATERIALIZED (SELECT DISTINCT s.k,s.client,r."+group+" AS g,json_extract(r.display,'$."+group+"') AS name FROM o_sales_clients s JOIN ctx c ON c.k=s.k LEFT JOIN regions r ON r.state IS s.state WHERE c.has_representative=0 OR EXISTS(SELECT 1 FROM customer0 b LEFT JOIN regions rb ON rb.state IS b.state WHERE b.k=s.k AND b.client IS s.client AND rb."+group+" IS r."+group+"))");
+      tails.push(","+p+"_clients AS MATERIALIZED (SELECT DISTINCT b.k,rg."+group+" AS g,b.client FROM customer0 b JOIN visible_customers v ON v.k=b.k AND v.client IS b.client JOIN ctx c ON c.k=b.k LEFT JOIN regions rg ON rg.state IS b.state WHERE c.has_sales=0 OR EXISTS(SELECT 1 FROM "+p+"_sales s WHERE s.k=b.k AND s.g IS rg."+group+" AND s.client IS b.client))");
+      tails.push(","+p+"_returns AS (SELECT r.k,rg."+group+" AS g,json_extract(rg.display,'$."+group+"') AS name FROM visible_returns r JOIN ctx c ON c.k=r.k LEFT JOIN regions rg ON rg.state IS r.state WHERE(c.has_representative=0 AND c.has_sales=0) OR EXISTS(SELECT 1 FROM "+p+"_clients gc WHERE gc.k=r.k AND gc.g IS rg."+group+" AND gc.client IS r.client))");
+      values="SELECT g,name FROM "+p+"_sales UNION ALL SELECT g,name FROM "+p+"_returns";
+    }else throw Error("Agrupamento não suportado pelo contrato.");
+    selects.push("SELECT '"+group+"' AS dimension,name FROM (SELECT MIN(name) AS name FROM ("+values+") WHERE g IS NOT NULL GROUP BY g ORDER BY MIN(name) LIMIT 251)");
   }
   // D1 limits each compound SELECT to five terms, unlike desktop SQLite's default 500.
   // Nest binary compounds so all dimensions still share this one scoped CTE evaluation.
   const compound=(parts:string[]):string=>parts.length===1?parts[0]:"SELECT * FROM ("+compound(parts.slice(0,Math.ceil(parts.length/2)))+") UNION ALL SELECT * FROM ("+compound(parts.slice(Math.ceil(parts.length/2)))+")";
-  return {sql:(prefix+tails.join("")+" "+compound(selects)).replace("visible_sales AS (","visible_sales AS NOT MATERIALIZED ("),args:base.args};
+  return {sql:prefix+tails.join("")+" "+compound(selects),args:base.args};
 }
 export const nativeStorageTables=Object.values(nativeTables);
 export async function validateNativeStorage(e:Env,m:ManualManifest,version:string){

@@ -9,6 +9,7 @@ import { filters, makeStore, plan } from "./fixtures";
 function store() {
   const value = makeStore();
   value.sql.exec(readFileSync(new URL("../migrations/0007_hml_openai_budget.sql", import.meta.url), "utf8"));
+  value.sql.exec(readFileSync(new URL("../migrations/0009_hml_openai_cache_usage.sql", import.meta.url), "utf8"));
   Object.assign(value.env, { HML_OPENAI_BUDGET_USD: "0.10", HML_SYNTHETIC_ONLY: "true",
     APP_ORIGIN: "https://commercial-insight-hml.araujo-anderson26.workers.dev", OPENAI_MODEL: "gpt-4.1-mini" });
   return value;
@@ -110,4 +111,23 @@ test("usage acima da reserva ou modelo inesperado impedem chamadas seguintes", a
   await finishHmlOpenAI(env, reservation, { status: "completed", model: "unexpected-model", usage: { input_tokens: 1, output_tokens: 1 } });
   assert.equal(sql.prepare("SELECT status FROM hml_openai_attempts").get()!.status, "model_mismatch");
   await assert.rejects(reserveHmlOpenAI(env, "{}", "plano_comercial"), error => error instanceof Problem && error.status === 429);
+});
+
+test("cache observado desconta somente o custo real estimado e mantém reserva integral sem reescrever histórico", async t => {
+  const { env, sql } = store(); t.after(() => sql.close());
+  const reservation = (await reserveHmlOpenAI(env,"{}","plano_comercial"))!;
+  const realReservation = {...reservation,controlledReal:true as const};
+  for (const cached of [0,1000,undefined,2001]) {
+    await finishHmlOpenAI(env,realReservation,{status:"completed",model:env.OPENAI_MODEL,
+      usage:{input_tokens:2000,output_tokens:100,...(cached===undefined?{}:{input_tokens_details:{cached_tokens:cached}})}});
+    const row=sql.prepare("SELECT reserved_nano_usd,actual_nano_usd,cached_input_tokens FROM hml_openai_attempts WHERE id=?").get(reservation.id)!;
+    const known=cached!==undefined&&cached<=2000;
+    assert.equal(row.cached_input_tokens,known?cached:null);
+    assert.equal(row.actual_nano_usd,known?(2000-cached)*400+cached*100+100*1600:2000*400+100*1600);
+    assert.equal(row.reserved_nano_usd,reservation.nanoUsd);
+  }
+  const historical=(await reserveHmlOpenAI(env,"{}","leitura_comercial"))!;
+  await finishHmlOpenAI(env,historical,{status:"completed",model:env.OPENAI_MODEL,usage:{input_tokens:1000,output_tokens:100,input_tokens_details:{cached_tokens:500}}});
+  const old=sql.prepare("SELECT actual_nano_usd,cached_input_tokens FROM hml_openai_attempts WHERE id=?").get(historical.id)!;
+  assert.equal(old.cached_input_tokens,null);assert.equal(old.actual_nano_usd,1000*400+100*1600);
 });

@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import {manifestSchema,type ControlFilters} from "../shared/manual";
 import type {DbUser} from "../worker/core";
 import {dataStatus,manualContext,manualOptions,manualRoute,processManualJobs,processManualQueue,queryManual,type ManualJob} from "../worker/manual";
-import {compileNativeGroups,nativeKey,nativePartStatements,nativeValues,queryNative,validateNativeModel} from "../worker/native-model";
+import {compileNativeGroups,compileNativeOptions,nativeKey,nativePartStatements,nativeValues,queryNative,validateNativeModel,type NativeContext} from "../worker/native-model";
 import {makeStore,plan} from "./fixtures";
-import {fakeR2} from "./manual-fixtures";
+import {fakeR2,fixturePackage} from "./manual-fixtures";
 import {nativeFixture,nativeRows,type NativeRows} from "./native-fixtures";
 
 const admin:DbUser={id:"native-admin",name:"Administrador teste",email:"native@example.test",role:"admin",password:"kept",regions:"[]",clients:"[]",national:1,active:1,entra_oid:null,scope_version:1,version:1};
@@ -79,6 +79,37 @@ test("security intersects representative and client scopes before groups and ava
   await assert.rejects(()=>queryNative(s.env,limited,{...monthlyPlan,filters:{...monthlyPlan.filters,region:"Rep B"}},s.manifest,s.version),/fora do seu escopo/);
   const disjoint={...limited,clients:'["0002"]'},empty=await queryNative(s.env,disjoint,monthlyPlan,s.manifest,s.version);assert.equal(empty.total.values.gross.current,null);assert.equal(empty.total.values.revenue.current,0);
   s.sql.close();
+});
+
+test("options use distinct memberships and preserve every dimension through returns, BLANK and ACL cuts",async()=>{
+  const rows=structuredClone(nativeRows);
+  rows.s.push(["2026-01-01",null,"p","c",null,"Absent","1"],["2026-01-01","orphan",null,null,"XX","Absent","3"],["2026-01-01","0001","P","C","AM","Manaus","2"]);
+  rows.c.push([null,"Rep Blank",null],["0001","rep a ","SP"],["0003","Rep Return","AM"]);
+  rows.r.push(["2026-01-01",null,"P","C",null,"4"],["2026-01-01","orphan","P","C","XX","1"],["2026-02-01","0003","P","C","AM","1"]);
+  for(let i=0;i<260;i++)rows.s.push(["2026-01-01","extra"+i,"extra"+i,"extra"+i,"SP","São Paulo","0"]);
+  const s=await seeded(rows),groups=["region","client","product","category","state","regional","manager"] as const;
+  const cuts:NativeContext[]=[january,{from:"2026-02-01",to:"2026-02-28"},{from:"2024-01-01",to:"2024-01-31"},
+    ...groups.map((field,index)=>({...january,[field]:["Rep A","0001","P","C","SP","Sudeste","G1"][index]})),
+    {...january,allowedRegions:["Rep A"]},{...january,allowedRegions:["Rep A"],allowedClients:["0001"]},
+    {...january,allowedRegions:["Rep A"],allowedClients:["0002"]},{from:"2026-02-01",to:"2026-02-28",allowedRegions:["Rep C"]},
+    {...january,allowedClients:["0001","0002"]},{...january,allowedRegions:["Rep Blank"]}];
+  try{
+    for(const [index,context]of cuts.entries()){
+      const q=compileNativeOptions(s.version,context,groups),actual=s.sql.prepare(q.sql).all(...q.args);
+      assert.doesNotMatch(q.sql,/\b(amount|row_no)\b/);assert.equal(q.args.length,9);
+      for(const dimension of groups){
+        // The full grouped compiler remains the reference, including its M:M return membership.
+        const original=compileNativeGroups(s.version,[context],dimension,true),expected=s.sql.prepare(original.sql).all(...original.args).map(row=>row.name);
+        assert.deepEqual(actual.filter(row=>row.dimension===dimension).map(row=>row.name),expected,"context "+index+" / "+dimension);
+      }
+    }
+    const options=await manualOptions(s.env,admin,monthlyPlan.filters);
+    assert.equal(options.values.client.length,250);assert.equal(options.truncated.client,true);assert(!options.values.client.includes("(Em branco)"));
+    const returnsOnly=await manualOptions(s.env,admin,{...monthlyPlan.filters,from:"2026-02",to:"2026-02"});
+    assert.deepEqual(returnsOnly.values.product,[]);assert.deepEqual(returnsOnly.values.state,[]);
+    assert.deepEqual(returnsOnly.values.region,["Rep A","Rep B","Rep C","Rep Return"]);
+    assert.deepEqual(returnsOnly.values.regional,["Norte","Sudeste"]);
+  }finally{s.sql.close();}
 });
 
 test("native ingestion preserves money scale and rejects nonmidnight dates without truncation",async()=>{
@@ -188,4 +219,54 @@ test("retrying a fully loaded validation failure preserves checkpoints and rerun
   for(let i=0;i<25;i++)await processManualJobs(s.env);
   assert.equal((await dataStatus(s.env)).active?.id,id);assert.equal(rangeReads,before);assert.equal(s.sql.prepare("SELECT COUNT(*) n FROM ci_native_sales WHERE version_id=?").get(id)?.n,4);
   const report=JSON.parse(String(s.sql.prepare("SELECT report FROM ci_imports WHERE id=?").get(id)!.report));assert.equal(report.controls.length,36);assert(report.controls.every((c:{passed:boolean})=>c.passed));assert(report.checks.some((c:{name:string;status:string})=>c.name==="integridade"&&c.status==="passed"));s.sql.close();
+});
+
+test("native coverage accepts zero-movement boundaries only with a complete daily calendar",async()=>{
+  for(const scenario of ["valid","missing-boundary","missing-interior","fact-outside"] as const){
+    const s=makeStore(),r2=fakeR2();Object.assign(s.env,{BUCKET:r2.bucket,MANUAL_ALLOW_SYNTHETIC:"true"});
+    try{
+      const publish=async(pkg:ReturnType<typeof nativeFixture>)=>{
+        const id=crypto.randomUUID(),key="local/coverage/"+id;r2.objects.set(key,pkg.data);
+        const generation=Number(s.sql.prepare("SELECT generation FROM ci_sources").get()!.generation);
+        s.sql.prepare("INSERT INTO ci_imports(id,owner,actor,filename,bytes,sha256,object_key,status,base_generation,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?)").run(id,admin.id,admin.name,"coverage.ci.ndjson",pkg.data.length,pkg.sha256,key,"queued",generation,1,1);
+        s.sql.prepare("UPDATE ci_sources SET latest_import_id=?").run(id);for(let i=0;i<35;i++)await processManualJobs(s.env);return id;
+      };
+      const previous=await publish(nativeFixture());assert.equal((await dataStatus(s.env)).active?.id,previous);
+      const rows=structuredClone(nativeRows),from="2024-12-31",to="2026-02-02";
+      rows.d=[];for(let day=Date.parse(from+"T00:00:00Z");day<=Date.parse(to+"T00:00:00Z");day+=86400000)rows.d.push([new Date(day).toISOString().slice(0,10)]);
+      if(scenario==="missing-boundary")rows.d=rows.d.filter(row=>row[0]!==from);
+      if(scenario==="missing-interior")rows.d=rows.d.filter(row=>row[0]!=="2025-07-14");
+      if(scenario==="fact-outside")rows.s.push(["2026-02-03","0001","P","C","SP","São Paulo","1.0000"]);
+      const candidate=await publish(nativeFixture(rows,m=>{
+        m.projection.from=from;m.projection.to=to;
+        for(const control of m.controls)if(control.context!=="month"){control.filters.from=from;control.filters.to=to;}
+      }));
+      const record=s.sql.prepare("SELECT status,error,report FROM ci_imports WHERE id=?").get(candidate)!;
+      if(scenario==="valid"){
+        assert.equal(record.status,"published",String(record.error));assert.equal((await dataStatus(s.env)).active?.id,candidate);
+        const report=JSON.parse(String(record.report));assert(report.checks.some((check:{name:string;status:string})=>check.name==="cobertura_calendario"&&check.status==="passed"));
+        assert.equal(report.controls.length,36);assert(report.controls.every((control:{passed:boolean})=>control.passed));
+        const range=s.sql.prepare("SELECT MIN(date) AS first,MAX(date) AS last FROM(SELECT date FROM ci_native_sales WHERE version_id=? UNION ALL SELECT date FROM ci_native_returns WHERE version_id=?)").get(candidate,candidate)!;
+        assert.equal(range.first,"2025-01-01");assert.equal(range.last,"2026-02-01");
+      }else{
+        assert.equal(record.status,"failed");assert.equal((await dataStatus(s.env)).active?.id,previous,"failed coverage must preserve the active snapshot");
+        assert.match(String(record.error),scenario==="fact-outside"?/Contagem ou cobertura/:/calendário não comprova/);
+      }
+    }finally{s.sql.close();}
+  }
+});
+
+test("legacy coverage still requires the exact first and last movement dates",async()=>{
+  const s=makeStore(),r2=fakeR2();Object.assign(s.env,{BUCKET:r2.bucket,MANUAL_ALLOW_SYNTHETIC:"true"});
+  try{
+    const publish=async(pkg:ReturnType<typeof fixturePackage>)=>{
+      const id=crypto.randomUUID(),key="local/legacy-coverage/"+id;r2.objects.set(key,pkg.data);
+      s.sql.prepare("INSERT INTO ci_imports(id,owner,actor,filename,bytes,sha256,object_key,status,base_generation,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?)").run(id,admin.id,admin.name,"legacy.ci.ndjson",pkg.data.length,pkg.sha256,key,"queued",Number(s.sql.prepare("SELECT generation FROM ci_sources").get()!.generation),1,1);
+      s.sql.prepare("UPDATE ci_sources SET latest_import_id=?").run(id);for(let i=0;i<25;i++)await processManualJobs(s.env);return id;
+    };
+    const previous=await publish(fixturePackage());assert.equal((await dataStatus(s.env)).active?.id,previous);
+    const candidate=await publish(fixturePackage(undefined,m=>{m.projection.from="2024-12-31";m.projection.to="2026-01-02";for(const control of m.controls)if(control.context!=="month"){control.filters.from=m.projection.from;control.filters.to=m.projection.to;}}));
+    const record=s.sql.prepare("SELECT status,error FROM ci_imports WHERE id=?").get(candidate)!;
+    assert.equal(record.status,"failed");assert.match(String(record.error),/Contagem ou cobertura/);assert.equal((await dataStatus(s.env)).active?.id,previous);
+  }finally{s.sql.close();}
 });

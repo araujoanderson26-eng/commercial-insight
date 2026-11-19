@@ -27,7 +27,7 @@ import Profile from "./Profile";
 import { DataUpdates } from "./DataUpdates";
 import Visits from "./Visits";
 import "./style.css";
-import { api, Brand, Busy, Credit, Empty, ErrorBox, message, period, sessionCapabilities } from "./ui";
+import { api, Brand, Busy, Credit, Empty, ErrorBox, isAbortError, message, period, sessionCapabilities } from "./ui";
 import { adminNav, Home, mainNav, navs, Reports } from "./WorkspaceViews";
 const cleanPath = () => location.pathname === "/admin/atualizacao-dados" ? "atualizacao-dados" : location.pathname.split("/")[1] || "inicio";
 function Modal({
@@ -87,8 +87,13 @@ function FilterForm({
     const valid = filtersSchema.safeParse(f);
     if (!valid.success) return;
     let alive = true;
-    api<{ values: typeof options; labels?: typeof optionLabels }>("data/options", "POST", valid.data).then((v) => { if (alive) { O(v.values); OL(v.labels ?? {}); } }).catch((e) => { if (alive) E(message(e)); });
-    return () => { alive = false; };
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      api<{ values: typeof options; labels?: typeof optionLabels }>("data/options", "POST", valid.data, controller.signal)
+        .then((v) => { if (alive) { O(v.values); OL(v.labels ?? {}); E(""); } })
+        .catch((e) => { if (alive && !isAbortError(e)) E(message(e)); });
+    }, 300);
+    return () => { alive = false; clearTimeout(timer); controller.abort(); };
   }, [s.data?.activeVersionId, f.from, f.to]);
   function save(e: FormEvent) {
     e.preventDefault();

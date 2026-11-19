@@ -1937,13 +1937,25 @@ dialog::backdrop {
 @media print {
   :root { font-size: 11px; background: #fff; }
   * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-  .workspace { display: block; }
+  .workspace { display: block; min-height: auto; }
   .sidebar, .topbar, .mobilebar, .filterbar, .footcredit, .composer, .chat-footnote,
   .toolbar, .report-actions, .saved-reports, .save-report-form, .visit-selector, .ranking-search,
-  .pageintro .row, .graph .sectionhead button, .thread, .net { display: none !important; }
+  .pageintro .row, .graph .sectionhead button, .thread, .net, .assistant-status { display: none !important; }
   .surface, .content { padding: 0; margin: 0; }
+  .content { width: 182mm; max-width: 100%; }
   .stack { gap: 14px; }
-  .panel, .answer, .kpi { box-shadow: none; break-inside: avoid; }
+  .panel, .answer, .kpi { box-shadow: none; }
+  .panel, .kpi, .commercial-insight { break-inside: avoid; }
+  .chatbody, .turn, .visit-result, .visit-plan, .insight-list { display: block; }
+  .answer { padding: 0; border: 0; border-radius: 0; break-inside: auto; }
+  .turn { margin-bottom: 18px; }
+  .turn:has(.answer > button.soft) { display: none !important; }
+  .bubble { max-width: 100%; margin: 0 0 12px; }
+  .visit-result > *, .visit-plan > *, .insight-list > * { margin-bottom: 12px; }
+  .kpi strong { font-size: 20px; }
+  h1 { font-size: 24px; }
+  h2 { font-size: 17px; }
+  h3 { font-size: 13px; }
   .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .analytics, .visit-plan { grid-template-columns: 1fr; }
   .visit-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1953,6 +1965,7 @@ dialog::backdrop {
   thead { display: table-header-group; }
   tr { break-inside: avoid; }
   .chart { height: 230px; }
+  .recharts-responsive-container { max-width: 100% !important; }
   .turn { break-before: auto; }
   .chatbody { overflow: visible; }
 }
