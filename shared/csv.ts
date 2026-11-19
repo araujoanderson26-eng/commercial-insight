@@ -397,32 +397,50 @@ export function parseCsvDate(raw: string | null | undefined): string | null {
 export function parseCsvDecimalString(raw: string | null | undefined): string | null {
   const trimmed = raw?.trim().replace(/\s+/g, "");
   if (!trimmed) return null;
-  if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) return trimmed;
 
-  // Handle Brazilian formatting (e.g. "1.234,56") or US comma-grouped numbers ("1,234.56")
-  const lastComma = trimmed.lastIndexOf(",");
-  const lastDot = trimmed.lastIndexOf(".");
   let normalized: string;
-  if (lastComma > lastDot) {
-    normalized = trimmed.replaceAll(".", "").replace(",", ".");
-  } else if (lastDot > lastComma) {
-    normalized = trimmed.replaceAll(",", "");
+  if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) {
+    normalized = trimmed;
   } else {
-    normalized = trimmed.replaceAll(",", ".");
+    // Handle Brazilian formatting (e.g. "1.234,56") or US comma-grouped numbers ("1,234.56")
+    const lastComma = trimmed.lastIndexOf(",");
+    const lastDot = trimmed.lastIndexOf(".");
+    if (lastComma > lastDot) {
+      normalized = trimmed.replaceAll(".", "").replace(",", ".");
+    } else if (lastDot > lastComma) {
+      normalized = trimmed.replaceAll(",", "");
+    } else {
+      normalized = trimmed.replaceAll(",", ".");
+    }
   }
-  if (/^-?\d+(?:\.\d+)?$/.test(normalized)) return normalized;
 
   if (/^-?(?:\d+(?:\.\d+)?|\.\d+)[eE][+-]?\d+$/.test(normalized)) {
     const n = Number(normalized);
     if (!Number.isFinite(n)) return null;
-    return n.toFixed(6).replace(/\.?0+$/, "");
+    normalized = n.toFixed(6).replace(/\.?0+$/, "");
   }
-  return null;
+
+  if (/^-?\.\d+$/.test(normalized)) {
+    normalized = normalized.startsWith("-") ? "-0" + normalized.slice(1) : "0" + normalized;
+  }
+  const m = normalized.match(/^(-?)0*(\d+(?:\.\d+)?)$/);
+  if (!m) return null;
+  return (m[1] ?? "") + m[2];
 }
 
-export function parseScaledCsvAmount(raw: string | null | undefined, scale = 4): number | null {
+export function parseScaledCsvAmount(
+  raw: string | null | undefined,
+  scale = 4,
+  allowPhysicalRound = false,
+): number | null {
   const dec = parseCsvDecimalString(raw);
   if (dec === null) return null;
+  if (allowPhysicalRound) {
+    const n = Number(dec);
+    if (!Number.isFinite(n)) return null;
+    const scaled = Math.round(n * 10 ** scale);
+    return Number.isSafeInteger(scaled) ? scaled : null;
+  }
   return decimalInteger(dec, scale);
 }
 

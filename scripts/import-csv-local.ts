@@ -230,9 +230,9 @@ async function main() {
         cleanCsvDisplay(map.brand !== undefined ? rec[map.brand] : null),
         macroKey,
         macroRaw,
-        map.unitLiters !== undefined ? parseScaledCsvAmount(rec[map.unitLiters], SCALE) : null,
-        map.boxLiters !== undefined ? parseScaledCsvAmount(rec[map.boxLiters], SCALE) : null,
-        map.packQty !== undefined ? parseScaledCsvAmount(rec[map.packQty], SCALE) : null,
+        map.unitLiters !== undefined ? parseScaledCsvAmount(rec[map.unitLiters], SCALE, true) : null,
+        map.boxLiters !== undefined ? parseScaledCsvAmount(rec[map.boxLiters], SCALE, true) : null,
+        map.packQty !== undefined ? parseScaledCsvAmount(rec[map.packQty], SCALE, true) : null,
         cleanCsvDisplay(map.unitMeasure !== undefined ? rec[map.unitMeasure] : null),
         cleanCsvDisplay(map.abcClass !== undefined ? rec[map.abcClass] : null),
       );
@@ -354,8 +354,8 @@ async function main() {
         cleanCsvDisplay(map.channel !== undefined ? rec[map.channel] : null),
         cleanCsvDisplay(map.regional !== undefined ? rec[map.regional] : null),
         cleanCsvDisplay(map.utilization !== undefined ? rec[map.utilization] : null),
-        map.qty !== undefined ? parseScaledCsvAmount(rec[map.qty], SCALE) : null,
-        map.liters !== undefined ? parseScaledCsvAmount(rec[map.liters], SCALE) : null,
+        map.qty !== undefined ? parseScaledCsvAmount(rec[map.qty], SCALE, true) : null,
+        map.liters !== undefined ? parseScaledCsvAmount(rec[map.liters], SCALE, true) : null,
         grossAmount,
         map.accountingAmount !== undefined ? parseScaledCsvAmount(rec[map.accountingAmount], SCALE) : null,
       );
@@ -409,8 +409,8 @@ async function main() {
         cleanCsvDisplay(map.group !== undefined ? rec[map.group] : null),
         macroKey,
         normalizeCsvKey(map.state !== undefined ? rec[map.state] : null),
-        map.qty !== undefined ? parseScaledCsvAmount(rec[map.qty], SCALE) : null,
-        map.liters !== undefined ? parseScaledCsvAmount(rec[map.liters], SCALE) : null,
+        map.qty !== undefined ? parseScaledCsvAmount(rec[map.qty], SCALE, true) : null,
+        map.liters !== undefined ? parseScaledCsvAmount(rec[map.liters], SCALE, true) : null,
         returnAmount,
       );
     });

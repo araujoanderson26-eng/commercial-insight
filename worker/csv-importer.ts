@@ -325,9 +325,9 @@ export async function processCsvBatch(e: Env, batchId: string) {
           cleanCsvDisplay(map.brand !== undefined ? rec[map.brand] : null),
           macroKey,
           macroRaw,
-          map.unitLiters !== undefined ? parseScaledCsvAmount(rec[map.unitLiters], MONETARY_SCALE) : null,
-          map.boxLiters !== undefined ? parseScaledCsvAmount(rec[map.boxLiters], MONETARY_SCALE) : null,
-          map.packQty !== undefined ? parseScaledCsvAmount(rec[map.packQty], MONETARY_SCALE) : null,
+          map.unitLiters !== undefined ? parseScaledCsvAmount(rec[map.unitLiters], MONETARY_SCALE, true) : null,
+          map.boxLiters !== undefined ? parseScaledCsvAmount(rec[map.boxLiters], MONETARY_SCALE, true) : null,
+          map.packQty !== undefined ? parseScaledCsvAmount(rec[map.packQty], MONETARY_SCALE, true) : null,
           cleanCsvDisplay(map.unitMeasure !== undefined ? rec[map.unitMeasure] : null),
           cleanCsvDisplay(map.abcClass !== undefined ? rec[map.abcClass] : null),
         ]);
@@ -474,8 +474,8 @@ export async function processCsvBatch(e: Env, batchId: string) {
           cleanCsvDisplay(map.channel !== undefined ? rec[map.channel] : null),
           cleanCsvDisplay(map.regional !== undefined ? rec[map.regional] : null),
           cleanCsvDisplay(map.utilization !== undefined ? rec[map.utilization] : null),
-          map.qty !== undefined ? parseScaledCsvAmount(rec[map.qty], MONETARY_SCALE) : null,
-          map.liters !== undefined ? parseScaledCsvAmount(rec[map.liters], MONETARY_SCALE) : null,
+          map.qty !== undefined ? parseScaledCsvAmount(rec[map.qty], MONETARY_SCALE, true) : null,
+          map.liters !== undefined ? parseScaledCsvAmount(rec[map.liters], MONETARY_SCALE, true) : null,
           grossAmount,
           map.accountingAmount !== undefined ? parseScaledCsvAmount(rec[map.accountingAmount], MONETARY_SCALE) : null,
         ]);
@@ -547,8 +547,8 @@ export async function processCsvBatch(e: Env, batchId: string) {
           cleanCsvDisplay(map.group !== undefined ? rec[map.group] : null),
           macroKey,
           normalizeCsvKey(map.state !== undefined ? rec[map.state] : null),
-          map.qty !== undefined ? parseScaledCsvAmount(rec[map.qty], MONETARY_SCALE) : null,
-          map.liters !== undefined ? parseScaledCsvAmount(rec[map.liters], MONETARY_SCALE) : null,
+          map.qty !== undefined ? parseScaledCsvAmount(rec[map.qty], MONETARY_SCALE, true) : null,
+          map.liters !== undefined ? parseScaledCsvAmount(rec[map.liters], MONETARY_SCALE, true) : null,
           returnAmount,
         ]);
         if (chunkBuffer.length >= 80) await flush();
@@ -1007,10 +1007,28 @@ export async function csvAdminRoute(req: Request, e: Env, u: DbUser, path: strin
       const filename =
         (req.headers.get("x-filename") || CSV_SCHEMAS[role].defaultFilename).slice(0, 180);
       const objectKey = `${CSV_PREFIX}${batchId}/${role}.csv`;
-      await bucket.put(objectKey, bytesBuf, {
-        httpMetadata: { contentType: "text/csv; charset=utf-8" },
-        customMetadata: { batchId, role, sha256 },
-      });
+      const r2WithPut = bucket as R2Bucket & { put?: R2Bucket["put"] };
+      if (typeof r2WithPut.put === "function") {
+        await r2WithPut.put(objectKey, bytesBuf, {
+          httpMetadata: { contentType: "text/csv; charset=utf-8" },
+          customMetadata: { batchId, role, sha256 },
+        });
+      } else {
+        const multipart = await bucket.createMultipartUpload(objectKey, {
+          httpMetadata: { contentType: "text/csv; charset=utf-8" },
+          customMetadata: { batchId, role, sha256 },
+        });
+        const part = await multipart.uploadPart(
+          1,
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(bytesBuf);
+              controller.close();
+            },
+          }),
+        );
+        await multipart.complete([part]);
+      }
       await stmt(
         e,
         `INSERT INTO ci_csv_files(batch_id,role,filename,sha256,bytes,object_key,status,updated)

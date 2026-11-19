@@ -1,8 +1,12 @@
 import { z } from "zod";
-import { configSchema, filtersSchema, planSchema, type Report } from "../shared/domain";
+import { configSchema, filtersSchema, planSchema, type Commentary, type Plan, type Report } from "../shared/domain";
+import type { VisitBriefing } from "../shared/commercial";
 import { passwordHash } from "../shared/password.mjs";
 import { assertAssistantAccess, dataProvider, resolvePlanEntities } from "./providers";
 import { csvAdminRoute } from "./csv-importer";
+import { executeDeterministicQA } from "./deterministic-qa";
+import { routeCommercialIntent } from "./intent-router";
+import { controlledHmlPolicy } from "./real-hml-policy";
 import { dataStatus, manualRoute, processManualJobs, processManualQueue, type ManualJob } from "./manual";
 import { comment, factualCommentary, interpret, reviewCommentary } from "./assistant";
 import { assistantStatus, isVisitRequest, prepareVisit } from "./commercial";
@@ -448,6 +452,7 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
     return json(report, 200, { "X-Cache": "BYPASS", "Server-Timing": "app;dur=" + (Date.now() - t0) });
   }
   if (p === "/chat" && method === "POST") {
+    const t0 = Date.now();
     const v = z
       .object({
         question: z.string().trim().min(2).max(900),
@@ -479,22 +484,43 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
       : [];
     await checkAccess(e, u, revision, hash);
     await assertAssistantAccess(e, provider, owner);
-    const interpreted = await interpret(e, provider.semantics, v.question, v.filters, previous, owner);
-    const plan = await resolvePlanEntities(provider, interpreted, v.filters);
-    const visitRequested = isVisitRequest(v.question);
-    if (visitRequested && !plan.filters.client) fail(422, "Selecione um cliente ou informe seu código/nome para preparar a visita. Cadastros semelhantes exigem a escolha do código correto.");
-    const report = await provider.query(plan);
-    const visit = visitRequested ? await prepareVisit(provider, plan.filters) : undefined;
-    await checkAccess(e, u, revision, hash);
-    await assertAssistantAccess(e, provider, owner);
-    const commentary = await comment(e, v.question, report, owner).catch(() => ({
-      summary:
-        "Os indicadores foram consultados na fonte identificada. A interpretação da OpenAI está temporariamente indisponível.",
-      actions: [],
-    }));
-    await checkAccess(e, u, revision, hash);
-    await assertAssistantAccess(e, provider, owner);
+    const intent =
+      provider.sourceType === "manual" && !controlledHmlPolicy(e) && provider.semantics.capabilities
+        ? routeCommercialIntent(v.question, v.filters, provider.semantics.capabilities, previous)
+        : null;
+    let plan: Plan;
+    let report: Report;
+    let commentary: Commentary;
+    let visit: VisitBriefing | undefined;
+    let engine: "deterministic" | "openai" = "openai";
+    if (intent) {
+      const qa = await executeDeterministicQA(e, u, provider, intent, v.filters);
+      plan = qa.plan;
+      report = qa.report;
+      commentary = qa.commentary;
+      visit = qa.visit;
+      engine = "deterministic";
+      await checkAccess(e, u, revision, hash);
+      await assertAssistantAccess(e, provider, owner);
+    } else {
+      const interpreted = await interpret(e, provider.semantics, v.question, v.filters, previous, owner);
+      plan = await resolvePlanEntities(provider, interpreted, v.filters);
+      const visitRequested = isVisitRequest(v.question);
+      if (visitRequested && !plan.filters.client) fail(422, "Selecione um cliente ou informe seu código/nome para preparar a visita. Cadastros semelhantes exigem a escolha do código correto.");
+      report = await provider.query(plan);
+      visit = visitRequested ? await prepareVisit(provider, plan.filters) : undefined;
+      await checkAccess(e, u, revision, hash);
+      await assertAssistantAccess(e, provider, owner);
+      commentary = await comment(e, v.question, report, owner).catch(() => ({
+        summary:
+          "Os indicadores foram consultados na fonte identificada. A interpretação da OpenAI está temporariamente indisponível.",
+        actions: [],
+      }));
+      await checkAccess(e, u, revision, hash);
+      await assertAssistantAccess(e, provider, owner);
+    }
     const turn = crypto.randomUUID();
+    const latencyMs = Date.now() - t0;
     const thread = v.conversation
       ? stmt(e, "UPDATE conversations SET updated=? WHERE id=? AND owner=?", now(), id, owner)
       : stmt(
@@ -522,7 +548,14 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
       ),
       audit(e, owner, "pergunta_consultada", plan.group),
     ]);
-    return json({ id, turn, report, commentary, ...(visit ? { visit } : {}) });
+    return json({
+      id,
+      turn,
+      report,
+      commentary,
+      ...(visit ? { visit } : {}),
+      meta: { engine, latencyMs, openaiCalls: engine === "deterministic" ? 0 : 2 },
+    });
   }
   fail(404, "Recurso desconhecido.");
 }

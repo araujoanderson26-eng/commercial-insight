@@ -126,7 +126,7 @@ CREATE TABLE IF NOT EXISTS ci_fact_sales (
 );
 CREATE INDEX IF NOT EXISTS ci_fact_sales_date ON ci_fact_sales(batch_id, date, client_key, gross_amount);
 CREATE INDEX IF NOT EXISTS ci_fact_sales_month ON ci_fact_sales(batch_id, month_key, state_key);
-CREATE INDEX IF NOT EXISTS ci_fact_sales_client ON ci_fact_sales(batch_id, client_key, date);
+CREATE INDEX IF NOT EXISTS ci_fact_sales_client ON ci_fact_sales(batch_id, client_key, date, gross_amount);
 CREATE INDEX IF NOT EXISTS ci_fact_sales_product ON ci_fact_sales(batch_id, product_key, date);
 CREATE INDEX IF NOT EXISTS ci_fact_sales_group ON ci_fact_sales(batch_id, group_key, date);
 CREATE INDEX IF NOT EXISTS ci_fact_sales_macro ON ci_fact_sales(batch_id, macro_key, date);
