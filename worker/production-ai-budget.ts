@@ -79,6 +79,37 @@ export async function assertProductionAI(e: Env, actorId?: string) {
   if (!status.ready && status.reason !== 'budget_exhausted' && status.reason !== 'request_in_progress')
     fail(status.reason === 'account_not_authorized' ? 403 : 503, status.message!);
 }
+/** Metadata-only check, usable while spending remains disabled. Never return a credential/provider body. */
+export async function productionAIModelPreflight(e: Env, actorId: string) {
+  if (e.APP_ORIGIN !== productionOrigin || e.PRODUCTION_AI_BUDGET !== 'true') fail(403, 'Pré-checagem exclusiva da produção controlada.');
+  const p = await policy(e);
+  if (!p || !await authorized(e,p,actorId)) fail(403, messages.account_not_authorized);
+  if (!e.OPENAI_API_KEY) fail(409, 'Cadastre OPENAI_API_KEY de produção por entrada segura antes da pré-checagem.');
+  if (!p.organization_id || !/^org-[A-Za-z0-9_-]+$/.test(p.organization_id)
+    || !p.project_id || !/^proj_[A-Za-z0-9_-]+$/.test(p.project_id)
+    || p.model !== productionAIModel || e.OPENAI_MODEL !== productionAIModel)
+    fail(409, 'Informe a organização e o projeto beneficiados antes da pré-checagem.');
+  let response: Response;
+  try { response = await fetch('https://api.openai.com/v1/models/' + encodeURIComponent(productionAIModel), {
+    headers: { Authorization:'Bearer '+e.OPENAI_API_KEY,'OpenAI-Organization':p.organization_id,'OpenAI-Project':p.project_id },
+    signal:AbortSignal.timeout(20000),
+  }); } catch { fail(502, 'Não foi possível consultar os metadados do modelo. Nenhuma inferência foi iniciada.'); }
+  if (!response.ok) {
+    await response.body?.cancel();
+    return {available:false,status:response.status,scopedRequestAccepted:false,paidRequests:0};
+  }
+  const reader=response.body?.getReader();
+  if (!reader) fail(502, 'O provedor não retornou metadados.');
+  let bytes=0;const chunks:Uint8Array[]=[];
+  for (;;) { const part=await reader.read();if(part.done)break;bytes+=part.value.byteLength;
+    if(bytes>8192){await reader.cancel();fail(502,'Os metadados excederam o limite seguro.');}chunks.push(part.value); }
+  let id:unknown;
+  try { id=(JSON.parse(await new Blob(chunks).text()) as {id?:unknown}).id; }
+  catch { fail(502,'O provedor retornou metadados inválidos.'); }
+  if(id!==productionAIModel)fail(502,'O modelo retornado difere do modelo precificado.');
+  return {available:true,status:response.status,modelId:id,organizationId:p.organization_id,projectId:p.project_id,
+    scopedRequestAccepted:true,creditBalanceVerified:false,autoReloadVerified:false,paidRequests:0};
+}
 export function estimateProductionAI(body: string) {
   const inputTokens = new TextEncoder().encode(body).byteLength + 8192;
   if (inputTokens > 140000) fail(413, 'O contexto da pergunta excede o limite seguro da IA. Reduza o recorte.');

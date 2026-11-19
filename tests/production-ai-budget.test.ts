@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { productionAIModel, productionAIStatus, reserveProductionAI, finishProductionAI, estimateProductionAI, assertProductionAI } from '../worker/production-ai-budget';
+import { productionAIModel, productionAIStatus, reserveProductionAI, finishProductionAI, estimateProductionAI, assertProductionAI, productionAIModelPreflight } from '../worker/production-ai-budget';
 import { buildInterpretOpenAIRequest, interpret, comment } from '../worker/assistant';
 import { Problem, digest, now } from '../worker/core';
 import { reserveHmlOpenAI } from '../worker/openai-budget';
@@ -25,6 +25,32 @@ function setup() {
 }
 const good = { status:'completed' as const,model:productionAIModel,usage:{input_tokens:100,output_tokens:40} };
 const failsWith = (status:number) => (error:unknown) => error instanceof Problem && error.status===status;
+
+test('metadata preflight binds organization/project, keeps spending disabled and exposes no credential or credit claim',async t=>{
+  const s=setup();t.after(()=>s.sql.close());s.sql.exec('UPDATE ai_production_policy SET enabled=0');
+  const mocked=t.mock.method(globalThis,'fetch',async(url,init)=>{
+    assert.equal(url,'https://api.openai.com/v1/models/'+productionAIModel);assert.equal(init?.method,undefined);
+    const headers=new Headers(init?.headers);assert.equal(headers.get('OpenAI-Organization'),'org-synthetic');assert.equal(headers.get('OpenAI-Project'),'proj_synthetic');
+    return Response.json({id:productionAIModel,private:'DO_NOT_RETURN'});
+  });
+  await assert.rejects(productionAIModelPreflight(s.env,'other-admin'),failsWith(403));
+  const result=await productionAIModelPreflight(s.env,'owner');assert.equal(result.available,true);assert.equal(result.paidRequests,0);
+  assert.equal(result.creditBalanceVerified,false);assert.equal(result.autoReloadVerified,false);
+  assert.doesNotMatch(JSON.stringify(result),/test-only|DO_NOT_RETURN/);assert.equal(mocked.mock.callCount(),1);
+  assert.equal(s.sql.prepare('SELECT COUNT(*) n FROM ai_production_attempts').get()!.n,0);
+  assert.equal(s.sql.prepare('SELECT enabled FROM ai_production_policy').get()!.enabled,0);
+});
+test('metadata preflight rejects missing key/project, provider refusal and oversized response without inference',async t=>{
+  const s=setup();t.after(()=>s.sql.close());
+  await assert.rejects(productionAIModelPreflight({...s.env,OPENAI_API_KEY:undefined},'owner'),failsWith(409));
+  s.sql.exec('UPDATE ai_production_policy SET project_id=NULL');await assert.rejects(productionAIModelPreflight(s.env,'owner'),failsWith(409));
+  s.sql.exec("UPDATE ai_production_policy SET project_id='proj_synthetic'");
+  let response=()=>Response.json({private:'DO_NOT_RETURN'},{status:403});t.mock.method(globalThis,'fetch',async()=>response());
+  assert.deepEqual(await productionAIModelPreflight(s.env,'owner'),{available:false,status:403,scopedRequestAccepted:false,paidRequests:0});
+  response=()=>Response.json({id:'other-model'});await assert.rejects(productionAIModelPreflight(s.env,'owner'),failsWith(502));
+  response=()=>new Response('x'.repeat(9000));await assert.rejects(productionAIModelPreflight(s.env,'owner'),failsWith(502));
+  assert.equal(s.sql.prepare('SELECT COUNT(*) n FROM ai_production_attempts').get()!.n,0);
+});
 
 test('production ledger is additive, disabled by default and independent of HML tables',async t=>{
   const s=makeStore();t.after(()=>s.sql.close());
