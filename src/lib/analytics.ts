@@ -22,7 +22,21 @@ export function sameFilters(a: Filters, b: Filters): boolean {
     (a.state ?? "") === (b.state ?? "") &&
     (a.manager ?? "") === (b.manager ?? "") &&
     sameList(a.categoriesInclude, b.categoriesInclude) &&
-    sameList(a.categoriesExclude, b.categoriesExclude)
+    sameList(a.categoriesExclude, b.categoriesExclude) &&
+    sameList(a.regions, b.regions) &&
+    sameList(a.regionals, b.regionals) &&
+    sameList(a.states, b.states) &&
+    sameList(a.managers, b.managers) &&
+    sameList(a.clients, b.clients) &&
+    sameList(a.products, b.products) &&
+    sameList(a.channels, b.channels) &&
+    sameList(a.segments, b.segments) &&
+    sameList(a.brands, b.brands) &&
+    a.revenueMin === b.revenueMin &&
+    a.revenueMax === b.revenueMax &&
+    a.ticketMin === b.ticketMin &&
+    a.ticketMax === b.ticketMax &&
+    (a.variationDirection ?? "all") === (b.variationDirection ?? "all")
   );
 }
 

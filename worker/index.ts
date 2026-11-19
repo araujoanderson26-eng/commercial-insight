@@ -2,6 +2,7 @@ import { z } from "zod";
 import { configSchema, filtersSchema, planSchema, type Report } from "../shared/domain";
 import { passwordHash } from "../shared/password.mjs";
 import { assertAssistantAccess, dataProvider, resolvePlanEntities } from "./providers";
+import { csvAdminRoute } from "./csv-importer";
 import { dataStatus, manualRoute, processManualJobs, processManualQueue, type ManualJob } from "./manual";
 import { comment, factualCommentary, interpret, reviewCommentary } from "./assistant";
 import { assistantStatus, isVisitRequest, prepareVisit } from "./commercial";
@@ -151,6 +152,10 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
       if (p === "/data/options" || p === "/data/search") await checkAccess(e, u, revision, hash);
       return response;
     }
+  }
+  if (p.startsWith("/admin/csv")) {
+    const csvResponse = await csvAdminRoute(req, e, u, p);
+    if (csvResponse) return csvResponse;
   }
   if (u.role === "operador" && p !== "/auth/profile") fail(403, "O operador de atualização tem acesso somente à importação de pacotes e ao próprio perfil.");
   if (p === "/microsoft/start" && method === "POST")

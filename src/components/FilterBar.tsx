@@ -1,7 +1,8 @@
-import { CalendarDays, Check, RotateCcw, Search, SlidersHorizontal, X } from "lucide-react";
+import { AlertTriangle, CalendarDays, Check, Plus, RotateCcw, Search, SlidersHorizontal, X } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   defaultFilters,
+  detectFilterConflicts,
   filtersSchema,
   type DataCapabilities,
   type FilterDimension,
@@ -29,6 +30,20 @@ const DIMENSION_LABELS: Record<FilterDimension, string> = {
   state: "UF",
   manager: "Gerente",
   category: "Categoria",
+};
+
+const MULTI_KEY_FOR_DIM: Partial<
+  Record<
+    FilterDimension,
+    keyof Pick<Filters, "regions" | "regionals" | "states" | "managers" | "clients" | "products">
+  >
+> = {
+  region: "regions",
+  regional: "regionals",
+  state: "states",
+  manager: "managers",
+  client: "clients",
+  product: "products",
 };
 
 export function FilterBar({
@@ -241,6 +256,7 @@ function DimensionField({
   dimension,
   title,
   value,
+  multiValues,
   options,
   optionLabels,
   capabilities,
@@ -248,10 +264,12 @@ function DimensionField({
   filters,
   focusClient,
   onChange,
+  onChangeMulti,
 }: {
   dimension: FilterDimension;
   title: string;
   value: string;
+  multiValues: string[];
   options: string[];
   optionLabels: Record<string, string>;
   capabilities: DataCapabilities;
@@ -259,6 +277,7 @@ function DimensionField({
   filters: Filters;
   focusClient: boolean;
   onChange: (nextValue: string) => void;
+  onChangeMulti?: (nextMulti: string[]) => void;
 }) {
   const [matches, setMatches] = useState<{ key: string; name: string }[]>([]);
   const restrictedList =
@@ -275,6 +294,7 @@ function DimensionField({
     s.data.ready &&
     !hasRestrictedSelect &&
     (dimension === "client" || dimension === "product");
+  const supportsMulti = !!onChangeMulti && s.data?.source === "manual";
 
   useEffect(() => {
     if (!supportsRemoteSearch) {
@@ -313,28 +333,50 @@ function DimensionField({
     };
   }, [supportsRemoteSearch, value, options, dimension, filters.from, filters.to]);
 
+  const addToMulti = () => {
+    if (!onChangeMulti) return;
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    if (!multiValues.includes(trimmed)) onChangeMulti([...multiValues, trimmed]);
+    onChange("");
+    setMatches([]);
+  };
+
   return (
     <label>
       {title}
-      {hasRestrictedSelect ? (
-        <select value={value} onChange={(e) => onChange(e.target.value)}>
-          <option value="">Todos no meu escopo</option>
-          {restrictedList.map((v) => (
-            <option key={v} value={v}>
-              {optionLabels[v] ?? v}
-            </option>
-          ))}
-        </select>
-      ) : (
-        <input
-          list={"source-options-" + dimension}
-          autoFocus={focusClient && dimension === "client"}
-          maxLength={140}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder="Todos · pesquise código ou descrição"
-        />
-      )}
+      <div className="multi-dim-input">
+        {hasRestrictedSelect ? (
+          <select value={value} onChange={(e) => onChange(e.target.value)}>
+            <option value="">Todos no meu escopo</option>
+            {restrictedList.map((v) => (
+              <option key={v} value={v}>
+                {optionLabels[v] ?? v}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            list={"source-options-" + dimension}
+            autoFocus={focusClient && dimension === "client"}
+            maxLength={140}
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder="Todos · pesquise código ou descrição"
+          />
+        )}
+        {supportsMulti && value.trim().length > 0 && (
+          <button
+            type="button"
+            className="soft compact"
+            title={`Adicionar ${value.trim()} à seleção múltipla de ${title}`}
+            onClick={addToMulti}
+          >
+            <Plus size={13} />
+            Adicionar
+          </button>
+        )}
+      </div>
       <datalist id={"source-options-" + dimension}>
         {options.map((v) => (
           <option key={v} value={v} label={optionLabels[v] ?? v} />
@@ -353,6 +395,22 @@ function DimensionField({
             >
               {item.name}
             </button>
+          ))}
+        </div>
+      )}
+      {multiValues.length > 0 && onChangeMulti && (
+        <div className="multi-selected-tags" aria-label={`Múltiplos valores de ${title}`}>
+          {multiValues.map((item) => (
+            <span className="filter-chip" key={item}>
+              <span className="filter-chip-value">{optionLabels[item] ?? item}</span>
+              <button
+                type="button"
+                aria-label={`Remover ${item}`}
+                onClick={() => onChangeMulti(multiValues.filter((v) => v !== item))}
+              >
+                <X size={11} />
+              </button>
+            </span>
           ))}
         </div>
       )}
@@ -390,6 +448,7 @@ export function FilterSheetModal({
   const capabilities = sessionCapabilities(s);
   const selectedDimensions = capabilities.filters;
   const scope = makeScope(s);
+  const conflicts = detectFilterConflicts(f);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -448,12 +507,16 @@ export function FilterSheetModal({
     e.preventDefault();
     const parsed = filtersSchema.safeParse(f);
     if (!parsed.success) {
-      setErr("Informe entre 1 e 24 meses completos e confira os filtros.");
+      setErr(parsed.error.issues[0]?.message || "Informe entre 1 e 24 meses completos e confira os filtros.");
       return;
     }
     const supported = { ...parsed.data };
     for (const dimension of ["regional", "state", "manager", "category"] as const) {
-      if (!capabilities.filters.includes(dimension)) delete supported[dimension];
+      if (!capabilities.filters.includes(dimension)) {
+        delete supported[dimension];
+        const multiKey = MULTI_KEY_FOR_DIM[dimension];
+        if (multiKey) delete supported[multiKey];
+      }
     }
     if (!capabilities.filters.includes("category")) {
       delete supported.categoriesInclude;
@@ -461,6 +524,16 @@ export function FilterSheetModal({
     }
     apply(supported);
   }
+
+  const setNum = (field: "revenueMin" | "revenueMax" | "ticketMin" | "ticketMax", raw: string) => {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      setF({ ...f, [field]: undefined });
+      return;
+    }
+    const n = Number(trimmed);
+    if (Number.isFinite(n)) setF({ ...f, [field]: n });
+  };
 
   return (
     <dialog
@@ -495,6 +568,17 @@ export function FilterSheetModal({
             ))}
           </div>
 
+          {conflicts.length > 0 && (
+            <div className="conflict-alert" role="status">
+              <AlertTriangle size={15} />
+              <div>
+                {conflicts.map((msg) => (
+                  <p key={msg}>{msg}</p>
+                ))}
+              </div>
+            </div>
+          )}
+
           {capabilities.filters.includes("category") && s.data?.source === "manual" && (
             <CategoryFilter
               values={options.category ?? []}
@@ -508,21 +592,98 @@ export function FilterSheetModal({
 
           {selectedDimensions
             .filter((k) => k !== "category" || s.data?.source !== "manual")
-            .map((k) => (
-              <DimensionField
-                key={k}
-                dimension={k}
-                title={capabilities.labels?.[k] ?? DIMENSION_LABELS[k]}
-                value={f[k] ?? ""}
-                options={options[k] ?? []}
-                optionLabels={optionLabels[k] ?? {}}
-                capabilities={capabilities}
-                s={s}
-                filters={f}
-                focusClient={focusClient}
-                onChange={(val) => setF({ ...f, [k]: val })}
-              />
-            ))}
+            .map((k) => {
+              const multiKey = MULTI_KEY_FOR_DIM[k];
+              return (
+                <DimensionField
+                  key={k}
+                  dimension={k}
+                  title={capabilities.labels?.[k] ?? DIMENSION_LABELS[k]}
+                  value={f[k] ?? ""}
+                  multiValues={multiKey ? (f[multiKey] ?? []) : []}
+                  options={options[k] ?? []}
+                  optionLabels={optionLabels[k] ?? {}}
+                  capabilities={capabilities}
+                  s={s}
+                  filters={f}
+                  focusClient={focusClient}
+                  onChange={(val) => setF({ ...f, [k]: val })}
+                  onChangeMulti={
+                    multiKey
+                      ? (nextMulti) =>
+                          setF({ ...f, [multiKey]: nextMulti.length ? nextMulti : undefined })
+                      : undefined
+                  }
+                />
+              );
+            })}
+
+          {s.data?.source === "manual" && (
+            <fieldset className="category-filter">
+              <legend>Faixas e direção de variação</legend>
+              <label>
+                Direção da variação (ranking)
+                <select
+                  value={f.variationDirection ?? "all"}
+                  onChange={(e) =>
+                    setF({
+                      ...f,
+                      variationDirection:
+                        e.target.value === "all"
+                          ? undefined
+                          : (e.target.value as "growth" | "decline"),
+                    })
+                  }
+                >
+                  <option value="all">Todas as variações</option>
+                  <option value="growth">Somente crescimento (Δ &gt; 0)</option>
+                  <option value="decline">Somente queda (Δ &lt; 0)</option>
+                </select>
+              </label>
+              <div className="formgrid">
+                <label>
+                  Faturamento mín. (R$)
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={f.revenueMin ?? ""}
+                    placeholder="Sem mínimo"
+                    onChange={(e) => setNum("revenueMin", e.target.value)}
+                  />
+                </label>
+                <label>
+                  Faturamento máx. (R$)
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={f.revenueMax ?? ""}
+                    placeholder="Sem máximo"
+                    onChange={(e) => setNum("revenueMax", e.target.value)}
+                  />
+                </label>
+                <label>
+                  Ticket mín. (R$)
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={f.ticketMin ?? ""}
+                    placeholder="Sem mínimo"
+                    onChange={(e) => setNum("ticketMin", e.target.value)}
+                  />
+                </label>
+                <label>
+                  Ticket máx. (R$)
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={f.ticketMax ?? ""}
+                    placeholder="Sem máximo"
+                    onChange={(e) => setNum("ticketMax", e.target.value)}
+                  />
+                </label>
+              </div>
+            </fieldset>
+          )}
           {err && <ErrorBox>{err}</ErrorBox>}
         </div>
 
