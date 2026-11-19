@@ -7,6 +7,7 @@ export interface Env extends CloudflareBindings {
   RESEND_API_KEY?: string;
   MAIL_FROM?: string;
   MANUAL_ALLOW_SYNTHETIC?: string;
+  HML_SYNTHETIC_ONLY?: string;
 }
 export class Problem extends Error {
   constructor(

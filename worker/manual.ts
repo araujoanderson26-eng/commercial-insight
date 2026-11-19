@@ -230,6 +230,7 @@ export async function manualRoute(req: Request, e: Env, u: DbUser, path: string)
 }
 
 function validateManifest(m:ManualManifest,e:Env) {
+  if(e.HML_SYNTHETIC_ONLY==="true" && !m.synthetic) throw new Error("Esta homologação aceita exclusivamente pacotes sintéticos. Dados comerciais reais não são autorizados neste ambiente.");
   if(m.synthetic && (e as ManualEnv).MANUAL_ALLOW_SYNTHETIC!=="true") throw new Error("Dados sintéticos são aceitos apenas em ambiente de teste explicitamente configurado.");
   if(m.sourceUpdatedAt && new Date(m.sourceUpdatedAt).valueOf()>new Date(m.extractedAt).valueOf()+300000) throw new Error("Atualização da origem posterior à extração.");
   if(m.referenceDate>m.extractedAt.slice(0,10)) throw new Error("Data de referência posterior à extração.");

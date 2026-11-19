@@ -36,9 +36,9 @@ Depois, o administrador autoriza o envio de perguntas, filtros e resultados agre
 
 ## Homologação isolada
 
-`wrangler.hml.jsonc` aponta a um Worker, D1, R2, fila e origem próprios. O UUID D1 é um marcador que impede implantação por `npm run deploy:hml` até ser preenchido com o banco isolado. `scripts/check-hml.mjs` rejeita uso dos vínculos de produção. A criação dos recursos remotos depende de aprovação explícita após a recusa da revisão automática por persistência e possível cobrança.
+`wrangler.hml.jsonc` aponta a um Worker, D1, R2, fila e origem próprios. O UUID D1 é um marcador que impede implantação por `npm run deploy:hml` até ser preenchido com o banco isolado. `scripts/check-hml.mjs` rejeita conta, nomes e vínculos diferentes dos autorizados. O provisionamento foi autorizado em 19/11/2026, condicionado à conferência prévia do plano, franquias e custos. A conexão atual retorna HTTP 403 nas APIs de faturamento; essa conferência continua pendente e nenhum recurso foi criado. Veja o [estado da execução](HOMOLOGACAO-EXECUCAO.md) e a [análise de custos](HOMOLOGACAO-CUSTOS.md).
 
-Após aprovação de provisionamento, criar **somente**:
+Depois de confirmar o plano e o saldo no ciclo de cobrança, criar **somente**:
 
 ```powershell
 npx wrangler d1 create commercial-insight-hml-db

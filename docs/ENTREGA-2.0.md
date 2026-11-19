@@ -44,7 +44,7 @@ Também foi produzido um briefing com dados reais locais sem OpenAI e sem escrit
 
 | Verificação | Resultado |
 | --- | --- |
-| Suíte automatizada | **80 testes aprovados, zero falhas e zero skips**; inclui cálculos, importação, escopo, OpenAI mock, contexto, visitas, histórico e Excel. |
+| Suíte automatizada | **82 testes aprovados, zero falhas e zero skips** após os novos bloqueios de homologação; inclui cálculos, importação, escopo, OpenAI mock, contexto, visitas, histórico, Excel e recusa de pacotes não sintéticos na homologação. |
 | Typecheck, lint e build | Aprovados. Build remove duas anotações não interpretáveis de comentários da dependência Zod; sem falha de compilação. |
 | Interface Edge desktop/celular | Três suítes aprovadas: atualização/restauração, contratos nativos e fluxo executivo com visita, histórico, favorito, YTD, Excel e impressão/PDF. |
 | Conciliação real local | **272/272 controles**, contagens raw/nativas conferidas em SQLite somente leitura. |
