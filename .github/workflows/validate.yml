@@ -48,6 +48,9 @@ jobs:
       - name: Lint
         run: npm run lint
       - name: Automated tests including Windows preparer
+        # The installer deliberately exercises Windows PowerShell 5.1.
+        # Do not inherit PowerShell 7 module paths through the Node child process.
+        shell: powershell
         run: npm test
       - name: Local desktop and mobile UI smoke
         run: npm run test:ui
