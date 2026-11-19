@@ -48,29 +48,30 @@ As consultas compostas respeitam o limite real do D1; opções de filtros compar
 
 O teste visual em navegador passou em desktop e celular. O `Atualizar.cmd` da distribuição Windows x64 pronta foi executado em ambiente isolado com o binário real: autoteste, hashes das dependências, preservação do perfil e da versão anterior aprovados. Os testes também cobrem revogação de escopo durante consultas, limite de chamadas de opções e revogação da política de IA antes de novo envio ou persistência. Consulte os [testes nativos](../tests/native.test.ts), [de provedores](../tests/providers.test.ts), [do importador](../tests/manual.test.ts) e [do atualizador pronto](../tests/preparer-ready-smoke.ps1).
 
-## Capacidade e processamento candidatos
+## Capacidade e processamento
 
-O [wrangler.jsonc candidato](../wrangler.jsonc) prevê pacote máximo de **512 MiB**, recebido em multipart, e orçamento operacional de **9 GiB** no D1. O dimensionamento pressupõe plano e cotas compatíveis. A documentação atual informa máximo de 10 GB por banco D1 no Workers Paid, 100 parâmetros por instrução e 2 MB por linha/valor; os limites de cada instrução também se aplicam dentro de um batch. Ver [limites oficiais do D1](https://developers.cloudflare.com/d1/platform/limits/).
+O [wrangler.jsonc](../wrangler.jsonc) configura pacote máximo de **512 MiB**, recebido em multipart, e orçamento operacional de **9 GiB** no D1. O plano Workers Paid existente foi conferido; não houve contratação de plano. A documentação atual informa máximo de 10 GB por banco D1 no Workers Paid, 100 parâmetros por instrução e 2 MB por linha/valor; os limites de cada instrução também se aplicam dentro de um batch. Ver [limites oficiais do D1](https://developers.cloudflare.com/d1/platform/limits/).
 
 O [importador](../worker/manual.ts) estima armazenamento e coexistência de versões de forma conservadora, considerando índices, overhead e espaço para a carga recebida. O arquivo de upload, a estimativa lógica e o armazenamento físico são medidas diferentes. A quantidade de snapshots que cabe no orçamento depende do volume e do crescimento dos dados; não há promessa de retenção ilimitada.
 
-A Queue candidata possui produtor/consumidor dedicado, concorrência unitária, checkpoints e retentativas, com cron de apoio. O processamento não depende de manter a página aberta. Sua criação, vinculação e implantação ainda precisam integrar o aceite de produção. Consulte a [configuração oficial de Queues](https://developers.cloudflare.com/queues/configuration/configure-queues/).
+A Queue implantada possui produtor/consumidor dedicado, concorrência unitária, checkpoints e retentativas, com cron de apoio. O processamento não depende de manter a página aberta. Consulte a [configuração oficial de Queues](https://developers.cloudflare.com/queues/configuration/configure-queues/).
 
 A política de retenção de snapshots está pendente. Não há poda automática para abrir espaço: ao exceder o orçamento, a carga deve falhar preservando a versão ativa. Retenção de conversas/auditoria não autoriza apagar snapshots comerciais. Qualquer exclusão ou alteração dessa política exige aprovação explícita e deve preservar a versão ativa e a anterior recuperável.
 
-## Produção e aceite pendentes
+## Entrega e aceite
 
 | Etapa | Estado |
 | --- | --- |
 | Preparador e conciliação DAX | Validados localmente |
-| Worker/interface nativos, migração `0005` e Queue | Candidatos; sem implantação remota nesta entrega |
-| Carga real e ativação do snapshot em produção | Não realizadas |
-| Desempenho no runtime D1 remoto | Pendente de homologação |
+| Worker/interface nativos, migração `0005` e Queue | Implantados conforme autorização |
+| Carga real e ativação do snapshot em produção | Publicadas após todos os controles, sem ativação forçada |
+| Runtime D1 e API publicada | Oito agrupamentos e seis opções de filtros comparados com o SQLite validado; resultados coincidentes |
 | Retenção e capacidade para cargas sucessivas | Política pendente, sem exclusões autorizadas |
-| Atualização Windows e aceite pelo botão do Power BI | Pendentes no ambiente instalado do operador |
+| Preparador Windows 1.0.3 | Instalado; autoteste, dependências, perfil original e backups conferidos |
+| Nome do botão e conferência visual no Power BI | Reparo retornou cancelamento do Windows; registro antigo aponta ao executável atualizado. Controle visual interrompido, sem alegação de clique homologado |
 | Segredo `OPENAI_API_KEY` e aceite do chat | Pendência conhecida; não impede os relatórios manuais determinísticos |
 
-A autorização final deve abranger o candidato revisado, migração aditiva com recuperação, recurso Queue, capacidade e primeira carga privada, seguida de conferência da versão ativa, restauração e escopos. Cadastros, senhas e permissões existentes devem permanecer preservados. Este relatório não autoriza executar essas etapas.
+A implantação e a primeira carga privada foram autorizadas e executadas. Cadastros, configurações e credenciais existentes foram preservados. As provas HTTP conferiram versão ativa, totais, rankings, comparativos, truncamento, filtros, autenticação e cache privado. As sessões temporárias de teste foram removidas. Recuperação, escopos e concorrência também possuem regressões automatizadas; nenhuma versão comercial foi excluída para os testes.
 
 O [empacotador do preparador](../scripts/package-preparer.mjs) usa uma lista explícita de fontes e arquivos de runtime. A distribuição Windows x64 deve conter o runtime necessário e o manual semanal. Perfis, backups, credenciais, logs, pacotes e medições privadas do modelo não integram o ZIP nem o repositório. Os exemplos distribuídos são sintéticos. Veja o [README do preparador](../tools/preparador/README.md) e as [instruções de implantação](IMPLANTACAO.md).
 
