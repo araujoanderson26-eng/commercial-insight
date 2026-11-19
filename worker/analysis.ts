@@ -26,6 +26,7 @@ export function policy(u: User, m: ModelConfig, p: Plan) {
       fail(403, "Nenhuma carteira ou regional autorizada.");
   }
   const filters: string[] = [];
+  if([...(p.filters.categoriesInclude??[]),...(p.filters.categoriesExclude??[])].some(v=>v.startsWith("Macro Categoria: ")))fail(422,"Macro Categoria exige a fonte relacional com cadastro oficial de produtos.");
   for (const [dimension, allowed] of [
     ["region", u.regions],
     ["client", u.clients],
@@ -46,6 +47,8 @@ export function policy(u: User, m: ModelConfig, p: Plan) {
           "))",
       );
   }
+  if(p.filters.categoriesInclude?.length)filters.push("KEEPFILTERS(TREATAS({"+p.filters.categoriesInclude.map(quoted).join(",")+"},"+col(m.columns.category)+"))");
+  if(p.filters.categoriesExclude?.length)filters.push("KEEPFILTERS(FILTER(VALUES("+col(m.columns.category)+"),NOT ("+col(m.columns.category)+" IN {"+p.filters.categoriesExclude.map(quoted).join(",")+"})))");
   return filters;
 }
 function dateParts(ym: string, offset = 0) {

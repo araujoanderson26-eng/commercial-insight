@@ -45,6 +45,8 @@ const val = z.string().trim().max(140).default("");
 export const filtersSchema = z
   .object({ from: month, to: month, region: val, client: val, product: val,
     regional: z.string().trim().max(140).optional(), state: z.string().trim().max(140).optional(), manager: z.string().trim().max(140).optional(), category: z.string().trim().max(140).optional(),
+    categoriesInclude: z.array(z.string().trim().min(1).max(140)).max(100).optional(),
+    categoriesExclude: z.array(z.string().trim().min(1).max(140)).max(100).optional(),
   })
   .strict()
   .refine((v) => {

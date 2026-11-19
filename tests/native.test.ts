@@ -19,6 +19,29 @@ async function seeded(rows:NativeRows=structuredClone(nativeRows)) {
 }
 const monthlyPlan={...plan,filters:{...plan.filters,from:"2026-01",to:"2026-01"}};
 
+test("categories inclusion exclusion overlap and ACL preserve official return paths",async t=>{
+ const s=await seeded();t.after(()=>s.sql.close());
+ for(const [inc,exc,gross,returned]of [[['C'],[],3000000,350000],[['C','D'],['D'],3000000,350000],[[],['D'],3000000,350000],[['D'],[],500000,150000],[['C'],['C'],null,0]]as const){
+  const r=await queryNative(s.env,admin,{...monthlyPlan,filters:{...monthlyPlan.filters,categoriesInclude:[...inc],categoriesExclude:[...exc]}},s.manifest,s.version);
+  assert.equal(r.total.values.gross.current,gross===null?null:gross/10000);assert.equal(r.total.values.returns.current,returned/10000);
+ }
+ const scoped={...admin,role:'comercial' as const,national:0,regions:'["Rep A"]',clients:'["0001"]'};
+ const r=await queryNative(s.env,scoped,{...monthlyPlan,filters:{...monthlyPlan.filters,categoriesInclude:['C','D'],categoriesExclude:['D'],product:'P'}},s.manifest,s.version);
+ assert.equal(r.total.values.gross.current,100);assert.equal(r.total.values.returns.current,15);
+});
+test("categories official Macro Categoria filters both facts and scoped category catalog",async t=>{
+ const s=await seeded();t.after(()=>s.sql.close());
+ s.manifest.inventory.tables.push({...s.manifest.inventory.tables[0],id:'products',name:'Base Produtos',columns:['Codigo Item','Macro Categoria'].map(name=>({...s.manifest.inventory.tables[0].columns[0],name}))});
+ for(const f of [s.manifest.nativeModel!.sales,s.manifest.nativeModel!.returns])s.manifest.inventory.relationships.push({...s.manifest.inventory.relationships[0],fromTable:f.table,fromColumn:f.product,toTable:'products',toColumn:'Codigo Item',isActive:true,crossFilteringBehavior:'OneDirection'});
+ for(const [i,row]of [['P','SUCO'],['Q','VINHO']].entries())s.sql.prepare('INSERT INTO ci_raw_rows(version_id,table_id,row_no,value) VALUES(?,?,?,?)').run(s.version,'products',i+1,JSON.stringify(row));
+ const r=await queryNative(s.env,admin,{...monthlyPlan,filters:{...monthlyPlan.filters,categoriesInclude:['Macro Categoria: SUCO']}},s.manifest,s.version);
+ assert.equal(r.total.values.gross.current,300);assert.equal(r.total.values.returns.current,25);
+ const excluded=await queryNative(s.env,admin,{...monthlyPlan,filters:{...monthlyPlan.filters,categoriesInclude:['Macro Categoria: SUCO','Macro Categoria: VINHO'],categoriesExclude:['D']}},s.manifest,s.version);
+ assert.equal(excluded.total.values.gross.current,300);
+ const options=await import('../worker/native-model').then(m=>m.nativeOptions(s.env,admin,monthlyPlan.filters,s.manifest,s.version));
+ assert(options.values.category.includes('Macro Categoria: SUCO'));assert(options.values.category.includes('Macro Categoria: VINHO'));
+});
+
 test("native recipe recognizer anchors exact DAX and the active filter graph",()=>{
   const m=manifestSchema.parse(nativeFixture().manifest);assert.doesNotThrow(()=>validateNativeModel(m));
   for(const changed of [

@@ -36,6 +36,16 @@ function provider() {
   return { value, plans };
 }
 
+test('category terms resolve only against scoped official macro/group values',async()=>{
+ const p=provider().value;
+ p.search=async(_filters,_dimension,q)=>({items:(q==='GRANEL'?['PA - GRANEL','PA - SUCO CONCENTRADO GRANEL']:[q]).map(key=>({key,name:key})),truncated:false});
+ const result=await resolvePlanEntities(p,{...plan,filters:{...filters,categoriesInclude:['sucos','vinhos'],categoriesExclude:['Granel']}});
+ assert.deepEqual(result.filters.categoriesInclude,['Macro Categoria: SUCO','Macro Categoria: VINHO']);
+ assert.deepEqual(result.filters.categoriesExclude,['PA - GRANEL','PA - SUCO CONCENTRADO GRANEL']);
+ p.search=async()=>({items:[],truncated:false});
+ await assert.rejects(resolvePlanEntities(p,{...plan,filters:{...filters,categoriesInclude:['Inventada']}}),e=>e instanceof Problem&&e.status===422);
+});
+
 test("visita usa consultas tipadas no mesmo snapshot, preserva código/escopo e explicita limitações", async () => {
   const { value, plans } = provider();
   const input = { ...filters, client: "0001", region: "Representante A", state: "SP" };

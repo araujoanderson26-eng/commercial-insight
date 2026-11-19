@@ -1,3 +1,4 @@
+import { CategoryFilter } from "./CategoryFilter";
 import {
   Bell,
   CalendarDays,
@@ -89,7 +90,7 @@ function FilterForm({
     let alive = true;
     const controller = new AbortController();
     const timer = setTimeout(() => {
-      api<{ values: typeof options; labels?: typeof optionLabels }>("data/options", "POST", valid.data, controller.signal)
+      api<{ values: typeof options; labels?: typeof optionLabels }>("data/options", "POST", {...valid.data,categoriesInclude:[],categoriesExclude:[],category:""}, controller.signal)
         .then((v) => { if (alive) { O(v.values); OL(v.labels ?? {}); E(""); } })
         .catch((e) => { if (alive && !isAbortError(e)) E(message(e)); });
     }, 300);
@@ -105,6 +106,7 @@ function FilterForm({
     const supported = { ...parsed.data };
     for (const dimension of ["regional", "state", "manager", "category"] as const)
       if (!capabilities.filters.includes(dimension)) delete supported[dimension];
+    if(!capabilities.filters.includes("category")){delete supported.categoriesInclude;delete supported.categoriesExclude;}
     apply(supported);
   }
   return (
@@ -122,7 +124,8 @@ function FilterForm({
           </label>
         ))}
       </div>
-      {selectedDimensions.map((k) => {
+      {capabilities.filters.includes("category") && s.data?.source === "manual" && <CategoryFilter values={options.category??[]} include={f.categoriesInclude??(f.category?[f.category]:[])} exclude={f.categoriesExclude??[]} onChange={(categoriesInclude,categoriesExclude)=>F({...f,category:"",categoriesInclude,categoriesExclude})} />}
+      {selectedDimensions.filter(k=>k!=="category"||s.data?.source!=="manual").map((k) => {
         const list = k === "region" ? s.user.regions : k === "client" ? s.user.clients : [];
         const title = capabilities.labels?.[k] ?? { region: "Regional", client: "Cliente", product: "Produto", regional: "Regional comercial", state: "UF", manager: "Gerente", category: "Categoria" }[k];
         return (
@@ -186,6 +189,7 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
       const next = { ...current };
       for (const dimension of ["regional", "state", "manager", "category"] as const)
         if (!supported.includes(dimension)) delete next[dimension];
+      if(!supported.includes("category")){delete next.categoriesInclude;delete next.categoriesExclude;}
       return JSON.stringify(next) === JSON.stringify(current) ? current : next;
     });
   }, [sourceFilters]);
@@ -308,6 +312,7 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
               <button onClick={() => W("filtros")} className="filterbtn">
                 <SlidersHorizontal size={15} />
                 Filtros
+                {(filters.categoriesInclude?.length||filters.categoriesExclude?.length)?" · categorias selecionadas":null}
                 {sessionCapabilities(s).filters.map((dimension) => filters[dimension]).filter(Boolean).length > 0
                   ? " · " + sessionCapabilities(s).filters.map((dimension) => filters[dimension]).filter(Boolean).length
                   : ""}

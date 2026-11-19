@@ -7,7 +7,7 @@ import { fail, stmt, type DbUser, type Env } from "./core";
 type NativeRole = "sales" | "returns" | "customers" | "calendar" | "regions" | "municipalities" | "latitudes" | "repArea";
 type NativeTable = ManualManifest["inventory"]["tables"][number];
 type Sql = { sql:string; args:(string|number|null)[] };
-export type NativeContext = ControlFilters & { name?:string; allowedRegions?:string[]; allowedClients?:string[] };
+export type NativeContext = ControlFilters & { categoriesInclude?:string[]; categoriesExclude?:string[]; macroTable?:string;macroKey?:string;macroValue?:string; name?:string; allowedRegions?:string[]; allowedClients?:string[] };
 /** Matches the supported case-insensitive/accent-sensitive text contract while preserving raw/display values. */
 export function nativeKey(value:string):string|null {
   const text=value.normalize("NFC").trimEnd();if(text.length===0)return null;
@@ -116,17 +116,18 @@ export function nativePartStatements(e:Env,m:ManualManifest,version:string,table
 export function compileNativeContexts(version:string,contexts:NativeContext[],includeDimensions=false):Sql {
   if(contexts.length<1||contexts.length>10001)throw Error("Quantidade de contextos inválida.");
   const key=(s:string|undefined)=>s?nativeKey(s)??"":"";
-  const normalized=contexts.map((c,index)=>({key:index,name:c.name??String(index),from:c.from,to:c.to,region:key(c.region),client:key(c.client),product:key(c.product),category:key(c.category),state:key(c.state),regional:key(c.regional),manager:key(c.manager),allowedRegions:(c.allowedRegions??[]).map(nativeKey),allowedClients:(c.allowedClients??[]).map(nativeKey)})).map(c=>({...c,hasRepresentative:c.region!==""||c.allowedRegions.length>0?1:0,hasSales:c.client!==""||c.product!==""||c.category!==""||c.state!==""||c.allowedClients.length>0?1:0}));
+  const normalized=contexts.map((c,index)=>({key:index,name:c.name??String(index),from:c.from,to:c.to,region:key(c.region),client:key(c.client),product:key(c.product),macroTable:c.macroTable??"",macroKey:c.macroKey??"",macroValue:c.macroValue??"",macroInclude:(c.categoriesInclude??[]).filter(v=>v.startsWith("Macro Categoria: ")).map(v=>key(v.slice(17))),macroExclude:(c.categoriesExclude??[]).filter(v=>v.startsWith("Macro Categoria: ")).map(v=>key(v.slice(17))),categoriesInclude:(c.categoriesInclude??[]).filter(v=>!v.startsWith("Macro Categoria: ")).map(key),categoriesExclude:(c.categoriesExclude??[]).filter(v=>!v.startsWith("Macro Categoria: ")).map(key),category:key(c.category),state:key(c.state),regional:key(c.regional),manager:key(c.manager),allowedRegions:(c.allowedRegions??[]).map(nativeKey),allowedClients:(c.allowedClients??[]).map(nativeKey)})).map(c=>({...c,hasRepresentative:c.region!==""||c.allowedRegions.length>0?1:0,hasSales:c.macroInclude.length>0||c.macroExclude.length>0||c.categoriesInclude.length>0||c.categoriesExclude.length>0||c.client!==""||c.product!==""||c.category!==""||c.state!==""||c.allowedClients.length>0?1:0}));
   const hasGeo=normalized.some(c=>c.regional!==""||c.manager!==""),hasReps=normalized.some(c=>c.hasRepresentative),hasSales=normalized.some(c=>c.hasSales),hasCustomerPath=hasReps||hasSales;
   const geoClause=(alias:string)=>hasGeo?" AND((c.regional='' AND c.manager='') OR EXISTS(SELECT 1 FROM geo WHERE geo.k=c.k AND geo.state IS "+alias+".state))":"";
   const customerCuts=[...(normalized.some(c=>c.region!=="")?[normalized.every(c=>c.region!=="")?"b.representative=c.representative":"(c.representative='' OR b.representative=c.representative)"]:[]),...(normalized.some(c=>c.allowedRegions.length)?[normalized.every(c=>c.allowedRegions.length)?"b.representative IN(SELECT value FROM json_each(c.allowed_reps))":"(json_array_length(c.allowed_reps)=0 OR b.representative IN(SELECT value FROM json_each(c.allowed_reps)))"]:[])];
-  const salesCuts=[...(["client","product","category","state"] as const).filter(field=>normalized.some(c=>c[field]!=="")).map(field=>normalized.every(c=>c[field]!=="")?"s."+field+"=c."+field:"(c."+field+"='' OR s."+field+"=c."+field+")"),...(normalized.some(c=>c.allowedClients.length)?[normalized.every(c=>c.allowedClients.length)?"s.client IN(SELECT value FROM json_each(c.allowed_clients))":"(json_array_length(c.allowed_clients)=0 OR s.client IN(SELECT value FROM json_each(c.allowed_clients)))"]:[])];
+  const macroProducts=(_alias:string,field:string)=>"SELECT product FROM macro_products WHERE k=c.k AND product IS NOT NULL AND macro IN(SELECT value FROM json_each(c."+field+"))";
+  const salesCuts=[...(normalized.some(c=>c.macroExclude.length)?["(s.product IS NULL OR s.product NOT IN("+macroProducts("s","macro_exclude")+"))"]:[]),...(normalized.some(c=>c.categoriesInclude.length||c.macroInclude.length)?["((json_array_length(c.categories_include)=0 AND json_array_length(c.macro_include)=0) OR s.category IN(SELECT value FROM json_each(c.categories_include)) OR s.product IN("+macroProducts("s","macro_include")+"))"]:[]),...(normalized.some(c=>c.categoriesExclude.length)?["(s.category IS NULL OR s.category NOT IN(SELECT value FROM json_each(c.categories_exclude)))"]:[]),...(["client","product","category","state"] as const).filter(field=>normalized.some(c=>c[field]!=="")).map(field=>normalized.every(c=>c[field]!=="")?"s."+field+"=c."+field:"(c."+field+"='' OR s."+field+"=c."+field+")"),...(normalized.some(c=>c.allowedClients.length)?[normalized.every(c=>c.allowedClients.length)?"s.client IN(SELECT value FROM json_each(c.allowed_clients))":"(json_array_length(c.allowed_clients)=0 OR s.client IN(SELECT value FROM json_each(c.allowed_clients)))"]:[])];
   const visibleSales=hasReps?" JOIN ctx c ON c.k=s.k WHERE "+(normalized.every(c=>c.hasRepresentative)?"":"c.has_representative=0 OR ")+"EXISTS(SELECT 1 FROM customer0 b WHERE b.k=s.k AND b.client IS s.client)":"";
   const salesKeys="SELECT DISTINCT s.k,s.client FROM visible_sales s"+(normalized.every(c=>c.hasSales)?"":" JOIN ctx c ON c.k=s.k WHERE c.has_sales=1");
   const visibleCustomers=hasSales?"SELECT DISTINCT b.k,b.client FROM customer0 b JOIN sales_client_keys s ON s.k=b.k AND s.client IS b.client"+(normalized.every(c=>c.hasSales)?"":" UNION SELECT DISTINCT b.k,b.client FROM customer0 b JOIN ctx c ON c.k=b.k WHERE c.has_sales=0"):"SELECT DISTINCT b.k,b.client FROM customer0 b";
   const returnsCustomer=hasCustomerPath?" AND("+(normalized.every(c=>c.hasRepresentative||c.hasSales)?"":"(c.has_representative=0 AND c.has_sales=0) OR ")+"EXISTS(SELECT 1 FROM visible_customers b WHERE b.k=c.k AND b.client IS r.client))":"";
   const sql=`WITH
-ctx AS MATERIALIZED (SELECT CAST(json_extract(value,'$.key') AS INTEGER) AS k,json_extract(value,'$.name') AS name,json_extract(value,'$.from') AS start,json_extract(value,'$.to') AS finish,json_extract(value,'$.region') AS representative,json_extract(value,'$.client') AS client,json_extract(value,'$.product') AS product,json_extract(value,'$.category') AS category,json_extract(value,'$.state') AS state,json_extract(value,'$.regional') AS regional,json_extract(value,'$.manager') AS manager,json_extract(value,'$.allowedRegions') AS allowed_reps,json_extract(value,'$.allowedClients') AS allowed_clients,json_extract(value,'$.hasRepresentative') AS has_representative,json_extract(value,'$.hasSales') AS has_sales FROM json_each(?)),
+ctx AS MATERIALIZED (SELECT CAST(json_extract(value,'$.key') AS INTEGER) AS k,json_extract(value,'$.name') AS name,json_extract(value,'$.from') AS start,json_extract(value,'$.to') AS finish,json_extract(value,'$.region') AS representative,json_extract(value,'$.client') AS client,json_extract(value,'$.product') AS product,json_extract(value,'$.macroTable') AS macro_table,json_extract(value,'$.macroKey') AS macro_key,json_extract(value,'$.macroValue') AS macro_value,json_extract(value,'$.macroInclude') AS macro_include,json_extract(value,'$.macroExclude') AS macro_exclude,json_extract(value,'$.categoriesInclude') AS categories_include,json_extract(value,'$.categoriesExclude') AS categories_exclude,json_extract(value,'$.category') AS category,json_extract(value,'$.state') AS state,json_extract(value,'$.regional') AS regional,json_extract(value,'$.manager') AS manager,json_extract(value,'$.allowedRegions') AS allowed_reps,json_extract(value,'$.allowedClients') AS allowed_clients,json_extract(value,'$.hasRepresentative') AS has_representative,json_extract(value,'$.hasSales') AS has_sales FROM json_each(?)),
 sales AS (SELECT * FROM ci_native_sales WHERE version_id=?),
 returned AS (SELECT * FROM ci_native_returns WHERE version_id=?),
 customers AS (SELECT * FROM ci_native_customers WHERE version_id=?),
@@ -137,11 +138,12 @@ reparea AS (SELECT * FROM ci_native_reparea WHERE version_id=?),
 calendar AS (SELECT * FROM ci_native_calendar WHERE version_id=?),
 geo AS (SELECT DISTINCT c.k,r.state FROM ctx c JOIN regions r ON (c.regional='' OR r.regional=c.regional) AND(c.manager='' OR r.manager=c.manager)),
 customer0 AS (SELECT c.k,b.client,b.representative,b.state,b.display FROM ctx c JOIN customers b ON ${customerCuts.join(" AND ")||"1=1"}${geoClause("b")}),
+macro_products AS MATERIALIZED (SELECT c.k,UPPER(RTRIM(CAST(json_extract(p.value,c.macro_key) AS TEXT))) AS product,UPPER(RTRIM(CAST(json_extract(p.value,c.macro_value) AS TEXT))) AS macro FROM ctx c JOIN ci_raw_rows p ON p.version_id=(SELECT version_id FROM sales LIMIT 1) AND p.table_id=c.macro_table),
 sales0 AS (SELECT c.k,s.* FROM ctx c JOIN sales s ON s.date>=c.start AND s.date<=c.finish${salesCuts.length?" AND "+salesCuts.join(" AND "):""} WHERE EXISTS(SELECT 1 FROM calendar d WHERE d.date=s.date)${geoClause("s")}),
 visible_sales AS (SELECT ${includeDimensions?"s.*":"s.k,s.client,s.amount"} FROM sales0 s${visibleSales}),
 sales_client_keys AS MATERIALIZED (${salesKeys}),
 visible_customers AS MATERIALIZED (${visibleCustomers}),
-visible_returns AS (SELECT c.k,r.row_no,r.client,r.state,r.amount FROM ctx c JOIN returned r ON r.date>=c.start AND r.date<=c.finish WHERE EXISTS(SELECT 1 FROM calendar d WHERE d.date=r.date)${geoClause("r")}${returnsCustomer}),
+visible_returns AS (SELECT c.k,r.row_no,r.client,r.state,r.amount FROM ctx c JOIN returned r ON r.date>=c.start AND r.date<=c.finish WHERE EXISTS(SELECT 1 FROM calendar d WHERE d.date=r.date)${geoClause("r")}${returnsCustomer}${normalized.some(c=>c.macroInclude.length)?" AND (json_array_length(c.macro_include)=0 OR json_array_length(c.categories_include)>0 OR r.product IN("+macroProducts("r","macro_include")+"))":""}${normalized.some(c=>c.macroExclude.length)?" AND (r.product IS NULL OR r.product NOT IN("+macroProducts("r","macro_exclude")+"))":""}),
 sale_totals AS (SELECT k,SUM(amount) AS gross,COUNT(*) AS records,CASE WHEN COUNT(*)=0 THEN NULL ELSE COUNT(DISTINCT client)+CASE WHEN COUNT(*)>COUNT(client) THEN 1 ELSE 0 END END AS buyers FROM visible_sales GROUP BY k),
 return_totals AS (SELECT k,SUM(amount) AS returned FROM visible_returns GROUP BY k)
 SELECT c.k,c.name,s.gross,COALESCE(r.returned,0) AS returns,COALESCE(s.gross,0)-COALESCE(r.returned,0) AS revenue,s.buyers,NULL AS margin,COALESCE(s.records,0) AS records FROM ctx c LEFT JOIN sale_totals s ON s.k=c.k LEFT JOIN return_totals r ON r.k=c.k ORDER BY c.k`;
@@ -193,7 +195,10 @@ export function nativePeriod(m:ManualManifest,filters:Filters):NonNullable<Repor
 }
 function context(u:DbUser,p:Plan,offset:number,m:ManualManifest):NativeContext {
   const period=nativePeriod(m,p.filters);
-  return {...p.filters,...(offset===0?period.current:period.previous),...scope(u,p)};
+  const products=m.inventory.tables.find(t=>t.name==="Base Produtos"),ki=products?.columns.findIndex(c=>c.name==="Codigo Item")??-1,vi=products?.columns.findIndex(c=>c.name==="Macro Categoria")??-1;
+  const related=products&&[native(m).sales,native(m).returns].every(f=>m.inventory.relationships.some(value=>{if(!value||typeof value!=="object")return false;const r=value as Record<string,unknown>;return r.isActive===true&&r.fromTable===f.table&&r.fromColumn===f.product&&r.toTable===products.id&&r.toColumn==="Codigo Item"&&r.crossFilteringBehavior==="OneDirection";}));
+  if([...p.filters.categoriesInclude??[],...p.filters.categoriesExclude??[]].some(v=>v.startsWith("Macro Categoria: "))&&(!products||ki<0||vi<0||!related))fail(422,"Macro Categoria não está disponível nesta fonte.");
+  return {...p.filters,macroTable:related?products?.id:undefined,macroKey:ki<0?undefined:"$["+ki+"]",macroValue:vi<0?undefined:"$["+vi+"]",...(offset===0?period.current:period.previous),...scope(u,p)};
 }
 function pair(name:string,a:NativeResult|undefined,b:NativeResult|undefined,m:ManualManifest):Row {
   const empty:NativeResult={k:0,name,gross:null,returns:0,revenue:0,buyers:null,margin:null,records:0};a??=empty;b??=empty;
@@ -263,7 +268,8 @@ export async function nativeIdentityLabels(e:Env,m:ManualManifest,version:string
 }
 export async function nativeSearch(e:Env,u:DbUser,filters:Filters,m:ManualManifest,version:string,dimension:"client"|"product"|"category",query:string) {
   if(!["client","product","category"].includes(dimension)||!query.trim()||query.length>100)fail(422,"Informe de 1 a 100 caracteres para a pesquisa.");
-  const selected={...filters,client:"",product:"",category:""},base=context(u,{filters:selected,metric:"revenue",group:dimension,order:"current"},0,m);
+  const selected={...filters,client:"",product:"",category:"",categoriesInclude:[],categoriesExclude:[]},base=context(u,{filters:selected,metric:"revenue",group:dimension,order:"current"},0,m);
+  if(dimension==="category"&&query.startsWith("Macro Categoria: ")){const q=compileNativeOptions(version,base,["category"]),rows=(await stmt(e,q.sql,...q.args).all<{dimension:string;name:string}>()).results.filter(v=>v.name.toLocaleLowerCase("pt-BR")===query.toLocaleLowerCase("pt-BR"));return{items:rows.map(v=>({key:v.name,name:v.name})),truncated:false};}
   const allowed=compileNativeGroups(version,[{...base,from:m.projection.from,to:[m.referenceDate,m.projection.to].sort()[0]}],dimension,true);
   const source=dimension==="category"?null:identityBinding(m,dimension),pattern="%"+query.trim().replace(/[\\%_]/g,"\\$&")+"%";
   // The scoped membership query is reused; names can never introduce a key outside that membership.
@@ -364,8 +370,9 @@ export function compileNativeOptions(version:string,context:NativeContext,groups
   prefix+=",o_sales_clients AS MATERIALIZED (SELECT DISTINCT k,client,state FROM visible_sales)";
   for(const [index,group]of groups.entries()){
     const p="o"+index;let values:string;
-    if(group==="client"||group==="product"||group==="category"||group==="state")values="SELECT "+group+" AS g,"+group+"_name AS name FROM visible_sales";
-    else if(group==="region"){
+    if(group==="client"||group==="product"||group==="category"||group==="state"){values="SELECT "+group+" AS g,"+group+"_name AS name FROM visible_sales";
+    if(group==="category"&&context.macroTable&&context.macroValue&&context.macroKey)values+=" UNION SELECT DISTINCT 'Macro Categoria: '||CAST(json_extract(p.value,c.macro_value) AS TEXT) AS g,'Macro Categoria: '||CAST(json_extract(p.value,c.macro_value) AS TEXT) AS name FROM ctx c JOIN ci_raw_rows p ON p.version_id=(SELECT version_id FROM sales LIMIT 1) AND p.table_id=c.macro_table WHERE EXISTS(SELECT 1 FROM visible_sales s WHERE s.k=c.k AND s.product=UPPER(RTRIM(CAST(json_extract(p.value,c.macro_key) AS TEXT))))";
+    }else if(group==="region"){
       tails.push(","+p+"_activity_keys AS MATERIALIZED (SELECT k,client FROM visible_sales UNION SELECT k,client FROM visible_returns)");
       values="SELECT b.representative AS g,json_extract(b.display,'$.representative') AS name FROM customer0 b JOIN "+p+"_activity_keys a ON a.k=b.k AND a.client IS b.client";
     }else if(group==="regional"||group==="manager"){
