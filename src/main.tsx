@@ -18,14 +18,16 @@ import {
   type Group,
   type Session,
   type FilterDimension,
+  type Plan,
 } from "../shared/domain";
 import { Audit, Integrations, Team } from "./Admin";
 import Auth from "./Auth";
 import Chat, { type Seed } from "./Chat";
 import Profile from "./Profile";
 import { DataUpdates } from "./DataUpdates";
+import Visits from "./Visits";
 import "./style.css";
-import { api, Brand, Busy, Credit, Empty, ErrorBox, message, period, sessionCapabilities } from "./ui";
+import { api, Brand, Busy, Credit, Empty, ErrorBox, isAbortError, message, period, sessionCapabilities } from "./ui";
 import { adminNav, Home, mainNav, navs, Reports } from "./WorkspaceViews";
 const cleanPath = () => location.pathname === "/admin/atualizacao-dados" ? "atualizacao-dados" : location.pathname.split("/")[1] || "inicio";
 function Modal({
@@ -76,7 +78,8 @@ function FilterForm({
 }) {
   const [f, F] = useState(value),
     [err, E] = useState(""),
-    [options, O] = useState<Partial<Record<FilterDimension, string[]>>>({});
+    [options, O] = useState<Partial<Record<FilterDimension, string[]>>>({}),
+    [optionLabels, OL] = useState<Partial<Record<FilterDimension, Record<string, string>>>>({});
   const capabilities = sessionCapabilities(s);
   const selectedDimensions = capabilities.filters;
   useEffect(() => {
@@ -84,8 +87,13 @@ function FilterForm({
     const valid = filtersSchema.safeParse(f);
     if (!valid.success) return;
     let alive = true;
-    api<{ values: typeof options }>("data/options", "POST", valid.data).then((v) => { if (alive) O(v.values); }).catch((e) => { if (alive) E(message(e)); });
-    return () => { alive = false; };
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      api<{ values: typeof options; labels?: typeof optionLabels }>("data/options", "POST", valid.data, controller.signal)
+        .then((v) => { if (alive) { O(v.values); OL(v.labels ?? {}); E(""); } })
+        .catch((e) => { if (alive && !isAbortError(e)) E(message(e)); });
+    }, 300);
+    return () => { alive = false; clearTimeout(timer); controller.abort(); };
   }, [s.data?.activeVersionId, f.from, f.to]);
   function save(e: FormEvent) {
     e.preventDefault();
@@ -95,7 +103,7 @@ function FilterForm({
       return;
     }
     const supported = { ...parsed.data };
-    for (const dimension of ["regional", "state", "manager"] as const)
+    for (const dimension of ["regional", "state", "manager", "category"] as const)
       if (!capabilities.filters.includes(dimension)) delete supported[dimension];
     apply(supported);
   }
@@ -116,7 +124,7 @@ function FilterForm({
       </div>
       {selectedDimensions.map((k) => {
         const list = k === "region" ? s.user.regions : k === "client" ? s.user.clients : [];
-        const title = capabilities.labels?.[k] ?? { region: "Regional", client: "Cliente", product: "Produto", regional: "Regional comercial", state: "UF", manager: "Gerente" }[k];
+        const title = capabilities.labels?.[k] ?? { region: "Regional", client: "Cliente", product: "Produto", regional: "Regional comercial", state: "UF", manager: "Gerente", category: "Categoria" }[k];
         return (
           <label key={k}>
             {title}
@@ -124,7 +132,7 @@ function FilterForm({
               <select value={f[k] ?? ""} onChange={(e) => F({ ...f, [k]: e.target.value })}>
                 <option value="">Todos no meu escopo</option>
                 {list.map((v) => (
-                  <option key={v}>{v}</option>
+                  <option key={v} value={v}>{optionLabels[k]?.[v] ?? v}</option>
                 ))}
               </select>
             ) : (
@@ -134,12 +142,13 @@ function FilterForm({
                 maxLength={140}
                 value={f[k] ?? ""}
                 onChange={(e) => F({ ...f, [k]: e.target.value })}
-                placeholder={"Todos · ou nome exato no modelo"}
+                placeholder={"Todos · pesquise código ou descrição"}
               />
             )}
             <datalist id={"source-options-" + k}>
-              {(options[k] ?? []).map((v) => <option key={v} value={v} />)}
+              {(options[k] ?? []).map((v) => <option key={v} value={v} label={optionLabels[k]?.[v] ?? v} />)}
             </datalist>
+            {optionLabels[k]?.[f[k] ?? ""] && <small className="muted">{optionLabels[k]![f[k] ?? ""]}</small>}
             {k === "region" && capabilities.labels?.region === "Representante" && <small className="muted">As permissões cadastradas para este campo continuam aplicadas ao representante autorizado.</small>}
           </label>
         );
@@ -163,16 +172,19 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
     [modal, W] = useState(""),
     [seed, S] = useState<Seed | null>(null),
     [chatKey, K] = useState(0),
-    [reportGroup, G] = useState<Group>("month");
+    [reportGroup, G] = useState<Group>("month"),
+    [restoredPlan, RP] = useState<Plan | undefined>();
   const ready =
       s.data?.ready ?? (s.integrations.configured && (s.integrations.mode === "application" || s.integrations.linked)),
-    admin = s.user.role === "admin";
+    admin = s.user.role === "admin",
+    operator = s.user.role === "operador";
+  useEffect(() => { if (operator && page !== "atualizacao-dados" && page !== "perfil" && page !== "mais") go("atualizacao-dados"); }, [operator, page]);
   const sourceFilters = JSON.stringify(sessionCapabilities(s).filters);
   useEffect(() => {
     const supported = JSON.parse(sourceFilters) as FilterDimension[];
     F((current) => {
       const next = { ...current };
-      for (const dimension of ["regional", "state", "manager"] as const)
+      for (const dimension of ["regional", "state", "manager", "category"] as const)
         if (!supported.includes(dimension)) delete next[dimension];
       return JSON.stringify(next) === JSON.stringify(current) ? current : next;
     });
@@ -214,7 +226,7 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
         key={n.p}
         className={page === n.p ? "navitem active" : "navitem"}
         onClick={() => {
-          if (n.p === "relatorios") G("month");
+          if (n.p === "relatorios") { G("month"); RP(undefined); }
           go(n.p);
         }}
       >
@@ -234,7 +246,7 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
         <Brand />
         <div className="sidegroup">
           <p>Navegação</p>
-          {navigation(mainNav)}
+          {navigation(operator ? adminNav.slice(0, 1) : mainNav)}
         </div>
         {admin && (
           <div className="sidegroup">
@@ -319,9 +331,11 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
               clearSeed={() => S(null)}
               filters={filters}
             />
+          ) : page === "visitas" ? (
+            <Visits filters={filters} s={s} />
           ) : ["relatorios", "produtos", "clientes", "alertas"].includes(page) ? (
             <Reports
-              key={page + reportGroup}
+              key={page + reportGroup + JSON.stringify(restoredPlan)}
               page={page}
               filters={filters}
               ready={ready}
@@ -329,9 +343,12 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
               go={go}
               ask={(q) => chat(q, true)}
               initialGroup={reportGroup}
+              initialPlan={restoredPlan}
+              restore={(plan) => { F(plan.filters); G(plan.group); RP(plan); go("relatorios"); }}
               drill={(k, v) => {
                 F({ ...filters, [k]: v });
                 G("month");
+                RP(undefined);
                 go("relatorios");
               }}
             />
@@ -339,8 +356,8 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
             <Profile s={s} logout={logout} reload={reload} />
           ) : page === "integracoes" && admin ? (
             <Integrations changed={reload} />
-          ) : page === "atualizacao-dados" && admin ? (
-            <DataUpdates changed={reload} />
+          ) : page === "atualizacao-dados" && (admin || operator) ? (
+            <DataUpdates changed={reload} operator={operator} />
           ) : page === "equipe" && admin ? (
             <Team self={s.user.id} scopeLabel={sessionCapabilities(s).labels?.region === "Representante" ? "Representantes" : "Regionais"} />
           ) : page === "auditoria" && admin ? (
@@ -349,7 +366,7 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
             <section className="panel moremenu">
               <h1>Mais opções</h1>
               {navigation([
-                ...mainNav.slice(4),
+                ...(operator ? [] : mainNav.slice(4)),
                 ...(admin ? adminNav : []),
                 navs.find((n) => n.p === "perfil")!,
               ])}
@@ -367,7 +384,7 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
         </div>
       </main>
       <nav className="mobilebar">
-        {[...mainNav.slice(0, 4), navs[navs.length - 1]].map((n) => (
+        {(operator ? [adminNav[0], navs.find((item) => item.p === "perfil")!] : [...mainNav.slice(0, 4), navs[navs.length - 1]]).map((n) => (
           <button
             key={n.p}
             className={
@@ -407,9 +424,9 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
               if (modal === "visita")
                 chat(
                   f.client
-                    ? "Prepare uma pauta de visita para " +
+                    ? "Prepare uma visita para " +
                         f.client +
-                        " com base na evolução do faturamento e margem."
+                        " com base no histórico comercial disponível."
                     : "Prepare uma pauta de visita para o cliente ",
                   !!f.client,
                 );

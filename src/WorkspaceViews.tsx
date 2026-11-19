@@ -23,8 +23,13 @@ import {
   Store,
   Target,
   Users,
+  Download,
+  Printer,
+  Star,
+  Search,
+  Trash2,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import {
   pretty,
@@ -35,13 +40,15 @@ import {
   type Session,
   type FilterDimension,
 } from "../shared/domain";
-import { Busy, Delta, ErrorBox, Graph, Kpis, planFor, Signals, useReport, sessionCapabilities, groupLabel, metricLabel } from "./ui";
+import { api, Busy, Delta, ErrorBox, Graph, Kpis, planFor, Signals, useReport, sessionCapabilities, groupLabel, metricLabel, absoluteChange, ReportContext, message } from "./ui";
+import { exportReport } from "./exports";
 export const mainNav = [
   { p: "inicio", label: "Início", icon: House },
   { p: "conversas", label: "Conversas", icon: MessageCircle },
   { p: "relatorios", label: "Relatórios", icon: ChartNoAxesColumnIncreasing },
   { p: "clientes", label: "Clientes", icon: Users },
   { p: "produtos", label: "Produtos e mix", icon: Boxes },
+  { p: "visitas", label: "Preparar visita", icon: CalendarDays },
   { p: "alertas", label: "Alertas e ações", icon: Bell },
 ];
 export const adminNav = [
@@ -60,7 +67,7 @@ export type Go = (page: string) => void;
 const cards = [
   {
     title: "Analisar cliente",
-    desc: "Histórico, evolução e margem.",
+    desc: "Histórico e evolução comercial.",
     icon: Store,
     color: "blue",
     to: "analisar",
@@ -77,7 +84,7 @@ const cards = [
     desc: "Pauta e argumentos de venda.",
     icon: CalendarDays,
     color: "cyan",
-    to: "visita",
+    to: "visitas",
   },
   {
     title: "Carteira de clientes",
@@ -254,6 +261,7 @@ export function Home({
           <ErrorBox>{report.error}</ErrorBox>
         ) : report.data ? (
           <>
+            <ReportContext r={report.data} />
             <Kpis r={report.data} />
             <div className="analytics">
               <Graph r={report.data} />
@@ -275,7 +283,9 @@ export function Reports({
   go,
   ask,
   initialGroup,
+  initialPlan,
   drill,
+  restore,
 }: {
   page: string;
   filters: Filters;
@@ -284,13 +294,33 @@ export function Reports({
   go: Go;
   ask: (q: string) => void;
   initialGroup: Group;
+  initialPlan?: Plan;
   drill: (key: FilterDimension, name: string) => void;
+  restore: (plan: Plan) => void;
 }) {
   const group0 = page === "clientes" ? "client" : page === "produtos" ? "product" : initialGroup;
-  const [group, G] = useState<Group>(group0),
-    [metric, M] = useState<Metric>("revenue"),
-    [order, O] = useState<Plan["order"]>("current"),
-    [refresh, R] = useState(0);
+  const [group, G] = useState<Group>(initialPlan?.group ?? group0),
+    [metric, M] = useState<Metric>(initialPlan?.metric ?? "revenue"),
+    [order, O] = useState<Plan["order"]>(initialPlan?.order ?? "current"),
+    [refresh, R] = useState(0),
+    [search, S] = useState(""),
+    [saveTitle, ST] = useState(""),
+    [saveOpen, SO] = useState(false),
+    [saved, SS] = useState<{ id: string; title: string; plan: Plan }[]>([]),
+    [notice, N] = useState(""),
+    [savedError, SE] = useState("");
+  useEffect(() => { api<typeof saved>("saved-reports").then(SS).catch((error) => SE(message(error))); }, []);
+  async function save() {
+    if (!report.data || !saveTitle.trim()) return;
+    try {
+      await api("saved-reports", "POST", { title: saveTitle.trim(), plan: report.data.plan });
+      SS(await api<typeof saved>("saved-reports")); SO(false); N("Consulta salva. Ao reabrir, os dados serão consultados com suas permissões atuais."); SE("");
+    } catch (error) { SE(message(error)); }
+  }
+  async function removeSaved(id: string) {
+    try { await api("saved-reports/" + id, "DELETE"); SS((items) => items.filter((item) => item.id !== id)); }
+    catch (error) { SE(message(error)); }
+  }
   const capabilities = sessionCapabilities(s);
   const effectiveGroup = capabilities.groups.includes(group) ? group : "month";
   const effectiveMetric = capabilities.metrics.includes(metric) ? metric : "revenue";
@@ -314,6 +344,9 @@ export function Reports({
                 : "Explore o desempenho e compare com o mesmo período do ano anterior."}
         </p>
       </div>
+      {saved.length > 0 && <section className="panel saved-reports"><div className="mini"><Star size={14} /> Consultas favoritas</div><div className="saved-list">{saved.map((item) => <div key={item.id}><button className="soft compact" onClick={() => { G(item.plan.group); M(item.plan.metric); O(item.plan.order); restore(item.plan); }}><Star size={13} />{item.title}</button><button className="iconbtn" aria-label={"Excluir consulta " + item.title} onClick={() => void removeSaved(item.id)}><Trash2 size={13} /></button></div>)}</div></section>}
+      {notice && <div className="notice" role="status">{notice}</div>}
+      {savedError && <ErrorBox>{savedError}</ErrorBox>}
       <div className="panel toolbar">
         <label>
           Agrupar por
@@ -349,6 +382,7 @@ export function Reports({
           <RefreshCw size={15} />
           Atualizar
         </button>
+        <button className="soft" title="Janeiro ao último mês selecionado, com o corte equivalente da fonte" disabled={!ready} onClick={() => restore({ ...planFor({ ...filters, from: filters.to.slice(0, 4) + "-01" }, effectiveGroup, effectiveMetric), order })}><CalendarDays size={15} />Acumulado do ano</button>
       </div>
       {!ready ? (
         <Connection s={s} go={go} />
@@ -358,6 +392,9 @@ export function Reports({
         <Busy />
       ) : (
         <>
+          <ReportContext r={report.data} />
+          <div className="report-actions"><button className="soft compact" onClick={() => exportReport(report.data!)}><Download size={15} />Exportar Excel</button><button className="soft compact" onClick={() => window.print()}><Printer size={15} />Imprimir / PDF</button><button className="soft compact" onClick={() => { ST(title + " · " + filters.to); SO(!saveOpen); }}><Star size={15} />Salvar consulta</button></div>
+          {saveOpen && <form className="panel save-report-form" onSubmit={(event) => { event.preventDefault(); void save(); }}><label>Nome da consulta<input required maxLength={120} value={saveTitle} onChange={(event) => ST(event.target.value)} /></label><button className="primary">Salvar</button><button type="button" className="soft" onClick={() => SO(false)}>Cancelar</button></form>}
           <Kpis r={report.data} />
           {page === "alertas" ? <Signals r={report.data} ask={ask} /> : <Graph r={report.data} />}
           <section className="panel">
@@ -367,6 +404,7 @@ export function Reports({
                 {report.data.rows.length} {effectiveGroup === "month" ? "meses" : "registros"}
               </span>
             </div>
+            {effectiveGroup !== "month" && <label className="ranking-search"><Search size={16} /><input aria-label="Pesquisar no ranking" placeholder="Pesquisar código ou descrição neste ranking" value={search} onChange={(event) => S(event.target.value)} /></label>}
             <div className="tablewrap">
               <table>
                 <thead>
@@ -375,17 +413,18 @@ export function Reports({
                     <th>Período</th>
                     <th>Ano anterior</th>
                     <th>Variação</th>
+                    <th>Diferença absoluta</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {report.data.rows.map((row) => (
+                  {report.data.rows.filter((row) => effectiveGroup === "month" || row.name.toLocaleLowerCase("pt-BR").includes(search.toLocaleLowerCase("pt-BR"))).map((row) => (
                     <tr key={row.name}>
                       <td>
                         {capabilities.filters.includes(effectiveGroup as FilterDimension) && row.canDrill !== false ? (
                           <button
                             className="textlink"
                             onClick={() =>
-                              drill(effectiveGroup as FilterDimension, row.name)
+                              drill(effectiveGroup as FilterDimension, row.key ?? row.name)
                             }
                           >
                             {row.name}
@@ -400,13 +439,14 @@ export function Reports({
                       <td>
                         <Delta r={row} m={effectiveMetric} />
                       </td>
+                      <td>{absoluteChange(row.values[effectiveMetric], effectiveMetric)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
             {report.data.truncated && (
-              <p className="sub">Exibindo os primeiros 30 resultados da ordenação selecionada.</p>
+              <p className="sub">Exibindo os primeiros 30 resultados da ordenação selecionada. Para pesquisar toda a base, utilize os filtros.</p>
             )}
           </section>
         </>

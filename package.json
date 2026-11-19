@@ -1,6 +1,6 @@
 {
   "name": "comercial-insight",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -13,8 +13,11 @@
     "build": "npm run typecheck && vite build && node scripts/package-preparer.mjs && node scripts/sw.mjs",
     "test": "node --import tsx --test tests/*.test.ts",
     "test:ui": "node --import tsx tests/ui-smoke.ts",
+    "test:executive": "node --import tsx tests/executive-ui-smoke.ts",
     "db:local": "wrangler d1 migrations apply DB --local",
     "db:remote": "wrangler d1 migrations apply DB --remote",
+    "deploy:hml": "node scripts/check-hml.mjs && npm run build && wrangler deploy --config wrangler.hml.jsonc",
+    "check:hml": "node scripts/check-hml.mjs",
     "admin": "node scripts/admin.mjs",
     "deploy": "node scripts/check-release.mjs && npm run build && wrangler deploy"
   },

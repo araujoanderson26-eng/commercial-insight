@@ -1,0 +1,18 @@
+import { readFileSync } from "node:fs";
+import { parse } from "jsonc-parser";
+const hml = parse(readFileSync("wrangler.hml.jsonc", "utf8"));
+const prod = parse(readFileSync("wrangler.jsonc", "utf8"));
+if (hml.name !== "commercial-insight-hml" || hml.name === prod.name) throw Error("Worker de homologação inválido.");
+if (hml.account_id !== "433083d760ae0e02f3962044e6f2152f") throw Error("Conta Cloudflare diferente da autorizada para a homologação.");
+if (hml.vars.HML_SYNTHETIC_ONLY !== "true" || hml.vars.MANUAL_ALLOW_SYNTHETIC !== "true") throw Error("A homologação inicial deve aceitar somente dados sintéticos.");
+if (hml.vars.HML_OPENAI_BUDGET_USD !== "0.10") throw Error("O ensaio OpenAI de homologação deve preservar o orçamento autorizado de US$ 0,10.");
+if (hml.d1_databases.length !== 1 || hml.d1_databases[0].database_name !== "commercial-insight-hml-db") throw Error("Banco fora da lista autorizada.");
+if (hml.r2_buckets.length !== 1 || hml.r2_buckets[0].bucket_name !== "commercial-insight-hml-arquivos") throw Error("Bucket fora da lista autorizada.");
+if (hml.queues.producers.length !== 1 || hml.queues.consumers.length !== 1 || [...hml.queues.producers,...hml.queues.consumers].some(binding=>binding.queue !== "commercial-insight-hml-jobs")) throw Error("Fila fora da lista autorizada.");
+const database = hml.d1_databases.find(binding => binding.binding === "DB");
+if (!database?.database_id || database.database_id === "00000000-0000-4000-8000-000000000000") throw Error("Crie o D1 isolado após aprovação e preencha seu UUID em wrangler.hml.jsonc.");
+if (prod.d1_databases.some(binding => binding.database_id === database.database_id)) throw Error("A homologação não pode usar o D1 de produção.");
+for (const bucket of hml.r2_buckets) if (prod.r2_buckets.some(binding => binding.bucket_name === bucket.bucket_name)) throw Error("A homologação não pode usar R2 de produção.");
+for (const producer of hml.queues.producers) if (prod.queues.producers.some(binding => binding.queue === producer.queue)) throw Error("A homologação não pode usar a fila de produção.");
+if (hml.vars.APP_ORIGIN === prod.vars.APP_ORIGIN || hml.routes?.length) throw Error("Origem/rotas de homologação devem ser separadas.");
+console.log("Homologação isolada: Worker, D1, R2, Queue e origem conferidos.");

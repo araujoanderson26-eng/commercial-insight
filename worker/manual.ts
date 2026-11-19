@@ -7,7 +7,8 @@ import {
   type ManualManifest, type ManualMetric, type ControlFilters,
 } from "../shared/manual";
 import { audit, body, fail, json, now, stmt, type DbUser, type Env } from "./core";
-import { nativeCapabilities, nativeControl, nativeControlResult, nativeOptions, nativePartStatements, nativeStorageTables, nativeValues, queryNative, validateNativeModel,validateNativeStorage,type NativeResult } from "./native-model";
+import { assertControlledHmlManifest, assertControlledHmlPackage, assertControlledHmlUser, controlledHmlFilters, controlledHmlPolicy } from "./real-hml-policy";
+import { nativeCapabilities, nativeControl, nativeControlResult, nativeCustomerDetails, nativeOptions, nativePeriod, nativeSearch, nativePartStatements, nativeStorageTables, nativeValues, queryNative, validateNativeModel,validateNativeStorage,type NativeResult } from "./native-model";
 
 export type ManualJob={jobId:string};
 type ManualEnv = Env & { BUCKET: R2Bucket; MANUAL_MAX_BYTES?: string; MANUAL_ALLOW_SYNTHETIC?: string; MANUAL_JOBS?:Queue<ManualJob> };
@@ -45,7 +46,9 @@ async function publishedVersion(e: Env, id?: string) {
   if (!versionId) fail(409, "Nenhuma base manual válida foi publicada. O administrador precisa enviar uma atualização.");
   const row = await getImport(e, versionId);
   if (!row.published || row.status !== "published") fail(409, "Esta versão não está disponível para consulta.");
-  return { row, manifest: parsed(row) ?? fail(409, "Manifesto da versão indisponível.") };
+  const manifest = parsed(row) ?? fail(409, "Manifesto da versão indisponível.");
+  assertControlledHmlManifest(e, manifest, row.sha256,true);
+  return { row, manifest };
 }
 export async function manualContext(e: Env, versionId?: string) {
   const { row, manifest } = await publishedVersion(e, versionId);
@@ -67,12 +70,27 @@ function activeInfo(row: ImportRow, source:SourceRow) {
 export async function dataStatus(e: Env) {
   const s = await sourceRow(e);
   const active = s.active_version_id ? await getImport(e, s.active_version_id) : null;
+  if (active?.published) assertControlledHmlManifest(e, parsed(active)!, active.sha256,true);
   return { source: s.source, staleDays: s.stale_days, allowAI: !!s.allow_ai,
     active: active?.published ? activeInfo(active,s) : null,
     stale: active?.published ? Date.now()-new Date(parsed(active)!.sourceUpdatedAt??parsed(active)!.extractedAt).valueOf()>s.stale_days*86400000 : false };
 }
-async function status(e: Env) {
-  const rows = (await stmt(e, "SELECT * FROM ci_imports ORDER BY seq DESC LIMIT 30").all<ImportRow>()).results;
+export async function manualSearch(e: Env, u: DbUser, filters: Filters, dimension: "client" | "product" | "category", query: string, versionId?: string) {
+  filters = controlledHmlFilters(e, u, filters);
+  if (u.role === "operador" || u.update_only) fail(403,"O operador de atualização não possui acesso às análises comerciais.");
+  const {row,manifest} = await publishedVersion(e,versionId);
+  if (manifest.formatVersion !== 2) fail(422,"A pesquisa por descrição requer um pacote nativo v2.");
+  return nativeSearch(e,u,filters,manifest,row.id,dimension,query);
+}
+export async function manualCustomerDetails(e: Env, u: DbUser, filters: Filters, versionId?: string) {
+  filters = controlledHmlFilters(e, u, filters);
+  if (u.role === "operador" || u.update_only) fail(403,"O operador de atualização não possui acesso às análises comerciais.");
+  const {row,manifest} = await publishedVersion(e,versionId);
+  if (manifest.formatVersion !== 2) fail(422,"Os detalhes diários exigem um pacote nativo v2.");
+  return nativeCustomerDetails(e,u,filters,manifest,row.id);
+}
+async function status(e: Env, operator?: string) {
+  const rows = (await stmt(e, "SELECT * FROM ci_imports" + (operator ? " WHERE owner=?" : "") + " ORDER BY seq DESC LIMIT 30", ...(operator ? [operator] : [])).all<ImportRow>()).results;
   const history = [];
   for (const r of rows) {
     const manifest=parsed(r);
@@ -85,21 +103,36 @@ async function status(e: Env) {
   return { ...await dataStatus(e), history, limits: { partBytes: UPLOAD_PART_BYTES, maxBytes: maxBytes(e), format: ".ci.ndjson" } };
 }
 export async function manualRoute(req: Request, e: Env, u: DbUser, path: string): Promise<Response | null> {
+  assertControlledHmlUser(e, u.id);
   const method = req.method;
   if (path === "/data/status" && method === "GET") return json(await dataStatus(e));
-  if (path === "/data/options" && method === "POST") return json(await manualOptions(e,u,filtersSchema.parse(await body(req))));
+  if (path === "/data/options" && method === "POST") {
+    if (u.role === "operador") fail(403, "O operador de atualização não possui acesso às análises comerciais.");
+    return json(await manualOptions(e,u,filtersSchema.parse(await body(req))));
+  }
+  if (path === "/data/search" && method === "POST") {
+    if (u.role === "operador") fail(403, "O operador de atualização não possui acesso às análises comerciais.");
+    const value = z.object({filters:filtersSchema,dimension:z.enum(["client","product","category"]),query:z.string().trim().min(1).max(100)}).strict().parse(await body(req));
+    const source = await sourceRow(e);
+    if (source.source !== "manual") fail(422,"A pesquisa por descrição requer a fonte manual nativa.");
+    return json(await manualSearch(e,u,value.filters,value.dimension,value.query));
+  }
   if (!path.startsWith("/admin/data")) return null;
-  if (u.role !== "admin") fail(403, "Acesso exclusivo do administrador.");
-  if (path === "/admin/data" && method === "GET") return json(await status(e));
+  if (u.role !== "admin" && u.role !== "operador") fail(403, "Acesso exclusivo da administração ou operação de atualização.");
+  if (u.role === "operador" && (path === "/admin/data/settings" || path === "/admin/data/restore")) fail(403, "Somente o administrador pode configurar a fonte ou restaurar versões.");
+  if (path === "/admin/data" && method === "GET") return json(await status(e, u.role === "operador" ? u.id : undefined));
   if (path === "/admin/data/settings" && method === "PUT") {
     const v = z.object({ source: z.enum(["manual", "powerbi"]), staleDays: z.number().int().min(1).max(365), allowAI: z.boolean() }).strict().parse(await body(req));
+    if (controlledHmlPolicy(e) && v.source !== "manual") fail(403,"Esta validação usa somente o snapshot manual autorizado.");
     await e.DB.batch([stmt(e, "UPDATE ci_sources SET source=?,stale_days=?,allow_ai=?,updated=? WHERE id=?", v.source, v.staleDays, +v.allowAI, now(), MANUAL_SOURCE), audit(e,u.id,"fonte_comercial_configurada",v.source)]);
     return json(await dataStatus(e));
   }
   if (path === "/admin/data/imports" && method === "POST") {
     const v = z.object({ filename: z.string().min(1).max(200).regex(/\.ci\.ndjson$/i), bytes: z.number().int().min(100).max(maxBytes(e)), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(await body(req));
+    assertControlledHmlPackage(e, v.sha256);
     const existing = await stmt(e, "SELECT * FROM ci_imports WHERE sha256=? AND bytes=?", v.sha256, v.bytes).first<ImportRow>();
     if (existing) {
+      if (u.role === "operador" && existing.owner !== u.id) fail(409, "Este pacote já foi recebido por outro operador. Consulte o administrador.");
       const uploadedParts = (await stmt(e, "SELECT part AS partNumber,etag FROM ci_upload_parts WHERE import_id=? ORDER BY part", existing.id).all()).results;
       return json({ id: existing.id, status: existing.status, existing: true, partBytes: UPLOAD_PART_BYTES, parts: Math.ceil(v.bytes / UPLOAD_PART_BYTES), uploadedParts });
     }
@@ -117,6 +150,7 @@ export async function manualRoute(req: Request, e: Env, u: DbUser, path: string)
   const match = path.match(/^\/admin\/data\/imports\/([a-f0-9-]{36})(?:\/(parts\/(\d+)|complete|cancel|retry|package|report))?$/);
   if (match) {
     const row = await getImport(e, match[1]), action = match[2];
+    if (u.role === "operador" && (row.owner !== u.id || action === "package")) fail(403, "Esta operação não está autorizada para o operador.");
     if (action?.startsWith("parts/") && method === "PUT") {
       if (row.status !== "uploading" || !row.upload_id) fail(409,"O envio não está aberto.");
       const part = Number(match[3]), count = Math.ceil(row.bytes / UPLOAD_PART_BYTES);
@@ -151,7 +185,7 @@ export async function manualRoute(req: Request, e: Env, u: DbUser, path: string)
       const object=await manualEnv(e).BUCKET.head(row.object_key),s=await sourceRow(e);
       const manifest=parsed(row),complete=manifest?entries(manifest):[];
       if(row.status==="failed"&&object?.size===row.bytes&&manifest&&row.part_cursor===complete.length&&row.processed_bytes===row.bytes&&row.rows===complete.reduce((n,x)=>n+x.part.rows,0)){
-        validateManifest(manifest,e);
+        validateManifest(manifest,e,row.sha256,true);
         const checkpoints=(await stmt(e,"SELECT table_id,part,rows,sha256 FROM ci_parts WHERE version_id=?",row.id).all<{table_id:string;part:number;rows:number;sha256:string}>()).results;
         const recorded=new Map(checkpoints.map(p=>[JSON.stringify([p.table_id,p.part]),p]));
         if(checkpoints.length===complete.length&&complete.every(({table,part})=>{const p=recorded.get(JSON.stringify([table?.id??"__projection__",part.index]));return p?.rows===part.rows&&p.sha256===part.sha256;})){
@@ -185,6 +219,7 @@ export async function manualRoute(req: Request, e: Env, u: DbUser, path: string)
       return json({ok:true});
     }
     if(action==="package" && method==="GET") {
+      if (row.manifest) assertControlledHmlManifest(e,parsed(row)!,row.sha256,true);
       if(row.status==="uploading") fail(409,"Arquivo ainda incompleto.");
       const object=await manualEnv(e).BUCKET.get(row.object_key);
       if(!object) fail(404,"Pacote privado não encontrado.");
@@ -204,7 +239,9 @@ export async function manualRoute(req: Request, e: Env, u: DbUser, path: string)
   fail(404,"Operação de atualização desconhecida.");
 }
 
-function validateManifest(m:ManualManifest,e:Env) {
+function validateManifest(m:ManualManifest,e:Env,packageSha256?:string,active=false) {
+  assertControlledHmlManifest(e,m,packageSha256,active);
+  if(e.HML_SYNTHETIC_ONLY==="true" && !m.synthetic) throw new Error("Esta homologação aceita exclusivamente pacotes sintéticos. Dados comerciais reais não são autorizados neste ambiente.");
   if(m.synthetic && (e as ManualEnv).MANUAL_ALLOW_SYNTHETIC!=="true") throw new Error("Dados sintéticos são aceitos apenas em ambiente de teste explicitamente configurado.");
   if(m.sourceUpdatedAt && new Date(m.sourceUpdatedAt).valueOf()>new Date(m.extractedAt).valueOf()+300000) throw new Error("Atualização da origem posterior à extração.");
   if(m.referenceDate>m.extractedAt.slice(0,10)) throw new Error("Data de referência posterior à extração.");
@@ -285,7 +322,7 @@ async function loadManifest(e:Env,row:ImportRow) {
   const end=bytes.indexOf(10);
   if(end<0 || end>MAX_MANIFEST_BYTES) throw new Error("Manifesto excede 1 MiB ou não termina com LF.");
   const text=new TextDecoder("utf-8",{fatal:true,ignoreBOM:false}).decode(bytes.subarray(0,end));
-  const manifest=manifestSchema.parse(JSON.parse(text));validateManifest(manifest,e);
+  const manifest=manifestSchema.parse(JSON.parse(text));validateManifest(manifest,e,row.sha256,true);
   const storage=await stmt(e,storageBytesSql()).first<{bytes:number}>();
   const capacity=Number((e as Env & {MANUAL_D1_CAPACITY_BYTES?:string}).MANUAL_D1_CAPACITY_BYTES)||450*1024**2;
   if((storage?.bytes??0)*2+row.bytes*3>capacity) throw new Error("Capacidade insuficiente para coexistir com o snapshot completo e índices. Redimensione ou revise retenção antes da carga; nenhum dado será truncado.");
@@ -368,11 +405,12 @@ function outputValue(value:unknown,metric:ManualMetric):number|null {
   return n*(metric.kind==="ratio"&&metric.unit==="percent"?100:1);
 }
 function security(u:DbUser,p:Plan) {
+  if(u.role==="operador"||u.update_only)fail(403,"O operador de atualização não possui acesso às análises comerciais.");
   const regions=z.array(z.string()).parse(JSON.parse(u.regions)),clients=z.array(z.string()).parse(JSON.parse(u.clients));
   const national=u.role==="admin"||(u.role==="diretoria"&&!!u.national);
   if(!national && ((u.role==="gerente"&&!regions.length)||(!regions.length&&!clients.length))) fail(403,"Nenhuma carteira ou regional autorizada.");
   const clauses:string[]=[],args:(string|number|null)[]=[];
-  for(const [key,allowed] of [["region",regions],["client",clients],["product",[]]] as const) {
+  for(const [key,allowed] of [["region",regions],["client",clients],["product",[]],["category",[]]] as const) {
     const requested=p.filters[key],scoped=!national&&allowed.length>0;
     if(requested&&scoped&&!(allowed as readonly string[]).includes(requested)) fail(403,"Seleção fora do seu escopo.");
     const values=requested?[requested]:scoped?allowed:[];
@@ -405,14 +443,17 @@ function dateBounds(from:string,to:string,offset:number) {
   return [start,end];
 }
 export async function queryManual(e:Env,u:DbUser,p:Plan,versionId?:string):Promise<Report> {
+  p={...p,filters:controlledHmlFilters(e,u,p.filters)};
   const {row,manifest:m}=await publishedVersion(e,versionId);
-  if(m.formatVersion===2){const report=await queryNative(e,u,p,m,row.id);report.sourceInfo=sourceInfo(row,m);return report;}
+  if(m.formatVersion===2){const report=await queryNative(e,u,p,m,row.id);report.sourceInfo=sourceInfo(row,m);
+    if(controlledHmlPolicy(e))report.warnings=[...(report.warnings??[]),"Validação autorizada limitada a janeiro–outubro de 2026 e ao período homólogo de 2025; nenhum período posterior foi incluído."];
+    return report;}
   if(!["month","client","region","product","category"].includes(p.group)||p.filters.state||p.filters.regional||p.filters.manager)fail(422,"Este filtro ou agrupamento não está disponível no pacote legado.");
   const selected=m.metrics.find(x=>x.id===p.metric&&x.status==="validated"&&x.kind!=="unavailable");
   if(!selected) fail(422,"Indicador indisponível nesta versão manual: "+(m.metrics.find(x=>x.id===p.metric)?.reason??"sem equivalência comprovada com o modelo Power BI"));
-  const acl=security(u,p), results=[];
+  const acl=security(u,p), results=[], period=nativePeriod(m,p.filters);
   for(const offset of [0,-1]) {
-    const [start,end]=dateBounds(p.filters.from,p.filters.to,offset),where=[...acl.clauses,"date>=?","date<?"],args=[...acl.args,start,end];
+    const range=offset===0?period.current:period.previous,where=[...acl.clauses,"date>=?","date<=?"],args=[...acl.args,range.from,range.to];
     const total=await aggregate(e,row.id,m,where,args);
     const details=await aggregate(e,row.id,m,where,args,p.group);
     results.push({total:total[0],details});
@@ -430,7 +471,14 @@ export async function queryManual(e:Env,u:DbUser,p:Plan,versionId?:string):Promi
     const score=(r:Row)=>p.order==="current"?(r.values[p.metric].current??-Infinity):(r.values[p.metric].current??0)-(r.values[p.metric].previous??0);
     rows.sort((a,b)=>(p.order==="decline"?1:-1)*(score(a)-score(b))||a.name.localeCompare(b.name,"pt-BR"));
   }
-  return {total:pairRow("Total",results[0].total,results[1].total,m),rows:rows.slice(0,30),plan:p,asOf:new Date().toISOString(),truncated:rows.length>30,source:"Arquivo manual (D1)",sourceInfo:sourceInfo(row,m)};
+  const report:Report={total:pairRow("Total",results[0].total,results[1].total,m),rows:rows.slice(0,30),plan:p,asOf:new Date().toISOString(),truncated:rows.length>30,source:"Arquivo manual (D1)",sourceInfo:sourceInfo(row,m),comparison:period};
+  const available=(range:{from:string;to:string})=>range.from<=range.to&&range.from>=m.projection.from&&range.to<=m.projection.to;
+  for(const item of [report.total,...report.rows])for(const metric of metricKeys){
+    const bounds=p.group==="month"&&item!==report.total?nativePeriod(m,{...p.filters,from:item.name,to:item.name}):period;
+    if(!available(bounds.current))item.values[metric].current=null;
+    if(!available(bounds.previous))item.values[metric].previous=null;
+  }
+  return report;
 }
 function sourceInfo(row:ImportRow,m:ManualManifest):NonNullable<Report["sourceInfo"]>{return {versionId:row.id,extractedAt:m.extractedAt,sourceUpdatedAt:m.sourceUpdatedAt,referenceDate:m.referenceDate,coverage:{from:m.projection.from,to:m.projection.to},publishedAt:iso(row.published!),model:m.model.name,metrics:Object.fromEntries(metricKeys.map(id=>{const metric=m.metrics.find(x=>x.id===id);return [id,{status:metric?.status??"unavailable",reason:metric?.reason??(!metric?"Métrica não mapeada nesta versão.":undefined)}];})),capabilities:m.formatVersion===2?nativeCapabilities(m):undefined};}
 async function controlValue(e:Env,id:string,m:ManualManifest,metric:ManualMetric,filters:ControlFilters) {
@@ -462,7 +510,18 @@ async function validateAndPublish(e:Env,row:ImportRow,m:ManualManifest) {
     }
     if(m.formatVersion===2)await validateNativeStorage(e,m,row.id);
     const facts=m.formatVersion===2?await stmt(e,"SELECT COUNT(*) AS n,MIN(date) AS first,MAX(date) AS last FROM (SELECT date FROM ci_native_sales WHERE version_id=? UNION ALL SELECT date FROM ci_native_returns WHERE version_id=?)",row.id,row.id).first<{n:number;first:string;last:string}>():await stmt(e,"SELECT COUNT(*) AS n,MIN(date) AS first,MAX(date) AS last FROM ci_facts WHERE version_id=?",row.id).first<{n:number;first:string;last:string}>();
-    if(facts?.n!==m.projection.rowCount || facts.first!==m.projection.from || facts.last!==m.projection.to) throw new Error("Contagem ou cobertura da projeção não confere com o D1.");
+    if(facts?.n!==m.projection.rowCount) throw new Error("Contagem ou cobertura da projeção não confere com o D1.");
+    if(m.formatVersion===2){
+      if(!facts.first||!facts.last||facts.first<m.projection.from||facts.last>m.projection.to)throw new Error("Contagem ou cobertura da projeção não confere com o D1.");
+      // A holiday or weekend can extend a declared period beyond its first/last movement.
+      // Such extensions require every calendar day; exact fact bounds keep the existing contract.
+      if(facts.first!==m.projection.from||facts.last!==m.projection.to){
+        const calendar=await stmt(e,"SELECT MIN(date) AS first,MAX(date) AS last,COUNT(DISTINCT date) AS days FROM ci_native_calendar WHERE version_id=? AND date>=? AND date<=?",row.id,m.projection.from,m.projection.to).first<{first:string|null;last:string|null;days:number}>();
+        const days=(Date.parse(m.projection.to+"T00:00:00Z")-Date.parse(m.projection.from+"T00:00:00Z"))/86400000+1;
+        if(!Number.isSafeInteger(days)||days<1||calendar?.first!==m.projection.from||calendar.last!==m.projection.to||calendar.days!==days)throw new Error("O calendário não comprova todos os dias da cobertura declarada sem movimento nas extremidades.");
+        pass("cobertura_calendario","Período declarado comprovado pelo calendário diário completo; as extremidades podem não ter movimento comercial.");
+      }
+    }else if(facts.first!==m.projection.from||facts.last!==m.projection.to)throw new Error("Contagem ou cobertura da projeção não confere com o D1.");
     pass("contagens","Origem, exportação, todas as partes e D1 reconciliados sem descartar linhas.");
     await checkpoint("keys");return;}
     if(report.stage==="keys") {
@@ -484,12 +543,18 @@ async function validateAndPublish(e:Env,row:ImportRow,m:ManualManifest) {
     const s=await sourceRow(e);
     if(s.active_version_id) {
       const previous=await publishedVersion(e,s.active_version_id),p=previous.manifest;
+      const authorizedTransition=!!controlledHmlPolicy(e,true)&&p.synthetic&&!m.synthetic;
+      if(authorizedTransition){
+        assertControlledHmlManifest(e,m,row.sha256,true);
+        pass("continuidade","Transição isolada do fixture sintético para a amostra real explicitamente autorizada e fixada por SHA-256; versão anterior preservada.");
+      } else {
       if(p.model.id!==m.model.id) throw new Error("Modelo de origem mudou. Use uma identidade de fonte própria ou corrija o pacote.");
       if(m.projection.from>p.projection.from || m.projection.to<p.projection.to || m.projection.rowCount<p.projection.rowCount*0.5) throw new Error("Perda material de histórico ou volume em relação à versão ativa. A base anterior foi preservada.");
       const schema=(x:ManualManifest)=>JSON.stringify(x.inventory.tables.map(t=>({id:t.id,columns:t.columns.map(c=>({name:c.name,type:c.type}))})).sort((a,b)=>a.id.localeCompare(b.id)));
       const incompatible=p.formatVersion===2&&m.formatVersion===2?nativeCompatibility(p)!==nativeCompatibility(m):schema(p)!==schema(m)||JSON.stringify(p.metrics)!==JSON.stringify(m.metrics)||JSON.stringify(p.inventory.relationships)!==JSON.stringify(m.inventory.relationships)||p.formatVersion!==m.formatVersion;
       if(incompatible) throw new Error("O esquema mudou. O mapeamento e os controles precisam de revisão explícita antes da publicação.");
       pass("continuidade","Identidade, esquema e cobertura histórica compatíveis com a versão ativa.");
+      }
     }
     // D1 capacity is a conservative configured ceiling; no automatic plan purchase or truncation.
     const stored=await stmt(e,storageBytesSql()).first<{bytes:number}>();
@@ -555,6 +620,7 @@ export async function processManualJobs(e:Env,jobId?:string) {
     for(let i=0;i<10&&Date.now()-started<45000;i++) {
       const current=await getImport(e,row.id);
       if(current.lease_token!==lease||!["queued","importing","validating"].includes(current.status)) break;
+      if(current.manifest) validateManifest(parsed(current)!,e,current.sha256,true);
       if(current.status==="queued") await loadManifest(e,current);
       else if(current.status==="importing") await importPart(e,current,parsed(current)!);
       else {await validateAndPublish(e,current,parsed(current)!);break;}
@@ -602,6 +668,7 @@ function nativeCompatibility(m:ManualManifest){
 }
 
 export async function manualOptions(e:Env,u:DbUser,filters:Filters) {
+  filters=controlledHmlFilters(e,u,filters);
   const {row,manifest}=await publishedVersion(e);
   if(manifest.formatVersion===2)return nativeOptions(e,u,filters,manifest,row.id);
   if(filters.state||filters.regional||filters.manager)fail(422,"Filtro indisponível neste pacote legado.");

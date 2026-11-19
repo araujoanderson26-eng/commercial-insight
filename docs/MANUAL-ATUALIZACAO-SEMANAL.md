@@ -8,7 +8,7 @@ Preparador Windows x64 1.0.3 · Desenvolvido por Anderson de Araujo.
 2. Em **Ferramentas externas**, clique em **Preparar atualização Comercial Insight**.
 3. Aguarde a **extração e validação automáticas**, que usam o perfil já salvo. Não altere nem atualize o modelo durante a preparação.
 4. Quando a janela **Salvar** abrir, escolha onde guardar o arquivo **`.ci.ndjson`**, confirme e aguarde a mensagem de conclusão. Use o arquivo final gerado nessa tentativa; um arquivo antigo ou temporário não comprova sucesso.
-5. Entre no Comercial Insight como administrador. Abra **Administração > Atualização de dados**, selecione o arquivo e clique em **Enviar e atualizar base**.
+5. Entre no Comercial Insight como administrador ou **Operador de atualização**. Abra **Atualização de dados**, selecione o arquivo e clique em **Enviar e atualizar base**.
 6. Aguarde **Base atualizada com sucesso**. Confira responsável, data de publicação, período coberto, quantidade de tabelas e linhas e versão. A área **Base em uso** deve mostrar essa mesma versão.
 
 O envio completo ainda não é a publicação. Depois que o servidor aceitar todas as partes, o processamento continua mesmo com a página fechada. Reabra a tela para acompanhar. Durante a carga, as consultas continuam usando a base anterior.
@@ -38,6 +38,8 @@ Se o modelo estiver sendo atualizado, espere terminar e tente novamente. Se a me
 
 Uma importação reprovada não substitui a base ativa. O administrador pode consultar os detalhes do histórico ou restaurar uma versão anterior validada em **Atualização de dados**.
 
+O operador acompanha e retoma apenas seus próprios envios. Ele não administra usuários, não altera a fonte nem a autorização de IA, não restaura versões e não consulta indicadores ou baixa a base. Solicite essas ações ao administrador.
+
 ## Indicadores e permissões
 
 No contrato nativo Panizzon, **Faturamento bruto**, **Devoluções** e **Faturamento líquido** são indicadores separados; o líquido corresponde à diferença entre os dois fatos. Clientes compradores usa contagem distinta. Os filtros e agrupamentos aparecem conforme os campos comprovados no modelo. Uma métrica ainda não implementada não deve ser interpretada como zero.
@@ -45,3 +47,11 @@ No contrato nativo Panizzon, **Faturamento bruto**, **Devoluções** e **Faturam
 O campo **Representantes** de **Equipe e permissões** mantém o escopo de acesso cadastrado. Para um gerente, o administrador informa os representantes autorizados da equipe. Regional, gerente e UF nos relatórios refinam a consulta e não ampliam esse acesso. Use os nomes exatos da origem.
 
 O arquivo `.ci.ndjson` contém dados comerciais. Guarde-o em local privado e envie somente pela área administrativa autorizada. Não use os exemplos sintéticos na base da empresa.
+
+## Conferir os resultados após publicar
+
+Abra **Relatórios** e confira a versão, extração e datas efetivas da comparação. Um mês em andamento compara somente os dias equivalentes disponíveis do ano anterior. Base anterior negativa ou zero aparece com essa condição, sem percentual convencional. Ausência de cobertura não representa zero.
+
+Clientes e produtos usam o código para filtrar e apresentam a descrição quando comprovada no cadastro. Pesquise pelo código ou pelo nome; cadastros semelhantes exigem escolher o código correto. Não some rankings para reconstruir o total: relações muitos-para-muitos podem gerar linhas não aditivas.
+
+O [manual de uso](MANUAL-USUARIO-2.0.md) explica visitas, relatórios, exportações e conversas. A [administração da versão 2.0](ADMINISTRACAO-2.0.md) descreve credenciais, permissões e homologação.

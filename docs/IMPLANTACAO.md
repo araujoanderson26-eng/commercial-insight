@@ -65,12 +65,12 @@ npm run admin -- anderson@example.com "Anderson de Araujo" --remote
 node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
 ```
 
-**Cadastre cada segredo usando o prompt protegido do Wrangler.** Os comandos abaixo enviam os valores para o Worker `commercial-insight`. Na primeira implantação, a CLI pode pedir para criar o Worker com esse nome. O segredo deve ser digitado no prompt, sem integrar o comando ou o Git.
+**Cadastre cada segredo usando o prompt protegido do Wrangler.** Os comandos abaixo apontam ao Worker `commercial-insight`; a publicação de produção precisa de aprovação. O segredo deve ser digitado no prompt, sem integrar o comando ou o Git. `secret put` implanta imediatamente; para preparar a chave OpenAI sem publicar, use `versions secret put` e só publique a versão após aprovação. O procedimento de homologação separada está em [Administração 2.0](ADMINISTRACAO-2.0.md).
 
 ```bash
 npx wrangler secret put MS_CLIENT_SECRET
 npx wrangler secret put TOKEN_ENCRYPTION_KEY
-npx wrangler secret put OPENAI_API_KEY
+npx wrangler versions secret put OPENAI_API_KEY
 npx wrangler secret put RESEND_API_KEY
 npx wrangler secret put MAIL_FROM
 ```

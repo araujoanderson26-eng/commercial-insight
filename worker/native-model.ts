@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { metricKeys, monthsBetween, type DataCapabilities, type Filters, type Group, type Metric, type Plan, type Report, type Row } from "../shared/domain";
 import { decimalInteger, type ControlFilters, type ManualManifest, type NativeModel } from "../shared/manual";
+import type { CustomerDetails } from "../shared/commercial";
 import { fail, stmt, type DbUser, type Env } from "./core";
 
 type NativeRole = "sales" | "returns" | "customers" | "calendar" | "regions" | "municipalities" | "latitudes" | "repArea";
@@ -17,7 +18,7 @@ export function nativeKey(value:string):string|null {
 export const nativeCapabilities = (m:ManualManifest):DataCapabilities => ({
   metrics:["gross","revenue","returns","buyers"],
   groups:["month","client","region","product","category","state","regional",...(m.nativeModel?.regions.manager?["manager" as const]:[])],
-  filters:["region","client","product","state","regional",...(m.nativeModel?.regions.manager?["manager" as const]:[])],
+  filters:["region","client","product","category","state","regional",...(m.nativeModel?.regions.manager?["manager" as const]:[])],
   labels:{region:"Representante",regional:"Regional",state:"UF",manager:"Gerente",revenue:"Faturamento líquido"},
 });
 
@@ -164,6 +165,7 @@ export function nativeControlResult(m:ManualManifest,result:NativeResult,id:stri
   return {raw,value:id==="buyers"?raw:raw/10**native(m).scale};
 }
 function scope(u:DbUser,p:Plan) {
+  if(u.role==="operador"||u.update_only)fail(403,"O operador de atualização não tem acesso às análises comerciais.");
   const regions=z.array(z.string()).parse(JSON.parse(u.regions)),clients=z.array(z.string()).parse(JSON.parse(u.clients));
   const national=u.role==="admin"||(u.role==="diretoria"&&!!u.national);
   if(!national&&((u.role==="gerente"&&!regions.length)||(!regions.length&&!clients.length)))fail(403,"Nenhuma carteira ou regional autorizada.");
@@ -176,7 +178,23 @@ function dates(filters:Filters,offset:number) {
   const to=new Date(Date.UTC(Number(filters.to.slice(0,4))+offset,Number(filters.to.slice(5,7)),0)).toISOString().slice(0,10);
   return {from,to};
 }
-function context(u:DbUser,p:Plan,offset:number):NativeContext {return {...p.filters,...dates(p.filters,offset),...scope(u,p)};}
+/** A partial snapshot compares the same final calendar day, including leap-year clamping. */
+export function nativePeriod(m:ManualManifest,filters:Filters):NonNullable<Report["comparison"]> {
+  const requested=dates(filters,0),limit=[m.referenceDate,m.projection.to].sort()[0];
+  const to=requested.to>limit?limit:requested.to;
+  const current={from:requested.from,to};
+  const shift=(day:string)=>{
+    const year=Number(day.slice(0,4))-1,month=Number(day.slice(5,7)),date=Number(day.slice(8,10));
+    return new Date(Date.UTC(year,month-1,Math.min(date,new Date(Date.UTC(year,month,0)).getUTCDate()))).toISOString().slice(0,10);
+  };
+  const previous={from:shift(current.from),to:shift(current.to)};
+  const outside=current.from>current.to||current.from<m.projection.from||previous.from<m.projection.from;
+  return {current,previous,status:outside?"outside-coverage":to!==requested.to?"partial":"comparable",...(outside?{reason:"A cobertura da versão não contém integralmente um dos períodos. Valores fora da cobertura ficam indisponíveis."}:to!==requested.to?{reason:"Período incompleto: comparação encerrada no mesmo dia do ano anterior, conforme a última data coberta pela versão."}:{})};
+}
+function context(u:DbUser,p:Plan,offset:number,m:ManualManifest):NativeContext {
+  const period=nativePeriod(m,p.filters);
+  return {...p.filters,...(offset===0?period.current:period.previous),...scope(u,p)};
+}
 function pair(name:string,a:NativeResult|undefined,b:NativeResult|undefined,m:ManualManifest):Row {
   const empty:NativeResult={k:0,name,gross:null,returns:0,revenue:0,buyers:null,margin:null,records:0};a??=empty;b??=empty;
   const values=Object.fromEntries(metricKeys.map(id=>[id,{current:a&&id!=="margin"?(a[id]===null?null:id==="buyers"?a[id]:a[id]/10**native(m).scale):null,previous:b&&id!=="margin"?(b[id]===null?null:id==="buyers"?b[id]:b[id]/10**native(m).scale):null}])) as Row["values"];
@@ -219,51 +237,149 @@ export function compileNativeGroups(version:string,contexts:NativeContext[],grou
   }else grouped+=" SELECT * FROM g_values ORDER BY k,g";
   return {sql:grouped,args:base.args};
 }
+/** Display enrichment is limited to keys already returned by an authorized query. It never joins facts. */
+function identityBinding(m:ManualManifest,dimension:"client"|"product") {
+  const candidates=dimension==="client"
+    ?[{table:native(m).customers.table,key:native(m).customers.client,names:["Cliente","Razão Social","Razao Social","Nome do cliente"]}]
+    :[{table:m.inventory.tables.find(t=>t.name==="Base Produtos")?.id,key:"Codigo Item",names:["Descrição do item","Descricao do item"]}];
+  const source=candidates.find(candidate=>candidate.table&&m.inventory.tables.some(t=>t.id===candidate.table&&t.columns.some(c=>candidate.names.includes(c.name))&&t.columns.some(c=>c.name===candidate.key)));
+  if(!source?.table)return null;
+  const inventory=table(m,source.table),keyIndex=inventory.columns.findIndex(c=>c.name===source.key),descriptionIndex=inventory.columns.findIndex(c=>source.names.includes(c.name));
+  return {table:source.table,keyPath:"$["+keyIndex+"]",descriptionPath:"$["+descriptionIndex+"]"};
+}
+export async function nativeIdentityLabels(e:Env,m:ManualManifest,version:string,dimension:"client"|"product",keys:string[]) {
+  const identities:Record<string,{name:string;description?:string;descriptionConflict?:boolean}>={};
+  if(!keys.length)return identities;
+  const source=identityBinding(m,dimension);if(!source)return identities;
+  const requested=new Map(keys.map(key=>[nativeKey(key),key]));
+  // SQLite UPPER safely supports the ASCII commercial codes; non-ASCII codes retain their original label.
+  const safeKeys=[...requested.keys()].filter((key):key is string=>key!==null&&/^[\x20-\x7E]+$/.test(key));
+  if(!safeKeys.length)return identities;
+  const result=(await stmt(e,"SELECT DISTINCT CAST(json_extract(value,?) AS TEXT) AS code,CAST(json_extract(value,?) AS TEXT) AS description FROM ci_raw_rows WHERE version_id=? AND table_id=? AND UPPER(RTRIM(CAST(json_extract(value,?) AS TEXT))) IN(SELECT value FROM json_each(?))",source.keyPath,source.descriptionPath,version,source.table,source.keyPath,JSON.stringify(safeKeys)).all<{code:string;description:string|null}>()).results;
+  const descriptions=new Map<string,Set<string>>();
+  for(const row of result){const key=requested.get(nativeKey(row.code));if(!key||!row.description?.trim())continue;const set=descriptions.get(key)??new Set<string>();set.add(row.description.trim());descriptions.set(key,set);}
+  for(const [key,names]of descriptions){if(names.size===1){const description=[...names][0];identities[key]={name:key+" — "+description,description};}else identities[key]={name:key,descriptionConflict:true};}
+  return identities;
+}
+export async function nativeSearch(e:Env,u:DbUser,filters:Filters,m:ManualManifest,version:string,dimension:"client"|"product"|"category",query:string) {
+  if(!["client","product","category"].includes(dimension)||!query.trim()||query.length>100)fail(422,"Informe de 1 a 100 caracteres para a pesquisa.");
+  const selected={...filters,client:"",product:"",category:""},base=context(u,{filters:selected,metric:"revenue",group:dimension,order:"current"},0,m);
+  const allowed=compileNativeGroups(version,[{...base,from:m.projection.from,to:[m.referenceDate,m.projection.to].sort()[0]}],dimension,true);
+  const source=dimension==="category"?null:identityBinding(m,dimension),pattern="%"+query.trim().replace(/[\\%_]/g,"\\$&")+"%";
+  // The scoped membership query is reused; names can never introduce a key outside that membership.
+  const prefix=source?"WITH identity_matches AS MATERIALIZED (SELECT UPPER(RTRIM(CAST(json_extract(value,?) AS TEXT))) AS code FROM ci_raw_rows WHERE version_id=? AND table_id=? AND CAST(json_extract(value,?) AS TEXT) LIKE ? ESCAPE '\\') ":"";
+  let sql=prefix+"SELECT a.name FROM ("+allowed.sql.replace(/ LIMIT 251$/,"")+") a WHERE a.name LIKE ? ESCAPE '\\'";
+  const args:Sql["args"]=[...(source?[source.keyPath,version,source.table,source.descriptionPath,pattern]:[]),...allowed.args,pattern];
+  if(source)sql+=" OR UPPER(RTRIM(a.name)) IN(SELECT code FROM identity_matches)";
+  sql+=" ORDER BY a.name LIMIT 21";
+  const rows=(await stmt(e,sql,...args).all<{name:string}>()).results,keys=rows.slice(0,20).map(row=>row.name),labels=dimension==="category"?{}:await nativeIdentityLabels(e,m,version,dimension,keys);
+  return {items:keys.map(key=>({key,name:labels[key]?.name??key})),truncated:rows.length>20};
+}
+/** Daily activity reuses the same fact visibility and ACL as every financial query. */
+export async function nativeCustomerDetails(e:Env,u:DbUser,filters:Filters,m:ManualManifest,version:string):Promise<CustomerDetails> {
+  if(!filters.client)fail(422,"Selecione um único cliente para consultar sua atividade diária.");
+  const current=context(u,{filters,metric:"revenue",group:"month",order:"current"},0,m);
+  const base=compileNativeContexts(version,[current],true),split=base.sql.lastIndexOf("\nSELECT c.k,c.name,");
+  if(split<0)throw Error("Compilador relacional inconsistente.");
+  const prefix=base.sql.slice(0,split),period={from:current.from,to:current.to};
+  const available=period.from<=period.to&&period.from>=m.projection.from&&period.to<=m.projection.to;
+  const limitations=["A última compra observada e a frequência usam dias com soma de faturamento bruto positiva no período selecionado. Dias distintos não equivalem a pedidos, notas ou visitas."];
+  let lastPurchase:string|null=null,purchaseDays:number|null=null,municipality:string|null=null;
+  if(available){
+    const activity=await stmt(e,prefix+",purchase_days AS (SELECT date FROM visible_sales GROUP BY date HAVING SUM(amount)>0) SELECT MAX(date) AS lastPurchase,COUNT(*) AS purchaseDays FROM purchase_days",...base.args).first<{lastPurchase:string|null;purchaseDays:number}>();
+    lastPurchase=activity?.lastPurchase??null;purchaseDays=activity?.purchaseDays??0;
+  }else limitations.push("A atividade diária está indisponível porque o período atual não está integralmente coberto pela versão.");
+  const customers=table(m,native(m).customers.table),keyIndex=customers.columns.findIndex(c=>c.name===native(m).customers.client);
+  const municipalityIndex=customers.columns.findIndex(c=>["Município","Municipio","Cidade"].includes(c.name));
+  if(municipalityIndex<0)limitations.push("O cadastro Base Clientes desta versão não possui coluna de município. O município de documentos de faturamento não foi tratado como endereço cadastral.");
+  else {
+    const location=await stmt(e,prefix+" SELECT DISTINCT CAST(json_extract(r.value,?) AS TEXT) AS municipality FROM ci_raw_rows r WHERE r.version_id=? AND r.table_id=? AND UPPER(RTRIM(CAST(json_extract(r.value,?) AS TEXT)))=? AND EXISTS(SELECT 1 FROM customer0 b JOIN ctx c ON c.k=b.k WHERE b.client=c.client) LIMIT 3",...base.args,"$["+municipalityIndex+"]",version,customers.id,"$["+keyIndex+"]",nativeKey(filters.client)).all<{municipality:string|null}>();
+    const names=new Map<string,string>();
+    for(const row of location.results){const name=row.municipality?.trim();if(name){const key=nativeKey(name);if(key)names.set(key,name);}}
+    if(names.size===1&&location.results.length<3)municipality=[...names.values()][0];
+    else limitations.push(names.size>1||location.results.length===3?"Há municípios cadastrais conflitantes para o código do cliente; nenhum endereço foi escolhido automaticamente.":"Município cadastral não informado para o cliente no escopo autorizado.");
+  }
+  return {lastPurchase,purchaseDays,municipality,limitations,period};
+}
 export async function queryNative(e:Env,u:DbUser,p:Plan,m:ManualManifest,version:string):Promise<Report> {
   if(!nativeCapabilities(m).groups.includes(p.group)||!nativeCapabilities(m).metrics.includes(p.metric))fail(422,"Indicador ou agrupamento indisponível nesta versão.");
   if(p.filters.manager&&!native(m).regions.manager)fail(422,"Gerente não está mapeado nesta versão.");
-  const current=context(u,p,0),previous=context(u,p,-1);
+  const current=context(u,p,0,m),previous=context(u,p,-1,m),period=nativePeriod(m,p.filters);
   const total=await nativeValues(e,version,[current,previous]);let rows:Row[]=[];
   if(p.group==="month") {
     const contexts:NativeContext[]=[];const count=monthsBetween(p.filters.from,p.filters.to);
     for(let i=0;i<=count;i++) {
       const date=new Date(Date.UTC(Number(p.filters.from.slice(0,4)),Number(p.filters.from.slice(5))-1+i,1));
-      for(const offset of [0,-1]) {const from=new Date(Date.UTC(date.getUTCFullYear()+offset,date.getUTCMonth(),1)).toISOString().slice(0,10),to=new Date(Date.UTC(date.getUTCFullYear()+offset,date.getUTCMonth()+1,0)).toISOString().slice(0,10);contexts.push({...current,from,to,name:date.toISOString().slice(0,7)});}
+      const month=date.toISOString().slice(0,7),monthly=nativePeriod(m,{...p.filters,from:month,to:month});
+      for(const offset of [0,-1]) contexts.push({...current,...(offset===0?monthly.current:monthly.previous),name:month});
     }
     const results=await nativeValues(e,version,contexts);for(let i=0;i<results.length;i+=2)rows.push(pair(results[i].name,results[i],results[i+1],m));
   } else {
     const q=compileNativeGroups(version,[current,previous],p.group,false,{metric:p.metric as Exclude<Metric,"margin">,order:p.order}),results=(await stmt(e,q.sql,...q.args).all<NativeResult&{g:string|null}>()).results;
     const keys=new Set(results.map(r=>r.g));
     const byContext=[new Map(results.filter(r=>r.k===0).map(r=>[r.g,r])),new Map(results.filter(r=>r.k===1).map(r=>[r.g,r]))];
-    for(const key of keys){const a=byContext[0].get(key),b=byContext[1].get(key);rows.push({...pair(a?.name??b?.name??"(Em branco)",a,b,m),...(key===null?{canDrill:false}:{})});}
+    for(const key of keys){const a=byContext[0].get(key),b=byContext[1].get(key),name=a?.name??b?.name??"(Em branco)";rows.push({...pair(name,a,b,m),...(key===null?{canDrill:false}:{key:name})});}
     const score=(r:Row)=>p.order==="current"?(r.values[p.metric].current??-Infinity):(r.values[p.metric].current??0)-(r.values[p.metric].previous??0);
     rows.sort((a,b)=>(p.order==="decline"?1:-1)*(score(a)-score(b))||a.name.localeCompare(b.name,"pt-BR"));
   }
-  return {total:pair("Total",total[0],total[1],m),rows:rows.slice(0,30),plan:p,asOf:new Date().toISOString(),truncated:rows.length>30,source:"Arquivo manual (D1)"};
+  const result:Report={total:pair("Total",total[0],total[1],m),rows:rows.slice(0,30),plan:p,asOf:new Date().toISOString(),truncated:rows.length>30,source:"Arquivo manual (D1)",comparison:period};
+  const available=(range:{from:string;to:string})=>range.from<=range.to&&range.from>=m.projection.from&&range.to<=m.projection.to;
+  for(const row of [result.total,...result.rows])for(const metric of metricKeys){
+    let currentRange=period.current,previousRange=period.previous;
+    if(p.group==="month"&&row!==result.total){const monthly=nativePeriod(m,{...p.filters,from:row.name,to:row.name});currentRange=monthly.current;previousRange=monthly.previous;}
+    if(!available(currentRange))row.values[metric].current=null;
+    if(!available(previousRange))row.values[metric].previous=null;
+  }
+  if(p.group!=="month")result.warnings=["Os relacionamentos muitos-para-muitos do Power BI podem atribuir o mesmo cliente ou devolução a mais de um grupo. Não some as linhas para reconstruir o total oficial; ele é calculado separadamente."];
+  if(p.group==="client"||p.group==="product"){
+    const labels=await nativeIdentityLabels(e,m,version,p.group,result.rows.filter(row=>row.key).map(row=>row.key!));
+    for(const row of result.rows){const identity=row.key?labels[row.key]:undefined;if(identity)Object.assign(row,identity);}
+  }
+  return result;
 }
 export async function nativeOptions(e:Env,u:DbUser,filters:Filters,m:ManualManifest,version:string) {
   if(filters.manager&&!native(m).regions.manager)fail(422,"Gerente não está mapeado nesta versão.");
   const p:Plan={metric:"revenue",group:"month",order:"current",filters};scope(u,p);
-  const base=context(u,p,0),values:Record<string,string[]>={},truncated:Record<string,boolean>={};
-  const groups=["region","client","product","state","regional",...(native(m).regions.manager?["manager" as const]:[])] as const;
+  const base=context(u,p,0,m),values:Record<string,string[]>={},truncated:Record<string,boolean>={};
+  const groups=["region","client","product","category","state","regional",...(native(m).regions.manager?["manager" as const]:[])] as const;
   const q=compileNativeOptions(version,base,groups),results=(await stmt(e,q.sql,...q.args).all<{dimension:string;name:string}>()).results;
   for(const group of groups) {
     const visible=results.filter(r=>r.dimension===group).map(r=>r.name);
     values[group]=visible.slice(0,250);truncated[group]=visible.length>250;
   }
-  return {values,sourceVersion:version,truncated};
+  const labels:Record<string,Record<string,string>>={};
+  for(const group of ["client","product"] as const){const identities=await nativeIdentityLabels(e,m,version,group,values[group]);labels[group]=Object.fromEntries(Object.entries(identities).map(([key,value])=>[key,value.name]));}
+  return {values,labels,sourceVersion:version,truncated};
 }
 export function compileNativeOptions(version:string,context:NativeContext,groups:readonly Exclude<Group,"month">[]):Sql{
   if(groups.length===0)throw Error("Nenhuma dimensão de opções foi solicitada.");
-  const base=compileNativeContexts(version,[context],true),prefix=base.sql.slice(0,base.sql.lastIndexOf("\nSELECT c.k,c.name,")),tails:string[]=[],selects:string[]=[];
+  const base=compileNativeContexts(version,[context],true),tails:string[]=[],selects:string[]=[];
+  // Options need membership and display names, never fact amounts or fact multiplicity.
+  // Keep the existing date/ACL graph, then materialize only the necessary distinct tuples.
+  // In particular, geographic membership must not re-run correlated joins for every fact.
+  const names=(["client","product","category","state"] as const).map(field=>"MIN(json_extract(s.display,'$."+field+"')) AS "+field+"_name").join(",");
+  let prefix=base.sql.slice(0,base.sql.indexOf(",\nsale_totals AS"));
+  prefix=prefix.replace(/visible_sales AS \(SELECT s\.\* FROM sales0 s([\s\S]*?)\),\nsales_client_keys/,(_,tail:string)=>"visible_sales AS MATERIALIZED (SELECT s.k,s.client,s.product,s.category,s.state,"+names+" FROM sales0 s"+tail+" GROUP BY s.k,s.client,s.product,s.category,s.state),\nsales_client_keys");
+  prefix=prefix.replace("visible_returns AS (SELECT c.k,r.row_no,r.client,r.state,r.amount","visible_returns AS MATERIALIZED (SELECT DISTINCT c.k,r.client,r.state");
+  prefix+=",o_sales_clients AS MATERIALIZED (SELECT DISTINCT k,client,state FROM visible_sales)";
   for(const [index,group]of groups.entries()){
-    const compiled=compileNativeGroups(version,[context],group,true),split=compiled.sql.lastIndexOf(" SELECT MIN(name) AS name FROM "),rename=(sql:string)=>sql.replace(/\bg_/g,"o"+index+"_");
-    tails.push(rename(compiled.sql.slice(prefix.length,split)));selects.push("SELECT '"+group+"' AS dimension,name FROM ("+rename(compiled.sql.slice(split+1))+")");
+    const p="o"+index;let values:string;
+    if(group==="client"||group==="product"||group==="category"||group==="state")values="SELECT "+group+" AS g,"+group+"_name AS name FROM visible_sales";
+    else if(group==="region"){
+      tails.push(","+p+"_activity_keys AS MATERIALIZED (SELECT k,client FROM visible_sales UNION SELECT k,client FROM visible_returns)");
+      values="SELECT b.representative AS g,json_extract(b.display,'$.representative') AS name FROM customer0 b JOIN "+p+"_activity_keys a ON a.k=b.k AND a.client IS b.client";
+    }else if(group==="regional"||group==="manager"){
+      tails.push(","+p+"_sales AS MATERIALIZED (SELECT DISTINCT s.k,s.client,r."+group+" AS g,json_extract(r.display,'$."+group+"') AS name FROM o_sales_clients s JOIN ctx c ON c.k=s.k LEFT JOIN regions r ON r.state IS s.state WHERE c.has_representative=0 OR EXISTS(SELECT 1 FROM customer0 b LEFT JOIN regions rb ON rb.state IS b.state WHERE b.k=s.k AND b.client IS s.client AND rb."+group+" IS r."+group+"))");
+      tails.push(","+p+"_clients AS MATERIALIZED (SELECT DISTINCT b.k,rg."+group+" AS g,b.client FROM customer0 b JOIN visible_customers v ON v.k=b.k AND v.client IS b.client JOIN ctx c ON c.k=b.k LEFT JOIN regions rg ON rg.state IS b.state WHERE c.has_sales=0 OR EXISTS(SELECT 1 FROM "+p+"_sales s WHERE s.k=b.k AND s.g IS rg."+group+" AND s.client IS b.client))");
+      tails.push(","+p+"_returns AS (SELECT r.k,rg."+group+" AS g,json_extract(rg.display,'$."+group+"') AS name FROM visible_returns r JOIN ctx c ON c.k=r.k LEFT JOIN regions rg ON rg.state IS r.state WHERE(c.has_representative=0 AND c.has_sales=0) OR EXISTS(SELECT 1 FROM "+p+"_clients gc WHERE gc.k=r.k AND gc.g IS rg."+group+" AND gc.client IS r.client))");
+      values="SELECT g,name FROM "+p+"_sales UNION ALL SELECT g,name FROM "+p+"_returns";
+    }else throw Error("Agrupamento não suportado pelo contrato.");
+    selects.push("SELECT '"+group+"' AS dimension,name FROM (SELECT MIN(name) AS name FROM ("+values+") WHERE g IS NOT NULL GROUP BY g ORDER BY MIN(name) LIMIT 251)");
   }
   // D1 limits each compound SELECT to five terms, unlike desktop SQLite's default 500.
   // Nest binary compounds so all dimensions still share this one scoped CTE evaluation.
   const compound=(parts:string[]):string=>parts.length===1?parts[0]:"SELECT * FROM ("+compound(parts.slice(0,Math.ceil(parts.length/2)))+") UNION ALL SELECT * FROM ("+compound(parts.slice(Math.ceil(parts.length/2)))+")";
-  return {sql:(prefix+tails.join("")+" "+compound(selects)).replace("visible_sales AS (","visible_sales AS NOT MATERIALIZED ("),args:base.args};
+  return {sql:prefix+tails.join("")+" "+compound(selects),args:base.args};
 }
 export const nativeStorageTables=Object.values(nativeTables);
 export async function validateNativeStorage(e:Env,m:ManualManifest,version:string){

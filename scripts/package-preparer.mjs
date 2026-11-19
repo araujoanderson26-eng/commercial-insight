@@ -17,6 +17,8 @@ const crc32 = (bytes) => {
 const entries = files.map((file) => ({ name: file, path: new URL("../tools/preparador/" + file, import.meta.url) }));
 entries.push({ name: "CORRECAO-PREPARADOR.md", path: new URL("../docs/CORRECAO-PREPARADOR.md", import.meta.url) });
 entries.push({ name: "MANUAL-ATUALIZACAO-SEMANAL.md", path: new URL("../docs/MANUAL-ATUALIZACAO-SEMANAL.md", import.meta.url) });
+entries.push({ name: "MANUAL-USUARIO-2.0.md", path: new URL("../docs/MANUAL-USUARIO-2.0.md", import.meta.url) });
+entries.push({ name: "ADMINISTRACAO-2.0.md", path: new URL("../docs/ADMINISTRACAO-2.0.md", import.meta.url) });
 const arg = (name) => { const index = process.argv.indexOf(name); if (index < 0) return undefined; if (!process.argv[index + 1] || process.argv[index + 1].startsWith("--")) throw Error("Valor ausente: " + name); return process.argv[index + 1]; };
 const runtimePath = arg("--runtime") || process.env.CI_PREPARER_RUNTIME_DIR;
 const outputPath = resolve(arg("--output") || "dist/preparador-comercial-insight.zip");

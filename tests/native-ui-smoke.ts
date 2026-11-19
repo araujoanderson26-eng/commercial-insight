@@ -4,7 +4,7 @@ import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { resolve, extname, sep } from "node:path";
 import { chromium, expect } from "@playwright/test";
 import { fixturePackage } from "./manual-fixtures";
-import type { DataCapabilities, Plan, Report } from "../shared/domain";
+import type { DataCapabilities, Filters, Plan, Report } from "../shared/domain";
 
 const capabilities: DataCapabilities = {
   metrics: ["gross", "revenue", "returns", "buyers"],
@@ -15,6 +15,8 @@ const capabilities: DataCapabilities = {
 const first = "10000000-0000-4000-8000-000000000001", second = "10000000-0000-4000-8000-000000000002";
 let activeId = first, accepted = false;
 const plans: Plan[] = [];
+const optionRequests: Filters[] = [];
+let delayOptions = false, cancelledOptions = 0;
 const root = resolve("dist"), artifacts = resolve(".wrangler/native-ui");
 const actor = "Administrador SINTÉTICO UI";
 const user = { id: first, name: actor, email: "sintetico@native-ui.test", role: "admin", national: true, active: true, regions: [], clients: [], entraOid: null };
@@ -28,7 +30,14 @@ const server = createServer(async (request, response) => {
     const body = Buffer.concat(chunks);
     const json = (data: unknown) => { response.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" }); response.end(JSON.stringify(data)); };
     if (url.pathname === "/api/me") return json({ user, policyVersion: "ui-only", expires: Math.floor(Date.now() / 1000) + 3600, integrations: { configured: false, mode: "delegated", linked: false, ai: false }, data: { source: "manual", ready: true, activeVersionId: activeId, extractedAt: "2026-11-18T12:00:00Z", stale: false, capabilities } });
-    if (url.pathname === "/api/data/options") return json({ values: { region: ["Representante SINTÉTICO"], client: ["0001"], product: ["P"], regional: ["Regional SINTÉTICA"], state: ["SP"], manager: ["Gerente SINTÉTICO"] }, sourceVersion: activeId });
+    if (url.pathname === "/api/data/options") {
+      optionRequests.push(JSON.parse(body.toString()));
+      const options = { values: { region: ["Representante SINTÉTICO"], client: ["0001"], product: ["P"], regional: ["Regional SINTÉTICA"], state: ["SP"], manager: ["Gerente SINTÉTICO"] }, sourceVersion: activeId };
+      if (!delayOptions) return json(options);
+      const timer = setTimeout(() => { if (!response.destroyed) json(options); }, 1500);
+      response.once("close", () => { clearTimeout(timer); if (!response.writableEnded) cancelledOptions++; });
+      return;
+    }
     if (url.pathname === "/api/admin/users") return json([user]);
     if (url.pathname === "/api/report") {
       const plan = JSON.parse(body.toString()) as Plan; plans.push(plan);
@@ -63,6 +72,30 @@ try {
   await expect.poll(() => plans.at(-1)?.metric).toBe("gross");
   await page.getByRole("button", { name: /^Filtros/ }).click();
   const dialog = page.getByRole("dialog");
+  await expect.poll(() => optionRequests.length).toBeGreaterThan(0);
+  await page.clock.install({ time: new Date("2026-11-19T12:00:00Z") });
+  await page.clock.pauseAt(new Date("2026-11-19T12:00:01Z"));
+  const beforeRapidEdits = optionRequests.length;
+  await dialog.getByLabel("Primeiro mês", { exact: true }).fill("2026-02");
+  await dialog.getByLabel("Último mês", { exact: true }).fill("2026-10");
+  await dialog.getByLabel("Primeiro mês", { exact: true }).fill("2026-01");
+  await page.clock.runFor(299);
+  expect(optionRequests.length).toBe(beforeRapidEdits);
+  await dialog.getByRole("button", { name: "Fechar", exact: true }).click({ force: true });
+  await page.clock.runFor(1000); expect(optionRequests.length).toBe(beforeRapidEdits);
+  await page.getByRole("button", { name: /^Filtros/ }).click({ force: true });
+  await dialog.getByLabel("Primeiro mês", { exact: true }).fill("2026-01");
+  await dialog.getByLabel("Último mês", { exact: true }).fill("2026-10");
+  await page.clock.runFor(299); expect(optionRequests.length).toBe(beforeRapidEdits);
+  await page.clock.runFor(1); await expect.poll(() => optionRequests.length).toBe(beforeRapidEdits + 1);
+  expect(optionRequests.at(-1)?.from).toBe("2026-01"); expect(optionRequests.at(-1)?.to).toBe("2026-10");
+  delayOptions = true;
+  await dialog.getByLabel("Primeiro mês", { exact: true }).fill("2026-02");
+  await page.clock.runFor(300); await expect.poll(() => optionRequests.length).toBe(beforeRapidEdits + 2);
+  await dialog.getByRole("button", { name: "Fechar", exact: true }).click({ force: true });
+  await expect.poll(() => cancelledOptions).toBe(1); await expect(page.getByRole("alert")).toHaveCount(0);
+  delayOptions = false; await page.clock.resume();
+  await page.getByRole("button", { name: /^Filtros/ }).click();
   for (const key of ["region", "regional", "state", "manager"] as const) await expect(dialog.locator(`[list="source-options-${key}"]`)).toBeVisible();
   await dialog.locator('[list="source-options-region"]').fill("Representante SINTÉTICO");
   await dialog.locator('[list="source-options-regional"]').fill("Regional SINTÉTICA");
@@ -92,4 +125,4 @@ try {
   await page.screenshot({ path: resolve(artifacts, "mobile.png"), fullPage: true });
   expect(errors).toEqual([]);
 } finally { await browser.close(); await new Promise<void>((done) => server.close(() => done())); }
-console.log("Native UI contract smoke passed: gross/net/returns, proven source dimensions, blank groups cannot drill, scope labels, filter payloads, publication receipt, desktop/mobile. Synthetic API only.");
+console.log("Native UI contract smoke passed: gross/net/returns, proven dimensions, filter debounce/abort, scope labels, payloads, publication receipt, desktop/mobile. Synthetic API only.");

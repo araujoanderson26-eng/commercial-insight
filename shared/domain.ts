@@ -4,6 +4,7 @@ export const roles = {
   diretoria: "Diretoria",
   gerente: "Gerente Regional",
   comercial: "Usuário Comercial",
+  operador: "Operador de atualização",
 } as const;
 export type Role = keyof typeof roles;
 export const metrics = {
@@ -25,7 +26,7 @@ export const groups = {
   manager: "Gerentes",
 } as const;
 export type Group = keyof typeof groups;
-export const filterDimensions = ["region", "client", "product", "regional", "state", "manager"] as const;
+export const filterDimensions = ["region", "client", "product", "category", "regional", "state", "manager"] as const;
 export type FilterDimension = typeof filterDimensions[number];
 export type DataCapabilities = {
   metrics: Metric[];
@@ -43,7 +44,7 @@ const month = z
 const val = z.string().trim().max(140).default("");
 export const filtersSchema = z
   .object({ from: month, to: month, region: val, client: val, product: val,
-    regional: z.string().trim().max(140).optional(), state: z.string().trim().max(140).optional(), manager: z.string().trim().max(140).optional(),
+    regional: z.string().trim().max(140).optional(), state: z.string().trim().max(140).optional(), manager: z.string().trim().max(140).optional(), category: z.string().trim().max(140).optional(),
   })
   .strict()
   .refine((v) => {
@@ -72,7 +73,7 @@ export const planSchema = z
   .strict();
 export type Plan = z.infer<typeof planSchema>;
 export type Pair = { current: number | null; previous: number | null };
-export type Row = { name: string; values: Record<Metric, Pair>; canDrill?: boolean };
+export type Row = { name: string; key?: string; description?: string; descriptionConflict?: boolean; values: Record<Metric, Pair>; canDrill?: boolean };
 export type Report = {
   total: Row;
   rows: Row[];
@@ -80,6 +81,13 @@ export type Report = {
   asOf: string;
   truncated: boolean;
   source: "Power BI" | "Arquivo manual (D1)";
+  comparison?: {
+    current: { from: string; to: string };
+    previous: { from: string; to: string };
+    status: "comparable" | "partial" | "outside-coverage";
+    reason?: string;
+  };
+  warnings?: string[];
   sourceInfo?: {
     versionId: string;
     extractedAt: string;
@@ -160,9 +168,16 @@ export const configSchema = z
   });
 export type ModelConfig = z.infer<typeof configSchema>;
 export function change(p: Pair, m: Metric) {
-  if (p.current === null || p.previous === null) return null;
+  if (p.current === null || p.previous === null || !Number.isFinite(p.current) || !Number.isFinite(p.previous)) return null;
   if (m === "margin") return p.current - p.previous;
-  return p.previous === 0 ? null : (100 * (p.current - p.previous)) / Math.abs(p.previous);
+  return p.previous <= 0 ? null : (100 * (p.current - p.previous)) / p.previous;
+}
+/** Growth percentages require a positive denominator. Absolute movement remains observable. */
+export function comparison(p: Pair, m: Metric) {
+  const present = p.current !== null && p.previous !== null && Number.isFinite(p.current) && Number.isFinite(p.previous);
+  const absolute = present ? p.current! - p.previous! : null;
+  const status: "comparable" | "missing" | "zero-base" | "negative-base" = !present ? "missing" : m === "margin" || p.previous! > 0 ? "comparable" : p.previous === 0 ? "zero-base" : "negative-base";
+  return { status, absolute, percent: change(p, m), favorable: absolute === null || absolute === 0 ? null : metrics[m].up ? absolute > 0 : absolute < 0 };
 }
 export function pretty(n: number | null, m: Metric, compact = false) {
   if (n === null) return "—";

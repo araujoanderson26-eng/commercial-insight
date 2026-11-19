@@ -2,7 +2,7 @@ name: Validate project
 
 on:
   push:
-    branches: [main, feat/manual-powerbi-d1]
+    branches: [main, feat/manual-powerbi-d1, feat/commercial-insight-2]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -56,6 +56,8 @@ jobs:
         run: npm run test:ui
       - name: Native UI contract smoke
         run: node --import tsx tests/native-ui-smoke.ts
+      - name: Executive visits, reports and exports (desktop and mobile)
+        run: npm run test:executive
       - name: Audit npm dependencies
         run: npm audit
       - name: Audit NuGet dependencies

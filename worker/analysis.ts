@@ -13,6 +13,7 @@ import { access } from "./entra";
 const quoted = (v: string) => '"' + v.replaceAll('"', '""') + '"';
 const col = (c: { table: string; column: string }) => "'" + c.table + "'[" + c.column + "]";
 export function policy(u: User, m: ModelConfig, p: Plan) {
+  if (u.role === "operador") fail(403, "O operador de atualização não tem acesso às análises comerciais.");
   const national = u.role === "admin" || (u.role === "diretoria" && u.national);
   if (!national) {
     if (!m.scopedMeasuresReviewed)
@@ -29,6 +30,7 @@ export function policy(u: User, m: ModelConfig, p: Plan) {
     ["region", u.regions],
     ["client", u.clients],
     ["product", []],
+    ["category", []],
   ] as const) {
     const request = p.filters[dimension];
     const scoped = !national && allowed.length > 0;
@@ -71,7 +73,9 @@ function expressions(m: ModelConfig, from: string, to: string) {
         dates = range(m, from, to, offset);
       const visible = "CALCULATE(COUNTROWS('" + m.factTable + "')," + dates + ") > 0";
       const expr = measure
-        ? "IF(" + visible + ", CALCULATE([" + measure + "]," + dates + "))"
+        ? ["revenue", "gross", "returns"].includes(metric)
+          ? "CALCULATE([" + measure + "]," + dates + ")"
+          : "IF(" + visible + ", CALCULATE([" + measure + "]," + dates + "))"
         : "BLANK()";
       args.push(quoted(metric + "_" + suffix), expr);
     }

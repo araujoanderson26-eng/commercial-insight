@@ -1,0 +1,36 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "commercial-insight-hml",
+  "account_id": "433083d760ae0e02f3962044e6f2152f",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-11-18",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "limits": { "cpu_ms": 10000 },
+  "assets": { "directory": "./dist", "binding": "ASSETS", "not_found_handling": "single-page-application", "run_worker_first": ["/api/*"] },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "commercial-insight-hml-db",
+    // Dedicated homologation D1; never replace with the production UUID.
+    "database_id": "9717c220-a4b4-4fad-8183-f2b733787b61",
+    "migrations_dir": "migrations"
+  }],
+  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "commercial-insight-hml-arquivos" }],
+  "queues": {
+    "producers": [{ "binding": "MANUAL_JOBS", "queue": "commercial-insight-hml-jobs" }],
+    "consumers": [{ "queue": "commercial-insight-hml-jobs", "max_batch_size": 1, "max_batch_timeout": 1, "max_concurrency": 1, "max_retries": 2, "retry_delay": 30 }]
+  },
+  "vars": {
+    "APP_ORIGIN": "https://commercial-insight-hml.araujo-anderson26.workers.dev",
+    "OPENAI_MODEL": "gpt-4.1-mini",
+    "RETENTION_DAYS": "7",
+    "MANUAL_MAX_BYTES": "16777216",
+    "MANUAL_D1_CAPACITY_BYTES": "134217728",
+    "MANUAL_ALLOW_SYNTHETIC": "true",
+    "HML_SYNTHETIC_ONLY": "true",
+    "HML_OPENAI_BUDGET_USD": "0.10"
+  },
+  "observability": { "enabled": true, "traces": { "enabled": true, "head_sampling_rate": 0.01 }, "logs": { "enabled": true, "invocation_logs": false } },
+  "triggers": { "crons": ["*/15 * * * *", "17 4 * * *"] }
+}

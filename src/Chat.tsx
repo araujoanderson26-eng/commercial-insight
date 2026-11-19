@@ -7,6 +7,9 @@ import {
   Sparkles,
   Target,
   Trash2,
+  Download,
+  Printer,
+  Star,
 } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
@@ -15,7 +18,10 @@ import {
   type Plan,
   type Report,
 } from "../shared/domain";
-import { api, Busy, Empty, ErrorBox, Graph, Kpis, message, period, groupLabel, metricLabel } from "./ui";
+import type { AssistantStatus, VisitBriefing } from "../shared/commercial";
+import { VisitResult } from "./Visits";
+import { api, Busy, Empty, ErrorBox, Graph, Kpis, message, period, groupLabel, metricLabel, ReportContext } from "./ui";
+import { exportReport } from "./exports";
 type Turn = {
   id: string;
   question: string;
@@ -25,22 +31,27 @@ type Turn = {
   source_version?: string | null;
   report?: Report;
   commentary?: Commentary;
+  visit?: VisitBriefing;
 };
 type Thread = { id: string; title: string; updated: number };
 export type Seed = { question: string; send: boolean; key: number };
-function Answer({ turn, onLoad }: { turn: Turn; onLoad: (r: Report, c: Commentary) => void }) {
+function Answer({ turn, onLoad }: { turn: Turn; onLoad: (r: Report, c: Commentary, visit?: VisitBriefing) => void }) {
   const [err, E] = useState(""),
-    [busy, B] = useState(false);
+    [busy, B] = useState(false), [saved, S] = useState(false);
+  async function favorite() {
+    try { await api("saved-reports", "POST", { title: turn.question.slice(0, 120), plan: turn.plan, question: turn.question }); S(true); }
+    catch (error) { E(message(error)); }
+  }
   async function refresh() {
     E("");
     B(true);
     try {
-      const v = await api<{ report: Report; commentary: Commentary }>(
+      const v = await api<{ report: Report; commentary: Commentary; visit?: VisitBriefing }>(
         "turns/" + turn.id + "/reopen",
         "POST",
         {},
       );
-      onLoad(v.report, v.commentary);
+      onLoad(v.report, v.commentary, v.visit);
     } catch (e) {
       E(message(e));
     } finally {
@@ -59,19 +70,21 @@ function Answer({ turn, onLoad }: { turn: Turn; onLoad: (r: Report, c: Commentar
         </h2>
         <p className="sub">
           {period(turn.plan.filters)}
-          {[turn.plan.filters.region, turn.plan.filters.client, turn.plan.filters.product, turn.plan.filters.regional, turn.plan.filters.state, turn.plan.filters.manager]
+          {[turn.plan.filters.region, turn.plan.filters.client, turn.plan.filters.product, turn.plan.filters.regional, turn.plan.filters.state, turn.plan.filters.manager, turn.plan.filters.category]
             .filter(Boolean)
             .map((t) => " · " + t)}
         </p>
-        {turn.report ? (
+        {turn.visit ? <VisitResult briefing={turn.visit} /> : turn.report ? (
           <>
+            <ReportContext r={turn.report} />
+            <div className="report-actions"><button className="soft compact" onClick={() => exportReport(turn.report!)}><Download size={14} />Excel</button><button className="soft compact" onClick={() => window.print()}><Printer size={14} />Imprimir / PDF</button><button className="soft compact" disabled={saved} onClick={() => void favorite()}><Star size={14} />{saved ? "Consulta salva" : "Salvar consulta"}</button></div>
             <Kpis r={turn.report} />
             <Graph r={turn.report} />
             {turn.commentary && (
               <>
                 <div className="aibox">
                   <h3>
-                    <Sparkles size={16} /> Minha análise
+                    <Sparkles size={16} /> Leitura dos resultados
                   </h3>
                   <p>{turn.commentary.summary}</p>
                 </div>
@@ -120,7 +133,8 @@ export default function Chat({
     [err, E] = useState(""),
     [list, L] = useState(!seed && !initialId),
     [threads, H] = useState<Thread[]>([]),
-    [remove, R] = useState<string | null>(null);
+    [remove, R] = useState<string | null>(null),
+    [status, ST] = useState<AssistantStatus | null>(null);
   const guard = useRef(false),
     end = useRef<HTMLDivElement>(null),
     used = useRef(false);
@@ -163,7 +177,7 @@ export default function Chat({
     L(false);
     D("");
     try {
-      const v = await api<{ id: string; turn: string; report: Report; commentary: Commentary }>(
+      const v = await api<{ id: string; turn: string; report: Report; commentary: Commentary; visit?: VisitBriefing }>(
         "chat",
         "POST",
         { question: q.trim(), conversation: thread, filters },
@@ -178,6 +192,7 @@ export default function Chat({
           created: Date.now() / 1000,
           report: v.report,
           commentary: v.commentary,
+          visit: v.visit,
         },
       ]);
     } catch (e) {
@@ -189,6 +204,11 @@ export default function Chat({
       guard.current = false;
     }
   }
+  useEffect(() => {
+    let alive = true;
+    api<AssistantStatus>("assistant/status").then((value) => { if (alive) ST(value); }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
   useEffect(() => {
     if (used.current) return;
     used.current = true;
@@ -243,6 +263,7 @@ export default function Chat({
         </div>
       </div>
       {err && <ErrorBox>{err}</ErrorBox>}
+      {status && !status.ready && <div className="panel assistant-status"><div><strong>Assistente aguardando configuração</strong><p>{status.message}</p></div><p className="sub">Você pode consultar os relatórios e preparar uma visita com os dados autorizados.</p><div className="report-actions"><a className="soft compact" href="/relatorios">Abrir relatórios</a><a className="soft compact" href="/visitas">Preparar visita</a></div></div>}
       {list ? (
         <section className="panel">
           {threads.length ? (
@@ -273,7 +294,7 @@ export default function Chat({
             ))
           ) : (
             <Empty title="Sua primeira conversa começa aqui">
-              Abra uma nova conversa para analisar faturamento, carteira ou margem.
+              Abra uma nova conversa para analisar faturamento, carteira ou produtos.
             </Empty>
           )}
         </section>
@@ -303,8 +324,8 @@ export default function Chat({
               <Answer
                 key={t.id}
                 turn={t}
-                onLoad={(report, commentary) =>
-                  T((prior) => prior.map((v) => (v.id === t.id ? { ...v, report, commentary } : v)))
+                onLoad={(report, commentary, visit) =>
+                  T((prior) => prior.map((v) => (v.id === t.id ? { ...v, report, commentary, visit } : v)))
                 }
               />
             ))}
@@ -344,6 +365,7 @@ export default function Chat({
               <ArrowUp size={20} />
             </button>
           </form>
+          <p className="chat-footnote">Valores vêm da fonte autorizada. Recomendações comerciais precisam ser avaliadas na reunião. A conversa preserva o contexto das perguntas anteriores.</p>
         </>
       )}
     </div>

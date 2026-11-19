@@ -4,13 +4,15 @@ import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { passwordHash } from "../shared/password.mjs";
-const [email, name, mode] = process.argv.slice(2);
+const [email, name, mode, configFlag, configPath] = process.argv.slice(2);
+const targetArgs = configFlag === "--config" && configPath ? ["--config", configPath] : [];
 if (
   !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email || "") ||
   !name ||
-  !["--local", "--remote"].includes(mode)
+  !["--local", "--remote"].includes(mode) ||
+  (configFlag !== undefined && (configFlag !== "--config" || !configPath))
 ) {
-  console.error('Uso: npm run admin -- email "Nome" --local|--remote');
+  console.error('Uso: npm run admin -- email "Nome" --local|--remote [--config wrangler.hml.jsonc]');
   process.exit(1);
 }
 const dir = mkdtempSync(join(tmpdir(), "ci-init-"));
@@ -33,6 +35,7 @@ try {
       "execute",
       "DB",
       mode,
+      ...targetArgs,
       "--file",
       file,
       "--json",
@@ -48,6 +51,7 @@ try {
       "execute",
       "DB",
       mode,
+      ...targetArgs,
       "--command",
       "SELECT id FROM users WHERE id=" + quote(id),
       "--json",
