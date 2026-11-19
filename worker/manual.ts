@@ -453,13 +453,16 @@ export async function queryManual(e:Env,u:DbUser,p:Plan,versionId?:string):Promi
   if(!["month","client","region","product","category"].includes(p.group)||p.filters.state||p.filters.regional||p.filters.manager)fail(422,"Este filtro ou agrupamento não está disponível no pacote legado.");
   const selected=m.metrics.find(x=>x.id===p.metric&&x.status==="validated"&&x.kind!=="unavailable");
   if(!selected) fail(422,"Indicador indisponível nesta versão manual: "+(m.metrics.find(x=>x.id===p.metric)?.reason??"sem equivalência comprovada com o modelo Power BI"));
-  const acl=security(u,p), results=[], period=nativePeriod(m,p.filters);
-  for(const offset of [0,-1]) {
-    const range=offset===0?period.current:period.previous,where=[...acl.clauses,"date>=?","date<=?"],args=[...acl.args,range.from,range.to];
-    const total=await aggregate(e,row.id,m,where,args);
-    const details=await aggregate(e,row.id,m,where,args,p.group);
-    results.push({total:total[0],details});
-  }
+  const acl=security(u,p), period=nativePeriod(m,p.filters);
+  const currentWhere=[...acl.clauses,"date>=?","date<=?"],currentArgs=[...acl.args,period.current.from,period.current.to];
+  const previousWhere=[...acl.clauses,"date>=?","date<=?"],previousArgs=[...acl.args,period.previous.from,period.previous.to];
+  const [total0,details0,total1,details1]=await Promise.all([
+    aggregate(e,row.id,m,currentWhere,currentArgs),
+    aggregate(e,row.id,m,currentWhere,currentArgs,p.group),
+    aggregate(e,row.id,m,previousWhere,previousArgs),
+    aggregate(e,row.id,m,previousWhere,previousArgs,p.group),
+  ]);
+  const results=[{total:total0[0],details:details0},{total:total1[0],details:details1}];
   const names=new Set([...results[0].details,...results[1].details].map(x=>String(x.name)));
   let rows:Row[]=[];
   if(p.group==="month") {

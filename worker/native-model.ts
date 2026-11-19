@@ -311,7 +311,8 @@ export async function queryNative(e:Env,u:DbUser,p:Plan,m:ManualManifest,version
   if(!nativeCapabilities(m).groups.includes(p.group)||!nativeCapabilities(m).metrics.includes(p.metric))fail(422,"Indicador ou agrupamento indisponível nesta versão.");
   if(p.filters.manager&&!native(m).regions.manager)fail(422,"Gerente não está mapeado nesta versão.");
   const current=context(u,p,0,m),previous=context(u,p,-1,m),period=nativePeriod(m,p.filters);
-  const total=await nativeValues(e,version,[current,previous]);let rows:Row[]=[];
+  let total:NativeResult[];
+  let rows:Row[]=[];
   if(p.group==="month") {
     const contexts:NativeContext[]=[];const count=monthsBetween(p.filters.from,p.filters.to);
     for(let i=0;i<=count;i++) {
@@ -319,9 +320,14 @@ export async function queryNative(e:Env,u:DbUser,p:Plan,m:ManualManifest,version
       const month=date.toISOString().slice(0,7),monthly=nativePeriod(m,{...p.filters,from:month,to:month});
       for(const offset of [0,-1]) contexts.push({...current,...(offset===0?monthly.current:monthly.previous),name:month});
     }
-    const results=await nativeValues(e,version,contexts);for(let i=0;i<results.length;i+=2)rows.push(pair(results[i].name,results[i],results[i+1],m));
+    const [totalRows,results]=await Promise.all([nativeValues(e,version,[current,previous]),nativeValues(e,version,contexts)]);
+    total=totalRows;
+    for(let i=0;i<results.length;i+=2)rows.push(pair(results[i].name,results[i],results[i+1],m));
   } else {
-    const q=compileNativeGroups(version,[current,previous],p.group,false,{metric:p.metric as Exclude<Metric,"margin">,order:p.order}),results=(await stmt(e,q.sql,...q.args).all<NativeResult&{g:string|null}>()).results;
+    const q=compileNativeGroups(version,[current,previous],p.group,false,{metric:p.metric as Exclude<Metric,"margin">,order:p.order});
+    const [totalRows,groupResult]=await Promise.all([nativeValues(e,version,[current,previous]),stmt(e,q.sql,...q.args).all<NativeResult&{g:string|null}>()]);
+    total=totalRows;
+    const results=groupResult.results;
     const keys=new Set(results.map(r=>r.g));
     const byContext=[new Map(results.filter(r=>r.k===0).map(r=>[r.g,r])),new Map(results.filter(r=>r.k===1).map(r=>[r.g,r]))];
     for(const key of keys){const a=byContext[0].get(key),b=byContext[1].get(key),name=a?.name??b?.name??"(Em branco)";rows.push({...pair(name,a,b,m),...(key===null?{canDrill:false}:{key:name})});}
@@ -353,8 +359,14 @@ export async function nativeOptions(e:Env,u:DbUser,filters:Filters,m:ManualManif
     const visible=results.filter(r=>r.dimension===group).map(r=>r.name);
     values[group]=visible.slice(0,250);truncated[group]=visible.length>250;
   }
-  const labels:Record<string,Record<string,string>>={};
-  for(const group of ["client","product"] as const){const identities=await nativeIdentityLabels(e,m,version,group,values[group]);labels[group]=Object.fromEntries(Object.entries(identities).map(([key,value])=>[key,value.name]));}
+  const [clientIdentities,productIdentities]=await Promise.all([
+    nativeIdentityLabels(e,m,version,"client",values.client),
+    nativeIdentityLabels(e,m,version,"product",values.product),
+  ]);
+  const labels:Record<string,Record<string,string>>={
+    client:Object.fromEntries(Object.entries(clientIdentities).map(([key,value])=>[key,value.name])),
+    product:Object.fromEntries(Object.entries(productIdentities).map(([key,value])=>[key,value.name])),
+  };
   return {values,labels,sourceVersion:version,truncated};
 }
 export function compileNativeOptions(version:string,context:NativeContext,groups:readonly Exclude<Group,"month">[]):Sql{

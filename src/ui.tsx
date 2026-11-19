@@ -6,10 +6,10 @@ import {
   Database,
   Info,
   LoaderCircle,
+  RotateCcw,
   Sparkles,
 } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
-import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   change,
   deltaTitle,
@@ -17,35 +17,89 @@ import {
   metricKeys,
   metrics,
   pretty,
+  type DataCapabilities,
+  type FilterDimension,
   type Filters,
+  type Group,
   type Metric,
+  type Pair,
   type Plan,
   type Report,
-  type DataCapabilities,
-  type Group,
   type Session,
-  type Pair,
 } from "../shared/domain";
+import { SmartChart, type SmartChartMode } from "./components/SmartChart";
+import { projectCompatibleReport } from "./lib/analytics";
+import {
+  canonicalPlanKey,
+  getCached,
+  getCachedSync,
+  listCachedReports,
+  listCachedReportsSync,
+  purgeClientCache,
+  setCached,
+} from "./lib/cache";
+import { apiUrl, clearNativeToken, getNativeToken, isNativeApp } from "./lib/runtime";
+
 const legacyGroups: Group[] = ["month", "client", "region", "product", "category"];
 const legacyMetrics: Metric[] = ["revenue", "margin", "buyers", "returns"];
+
 export function sessionCapabilities(session: Session): DataCapabilities {
   return session.data?.source === "manual" && session.data.capabilities
     ? session.data.capabilities
     : { metrics: legacyMetrics, groups: legacyGroups, filters: ["region", "client", "product"] };
 }
-export const groupLabel = (group: Group, capabilities?: DataCapabilities) => capabilities?.labels?.[group] ?? groups[group];
-export const metricLabel = (metric: Metric, capabilities?: DataCapabilities) => capabilities?.labels?.[metric] ?? metrics[metric].label;
-const reportMetricKeys = (report: Report) => (report.sourceInfo?.capabilities?.metrics ?? metricKeys.filter((metric) => metric !== "gross" || report.sourceInfo?.metrics?.gross?.status === "validated" || report.total.values.gross?.current != null || report.total.values.gross?.previous != null)).slice().sort((a, b) => ["revenue", "gross", "returns", "buyers", "margin"].indexOf(a) - ["revenue", "gross", "returns", "buyers", "margin"].indexOf(b));
-const pair = (row: Report["total"], metric: Metric) => row.values[metric] ?? { current: null, previous: null };
-export const isAbortError = (error: unknown) => error !== null && typeof error === "object" && "name" in error && error.name === "AbortError";
-export async function api<T>(path: string, method = "GET", payload?: unknown, signal?: AbortSignal): Promise<T> {
+
+export const groupLabel = (group: Group, capabilities?: DataCapabilities) =>
+  capabilities?.labels?.[group] ?? groups[group];
+
+export const metricLabel = (metric: Metric, capabilities?: DataCapabilities) =>
+  capabilities?.labels?.[metric] ?? metrics[metric].label;
+
+const reportMetricKeys = (report: Report) =>
+  (
+    report.sourceInfo?.capabilities?.metrics ??
+    metricKeys.filter(
+      (metric) =>
+        metric !== "gross" ||
+        report.sourceInfo?.metrics?.gross?.status === "validated" ||
+        report.total.values.gross?.current != null ||
+        report.total.values.gross?.previous != null,
+    )
+  )
+    .slice()
+    .sort(
+      (a, b) =>
+        ["revenue", "gross", "returns", "buyers", "margin"].indexOf(a) -
+        ["revenue", "gross", "returns", "buyers", "margin"].indexOf(b),
+    );
+
+const pair = (row: Report["total"], metric: Metric) =>
+  row.values[metric] ?? { current: null, previous: null };
+
+export const isAbortError = (error: unknown) =>
+  error !== null && typeof error === "object" && "name" in error && error.name === "AbortError";
+
+export async function api<T>(
+  path: string,
+  method = "GET",
+  payload?: unknown,
+  signal?: AbortSignal,
+): Promise<T> {
+  const native = isNativeApp();
+  const token = native ? getNativeToken() : null;
+  const headers: Record<string, string> = {};
+  if (payload !== undefined) headers["Content-Type"] = "application/json";
+  if (native) {
+    headers["X-Client-Platform"] = "capacitor";
+    if (token) headers.Authorization = "Bearer " + token;
+  }
   let response: Response;
   try {
-    response = await fetch("/api/" + path, {
+    response = await fetch(apiUrl(path), {
       method,
-      credentials: "same-origin",
+      credentials: native ? "include" : "same-origin",
       cache: "no-store",
-      headers: payload === undefined ? {} : { "Content-Type": "application/json" },
+      headers,
       body: payload === undefined ? undefined : JSON.stringify(payload),
       signal,
     });
@@ -53,18 +107,23 @@ export async function api<T>(path: string, method = "GET", payload?: unknown, si
     if (signal?.aborted || isAbortError(error)) throw error;
     throw Error("Conexão indisponível. Conecte-se à internet e tente novamente.");
   }
-  const data = await response.json().catch(error => {
+  const data = await response.json().catch((error) => {
     if (signal?.aborted || isAbortError(error)) throw error;
     return { error: "Resposta do servidor indisponível." };
   });
   if (!response.ok) {
-    if (response.status === 401 && !["auth/login", "me"].includes(path))
+    if (response.status === 401 && !["auth/login", "me"].includes(path)) {
+      clearNativeToken();
+      void purgeClientCache();
       window.dispatchEvent(new Event("session-ended"));
+    }
     throw Error(data.error + (data.fields?.length ? " " + data.fields.join(", ") : ""));
   }
   return data;
 }
+
 export const message = (e: unknown) => (e instanceof Error ? e.message : "Falha na operação.");
+
 export function Brand() {
   return (
     <div className="brand">
@@ -75,6 +134,7 @@ export function Brand() {
     </div>
   );
 }
+
 export function Credit() {
   return (
     <span className="credit">
@@ -82,6 +142,7 @@ export function Credit() {
     </span>
   );
 }
+
 export function ErrorBox({ children }: { children: ReactNode }) {
   return (
     <div className="errorbox" role="alert">
@@ -90,6 +151,7 @@ export function ErrorBox({ children }: { children: ReactNode }) {
     </div>
   );
 }
+
 export function Busy({ label = "Consultando…" }: { label?: string }) {
   return (
     <div className="busy" role="status">
@@ -98,6 +160,7 @@ export function Busy({ label = "Consultando…" }: { label?: string }) {
     </div>
   );
 }
+
 export function Empty({ title, children }: { title: string; children: ReactNode }) {
   return (
     <div className="empty">
@@ -107,11 +170,13 @@ export function Empty({ title, children }: { title: string; children: ReactNode 
     </div>
   );
 }
+
 export const planFor = (
   filters: Filters,
   group: Plan["group"] = "month",
   metric: Metric = "revenue",
 ): Plan => ({ group, metric, order: "current", filters });
+
 export const monthName = (s: string, long = false) =>
   new Intl.DateTimeFormat("pt-BR", {
     month: long ? "long" : "short",
@@ -121,34 +186,129 @@ export const monthName = (s: string, long = false) =>
     .format(new Date(s + "-15T12:00:00Z"))
     .replace(". de ", "/")
     .replace(" de ", "/");
+
 export const period = (f: Filters) => monthName(f.from) + " – " + monthName(f.to);
+
 export function useReport(plan: Plan, enabled: boolean, refresh = 0, sourceKey = "") {
-  const [state, set] = useState<{ data?: Report; error?: string; loading: boolean }>({
-    loading: enabled,
+  const key = canonicalPlanKey(plan);
+  const scope = sourceKey || "default";
+  const lastScopeKey = useRef<string>("");
+
+  const [state, set] = useState<{
+    data?: Report;
+    error?: string;
+    loading: boolean;
+    refreshing: boolean;
+    fromCache: boolean;
+  }>(() => {
+    if (!enabled) return { loading: false, refreshing: false, fromCache: false };
+    const syncHit =
+      getCachedSync<Report>(scope, key) ??
+      projectCompatibleReport(plan, listCachedReportsSync(scope));
+    return syncHit
+      ? { data: syncHit, loading: false, refreshing: true, fromCache: true }
+      : { loading: true, refreshing: false, fromCache: false };
   });
-  const key = JSON.stringify(plan);
+
+  const parsedPlanJson = JSON.stringify(plan);
+
   useEffect(() => {
     let alive = true;
-    set({ loading: enabled });
-    if (enabled)
-      api<Report>("report", "POST", JSON.parse(key))
-        .then((data) => {
-          if (alive) set({ data, loading: false });
-        })
-        .catch((e) => {
-          if (alive) set({ error: message(e), loading: false });
+    const controller = new AbortController();
+    const targetPlan = JSON.parse(parsedPlanJson) as Plan;
+    const scopeKey = `${scope}|${key}`;
+    const sameQuery = lastScopeKey.current === scopeKey;
+    lastScopeKey.current = scopeKey;
+
+    if (!enabled) {
+      set({ loading: false, refreshing: false, fromCache: false });
+      return () => {
+        alive = false;
+        controller.abort();
+      };
+    }
+
+    const syncHit =
+      getCachedSync<Report>(scope, key) ??
+      projectCompatibleReport(targetPlan, listCachedReportsSync(scope));
+
+    if (syncHit) {
+      set({ data: syncHit, loading: false, refreshing: true, fromCache: true });
+    } else if (sameQuery) {
+      set((prev) => ({
+        data: prev.data,
+        loading: !prev.data,
+        refreshing: !!prev.data,
+        fromCache: !!prev.data,
+      }));
+    } else {
+      set({ loading: true, refreshing: false, fromCache: false });
+      void (async () => {
+        const idbHit =
+          (await getCached<Report>(scope, key)) ??
+          projectCompatibleReport(targetPlan, await listCachedReports(scope));
+        if (alive && idbHit) {
+          set((prev) =>
+            prev.data && !prev.fromCache
+              ? prev
+              : { data: idbHit, loading: false, refreshing: true, fromCache: true },
+          );
+        }
+      })();
+    }
+
+    api<Report>("report", "POST", targetPlan, controller.signal)
+      .then((data) => {
+        if (!alive) return;
+        const ttlMs = data.source === "Arquivo manual (D1)" ? 30 * 60 * 1000 : 5 * 60 * 1000;
+        setCached(scope, key, "report", data, ttlMs);
+        set({ data, loading: false, refreshing: false, fromCache: false });
+      })
+      .catch((e) => {
+        if (!alive || isAbortError(e)) return;
+        set((prev) => {
+          if (prev.data && typeof navigator !== "undefined" && !navigator.onLine) {
+            return { data: prev.data, loading: false, refreshing: false, fromCache: true };
+          }
+          return {
+            data: sameQuery ? prev.data : undefined,
+            error: message(e),
+            loading: false,
+            refreshing: false,
+            fromCache: sameQuery ? !!prev.data : false,
+          };
         });
+      });
+
     return () => {
       alive = false;
+      controller.abort();
     };
-  }, [key, enabled, refresh, sourceKey]);
+  }, [key, parsedPlanJson, enabled, refresh, scope]);
+
   return state;
 }
+
 export function Delta({ r, m }: { r: Report["total"]; m: Metric }) {
   const d = change(pair(r, m), m);
   if (d === null) {
     const previous = pair(r, m).previous;
-    return <small className="muted" title={previous !== null && previous < 0 ? "Base anterior negativa: avalie a diferença em reais, sem percentual convencional de crescimento." : undefined}>{previous !== null && previous < 0 ? "Base anterior negativa" : previous === 0 ? "Base anterior zero" : "Sem base comparável"}</small>;
+    return (
+      <small
+        className="muted"
+        title={
+          previous !== null && previous < 0
+            ? "Base anterior negativa: avalie a diferença em reais, sem percentual convencional de crescimento."
+            : undefined
+        }
+      >
+        {previous !== null && previous < 0
+          ? "Base anterior negativa"
+          : previous === 0
+            ? "Base anterior zero"
+            : "Sem base comparável"}
+      </small>
+    );
   }
   const Icon = d < 0 ? ArrowDownRight : ArrowUpRight;
   return (
@@ -162,6 +322,7 @@ export function Delta({ r, m }: { r: Report["total"]; m: Metric }) {
     </span>
   );
 }
+
 export function Kpis({ r }: { r: Report }) {
   const available = reportMetricKeys(r);
   const ticket = ticketPerBuyer(pair(r.total, "revenue"), pair(r.total, "buyers"));
@@ -173,60 +334,204 @@ export function Kpis({ r }: { r: Report }) {
           <strong title={pretty(pair(r.total, m).current, m)}>
             {pretty(pair(r.total, m).current, m, Math.abs(pair(r.total, m).current ?? 0) >= 10000)}
           </strong>
-          {r.sourceInfo?.metrics?.[m]?.status !== undefined && r.sourceInfo.metrics[m]?.status !== "validated" && <small className="muted">{r.sourceInfo.metrics[m]?.reason ?? "Indicador sem equivalência validada"}</small>}
-          <div className="kpi-comparison"><Delta r={r.total} m={m} /></div>
-          <small className="kpi-context">Anterior: {pretty(pair(r.total, m).previous, m, true)}</small>
+          {r.sourceInfo?.metrics?.[m]?.status !== undefined &&
+            r.sourceInfo.metrics[m]?.status !== "validated" && (
+              <small className="muted">
+                {r.sourceInfo.metrics[m]?.reason ?? "Indicador sem equivalência validada"}
+              </small>
+            )}
+          <div className="kpi-comparison">
+            <Delta r={r.total} m={m} />
+          </div>
+          <small className="kpi-context">
+            Anterior: {pretty(pair(r.total, m).previous, m, true)}
+          </small>
           <small className="kpi-context">Diferença: {absoluteChange(pair(r.total, m), m)}</small>
         </div>
       ))}
-      {available.includes("revenue") && available.includes("buyers") && <div className="kpi kpi-ticket"><span>Ticket por comprador</span><strong title={pretty(ticket.current, "revenue")}>{pretty(ticket.current, "revenue", Math.abs(ticket.current ?? 0) >= 10000)}</strong><div className="kpi-comparison"><Delta r={{ ...r.total, values: { ...r.total.values, revenue: ticket } }} m="revenue" /></div><small className="kpi-context">Anterior: {pretty(ticket.previous, "revenue")}</small><small className="kpi-context">{metricLabel("revenue", r.sourceInfo?.capabilities)} ÷ compradores distintos. Não é média por pedido.</small></div>}
+      {available.includes("revenue") && available.includes("buyers") && (
+        <div className="kpi kpi-ticket">
+          <span>Ticket por comprador</span>
+          <strong title={pretty(ticket.current, "revenue")}>
+            {pretty(ticket.current, "revenue", Math.abs(ticket.current ?? 0) >= 10000)}
+          </strong>
+          <div className="kpi-comparison">
+            <Delta r={{ ...r.total, values: { ...r.total.values, revenue: ticket } }} m="revenue" />
+          </div>
+          <small className="kpi-context">Anterior: {pretty(ticket.previous, "revenue")}</small>
+          <small className="kpi-context">
+            {metricLabel("revenue", r.sourceInfo?.capabilities)} ÷ compradores distintos. Não é média
+            por pedido.
+          </small>
+        </div>
+      )}
     </div>
   );
 }
+
 export function ticketPerBuyer(revenue: Pair, buyers: Pair): Pair {
-  const calculate = (value: number | null, count: number | null) => value != null && count != null && count > 0 && Number.isFinite(value) && Number.isFinite(count) ? value / count : null;
-  return { current: calculate(revenue.current, buyers.current), previous: calculate(revenue.previous, buyers.previous) };
+  const calculate = (value: number | null, count: number | null) =>
+    value != null && count != null && count > 0 && Number.isFinite(value) && Number.isFinite(count)
+      ? value / count
+      : null;
+  return {
+    current: calculate(revenue.current, buyers.current),
+    previous: calculate(revenue.previous, buyers.previous),
+  };
 }
-export function absoluteChange(value: { current: number | null; previous: number | null }, metric: Metric) {
+
+export function absoluteChange(
+  value: { current: number | null; previous: number | null },
+  metric: Metric,
+) {
   if (value.current == null || value.previous == null) return "—";
   const difference = value.current - value.previous;
-  return (difference > 0 ? "+" : "") + (metric === "margin" ? difference.toLocaleString("pt-BR", { maximumFractionDigits: 2 }) + " p.p." : pretty(difference, metric));
+  return (
+    (difference > 0 ? "+" : "") +
+    (metric === "margin"
+      ? difference.toLocaleString("pt-BR", { maximumFractionDigits: 2 }) + " p.p."
+      : pretty(difference, metric))
+  );
 }
+
 export function ReportContext({ r }: { r: Report }) {
   const sourceDate = r.sourceInfo?.extractedAt ?? r.asOf;
-  const date = (value: string) => new Date(value + "T12:00:00Z").toLocaleDateString("pt-BR", { timeZone: "UTC" });
-  return <div className="report-context">{(r.plan.filters.categoriesInclude?.length||r.plan.filters.categoriesExclude?.length)?<p>Incluir: {r.plan.filters.categoriesInclude?.join(", ")||"Todas"}. Excluir: {r.plan.filters.categoriesExclude?.join(", ")||"Nenhuma"}.</p>:null}<span><Info size={12} />{r.comparison ? date(r.comparison.current.from) + " a " + date(r.comparison.current.to) + " × " + date(r.comparison.previous.from) + " a " + date(r.comparison.previous.to) : period(r.plan.filters) + " · comparação com meses equivalentes do ano anterior"}</span><span><Database size={12} />{r.source} · {new Date(sourceDate).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}</span>{r.sourceInfo && <span>Base até {date(r.sourceInfo.referenceDate)}</span>}{r.comparison?.reason && <p>{r.comparison.reason}</p>}{r.warnings?.map((warning) => <p className="report-warning" key={warning}>{warning}</p>)}</div>;
+  const date = (value: string) =>
+    new Date(value + "T12:00:00Z").toLocaleDateString("pt-BR", { timeZone: "UTC" });
+  return (
+    <div className="report-context">
+      {r.plan.filters.categoriesInclude?.length || r.plan.filters.categoriesExclude?.length ? (
+        <p>
+          Incluir: {r.plan.filters.categoriesInclude?.join(", ") || "Todas"}. Excluir:{" "}
+          {r.plan.filters.categoriesExclude?.join(", ") || "Nenhuma"}.
+        </p>
+      ) : null}
+      <span>
+        <Info size={12} />
+        {r.comparison
+          ? date(r.comparison.current.from) +
+            " a " +
+            date(r.comparison.current.to) +
+            " × " +
+            date(r.comparison.previous.from) +
+            " a " +
+            date(r.comparison.previous.to)
+          : period(r.plan.filters) + " · comparação com meses equivalentes do ano anterior"}
+      </span>
+      <span>
+        <Database size={12} />
+        {r.source} ·{" "}
+        {new Date(sourceDate).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}
+      </span>
+      {r.sourceInfo && <span>Base até {date(r.sourceInfo.referenceDate)}</span>}
+      {r.comparison?.reason && <p>{r.comparison.reason}</p>}
+      {r.warnings?.map((warning) => (
+        <p className="report-warning" key={warning}>
+          {warning}
+        </p>
+      ))}
+    </div>
+  );
 }
-export function Graph({ r, metric = r.plan.metric, title }: { r: Report; metric?: Metric; title?: string }) {
+
+export function Graph({
+  r,
+  metric = r.plan.metric,
+  title,
+  onCrossFilter,
+  activeFilterValue,
+  refreshing = false,
+}: {
+  r: Report;
+  metric?: Metric;
+  title?: string;
+  onCrossFilter?: (dimension: FilterDimension | "month", value: string) => void;
+  activeFilterValue?: string;
+  refreshing?: boolean;
+}) {
   const [table, setTable] = useState(false);
+  const [mode, setMode] = useState<SmartChartMode>("primary");
+  const [zoomed, setZoomed] = useState(false);
+  const [resetZoomNonce, setResetZoomNonce] = useState(0);
+
   const isMonth = r.plan.group === "month";
   const data = r.rows.map((row) => ({
     label: isMonth ? monthName(row.name) : row.name,
     atual: row.values[metric].current,
     anterior: row.values[metric].previous,
   }));
-  const graph = isMonth ? data : data.slice(0, 8);
   const yr = (s: string) => s.slice(0, 4);
   const f = r.plan.filters;
+  const capabilities = r.sourceInfo?.capabilities;
+  const canFilterGroup =
+    !!onCrossFilter &&
+    (isMonth || (capabilities?.filters ?? legacyGroups).includes(r.plan.group as FilterDimension));
+
   return (
     <section className="panel graph">
       <div className="sectionhead">
         <div>
           <div className="mini">
             <ChartNoAxesCombined size={14} /> Análise comparativa
+            {refreshing && <span className="chart-sync-pill">Atualizando…</span>}
           </div>
           <h2>
-            {title ?? (isMonth
-              ? "Evolução mensal"
-              : r.plan.order === "decline" ? "Variação · menores diferenças absolutas" : r.plan.order === "growth" ? "Variação · maiores diferenças absolutas" : groupLabel(r.plan.group, r.sourceInfo?.capabilities) + " por " + metricLabel(metric, r.sourceInfo?.capabilities).toLowerCase())}
+            {title ??
+              (isMonth
+                ? "Evolução mensal"
+                : r.plan.order === "decline"
+                  ? "Variação · menores diferenças absolutas"
+                  : r.plan.order === "growth"
+                    ? "Variação · maiores diferenças absolutas"
+                    : groupLabel(r.plan.group, capabilities) +
+                      " por " +
+                      metricLabel(metric, capabilities).toLowerCase())}
           </h2>
         </div>
-        <button className="soft compact" onClick={() => setTable(!table)}>
-          {table ? "Gráfico" : "Tabela"}
-        </button>
+        <div className="chart-controls">
+          {!table && (
+            <div className="chart-segmented" role="group" aria-label="Modo de visualização">
+              <button
+                type="button"
+                className={mode === "primary" ? "active" : ""}
+                onClick={() => setMode("primary")}
+              >
+                {isMonth ? "Linha" : "Comparativo"}
+              </button>
+              <button
+                type="button"
+                className={mode === "secondary" ? "active" : ""}
+                onClick={() => setMode("secondary")}
+              >
+                {isMonth ? "Colunas" : "Variação Δ"}
+              </button>
+            </div>
+          )}
+          {!table && zoomed && (
+            <button
+              type="button"
+              className="soft compact"
+              onClick={() => setResetZoomNonce((n) => n + 1)}
+              title="Resetar zoom"
+            >
+              <RotateCcw size={13} />
+              Resetar
+            </button>
+          )}
+          <button className="soft compact" onClick={() => setTable(!table)}>
+            {table ? "Gráfico" : "Tabela"}
+          </button>
+        </div>
       </div>
       <div className="chartsub">
-        {metricLabel(metric, r.sourceInfo?.capabilities)} · {period(f)}
+        <span>
+          {metricLabel(metric, capabilities)} · {period(f)}
+        </span>
+        {activeFilterValue && (
+          <span className="chart-active-badge">
+            Filtro no gráfico: <b>{activeFilterValue}</b>
+          </span>
+        )}
       </div>
       {data.every((x) => x.atual === null && x.anterior === null) ? (
         <Empty title="Sem valores no recorte">Confira o indicador e os filtros selecionados.</Empty>
@@ -253,71 +558,86 @@ export function Graph({ r, metric = r.plan.metric, title }: { r: Report; metric?
         </div>
       ) : (
         <>
-          <div className="legend">
-            <i />
-            Período selecionado <i />
-            Ano anterior
-          </div>
-          <div className="chart">
-            <ResponsiveContainer width="100%" height="100%">
-              {isMonth ? <LineChart data={graph} margin={{ top: 10, right: 12, left: 0, bottom: 5 }}>
-                <CartesianGrid vertical={false} strokeDasharray="3 4" stroke="#e3e8f1" />
-                <XAxis
-                  dataKey="label"
-                  tickLine={false}
-                  axisLine={false}
-                  tick={{ fontSize: 10, fill: "#627089" }}
-                  tickFormatter={(v) => String(v).slice(0, 14)}
-                />
-                <YAxis
-                  width={60}
-                  axisLine={false}
-                  tickLine={false}
-                  tick={{ fontSize: 10, fill: "#627089" }}
-                  tickFormatter={(v) => pretty(Number(v), metric, true)}
-                />
-                <Tooltip
-                  cursor={{ fill: "#f0f3fc" }}
-                  formatter={(v, n) => [
-                    pretty(v == null ? null : Number(v), metric),
-                    n === "atual" ? "Período" : "Ano anterior",
-                  ]}
-                />
-                <Line dataKey="anterior" stroke="#9aadc7" strokeWidth={2} strokeDasharray="5 4" dot={false} connectNulls={false} isAnimationActive={false} />
-                <Line dataKey="atual" stroke="#6750d8" strokeWidth={3} dot={{ r: 3 }} connectNulls={false} isAnimationActive={false} />
-              </LineChart> : <BarChart data={graph} layout="vertical" margin={{ top: 4, right: 16, left: 0, bottom: 5 }}>
-                <CartesianGrid horizontal={false} strokeDasharray="3 4" stroke="#e3e8f1" />
-                <XAxis type="number" tickCount={4} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "#627089" }} tickFormatter={(v) => pretty(Number(v), metric, true)} />
-                <YAxis type="category" dataKey="label" width={125} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "#627089" }} tickFormatter={(v) => String(v).length > 21 ? String(v).slice(0, 20) + "…" : String(v)} />
-                <Tooltip cursor={{ fill: "#f0f3fc" }} formatter={(v, n) => [pretty(v == null ? null : Number(v), metric), n === "atual" ? "Período" : "Ano anterior"]} />
-                <Bar dataKey="anterior" fill="#b3c5de" radius={[0, 3, 3, 0]} maxBarSize={13} isAnimationActive={false} />
-                <Bar dataKey="atual" fill="#6750d8" radius={[0, 3, 3, 0]} maxBarSize={13} isAnimationActive={false} />
-              </BarChart>}
-            </ResponsiveContainer>
-          </div>
+          {!isMonth && mode === "secondary" ? (
+            <div className="legend">
+              <i className="legend-good" />
+              Variação favorável <i className="legend-bad" />
+              Variação desfavorável
+            </div>
+          ) : (
+            <div className="legend">
+              <i />
+              Período selecionado <i />
+              Ano anterior
+            </div>
+          )}
+          <SmartChart
+            r={r}
+            metric={metric}
+            mode={mode}
+            activeKey={activeFilterValue}
+            resetZoomNonce={resetZoomNonce}
+            onZoomChange={setZoomed}
+            onSelectPoint={
+              canFilterGroup
+                ? (item) => {
+                    if (!item.canDrill) return;
+                    onCrossFilter(
+                      item.isMonth ? "month" : (r.plan.group as FilterDimension),
+                      item.key,
+                    );
+                  }
+                : undefined
+            }
+          />
+          {canFilterGroup && (
+            <p className="chart-hint">
+              Toque em um ponto ou barra para filtrar os demais indicadores (toque novamente para
+              limpar).
+            </p>
+          )}
         </>
       )}
       <div className="source">
         <span>
-          <Database size={12} /> {r.source} · {r.sourceInfo ? "extração " + new Date(r.sourceInfo.extractedAt).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" }) + " · versão " + r.sourceInfo.versionId.slice(0, 8) : "consulta " + new Date(r.asOf).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}
+          <Database size={12} /> {r.source} ·{" "}
+          {r.sourceInfo
+            ? "extração " +
+              new Date(r.sourceInfo.extractedAt).toLocaleString("pt-BR", {
+                timeZone: "America/Sao_Paulo",
+              }) +
+              " · versão " +
+              r.sourceInfo.versionId.slice(0, 8)
+            : "consulta " +
+              new Date(r.asOf).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}
         </span>
         <span>
           {yr(f.to)} × {+yr(f.to) - 1}
           {r.truncated ? " · Top 30" : ""}
         </span>
       </div>
-      {!isMonth && data.length > graph.length && !table && <p className="sub chart-note">Gráfico com os {graph.length} primeiros resultados. A tabela inclui {data.length} registros.</p>}
+      {!isMonth && data.length > 8 && !table && (
+        <p className="sub chart-note">
+          Exibindo {data.length} registros com rolagem no gráfico e detalhamento na tabela.
+        </p>
+      )}
     </section>
   );
 }
+
 export function Signals({ r, ask }: { r: Report; ask: (q: string) => void }) {
-  const rankedSignals = r.rows.filter((row) => {
-    const value = pair(row, r.plan.metric);
-    return value.current != null && value.previous != null && value.current !== value.previous;
-  }).sort((a, b) => {
-    const impact = (row: Report["total"]) => (pair(row, r.plan.metric).current! - pair(row, r.plan.metric).previous!) * (metrics[r.plan.metric].up ? 1 : -1);
-    return impact(a) - impact(b);
-  }).slice(0, 3);
+  const rankedSignals = r.rows
+    .filter((row) => {
+      const value = pair(row, r.plan.metric);
+      return value.current != null && value.previous != null && value.current !== value.previous;
+    })
+    .sort((a, b) => {
+      const impact = (row: Report["total"]) =>
+        (pair(row, r.plan.metric).current! - pair(row, r.plan.metric).previous!) *
+        (metrics[r.plan.metric].up ? 1 : -1);
+      return impact(a) - impact(b);
+    })
+    .slice(0, 3);
   const items = reportMetricKeys(r)
     .filter((m) => change(pair(r.total, m), m) !== null)
     .sort((a, b) => {
@@ -339,13 +659,19 @@ export function Signals({ r, ask }: { r: Report; ask: (q: string) => void }) {
               key={m}
               className="signal"
               onClick={() =>
-                ask("Analise a evolução de " + metricLabel(m, r.sourceInfo?.capabilities) + " no período selecionado.")
+                ask(
+                  "Analise a evolução de " +
+                    metricLabel(m, r.sourceInfo?.capabilities) +
+                    " no período selecionado.",
+                )
               }
             >
               <div>
                 <b>{metricLabel(m, r.sourceInfo?.capabilities)}</b>
                 <span>{d === 0 ? "Estável" : d > 0 ? "Acima" : "Abaixo"} do ano anterior</span>
-                <small>{absoluteChange(pair(r.total, m), m)} · {period(r.plan.filters)}</small>
+                <small>
+                  {absoluteChange(pair(r.total, m), m)} · {period(r.plan.filters)}
+                </small>
               </div>
               <Delta r={r.total} m={m} />
               <ChevronRight size={14} />
@@ -355,7 +681,33 @@ export function Signals({ r, ask }: { r: Report; ask: (q: string) => void }) {
       ) : (
         <Empty title="Sem comparação disponível">São necessários valores nos dois períodos.</Empty>
       )}
-      {rankedSignals.length > 0 && <div className="ranked-signals"><h3>Variações para investigar</h3>{rankedSignals.map((row) => <button className="signal" key={row.key ?? row.name} onClick={() => ask("Analise a variação de " + (r.plan.group === "month" ? monthName(row.name) : row.name) + " em " + metricLabel(r.plan.metric, r.sourceInfo?.capabilities) + ". Separe os fatos das hipóteses e sugira uma ação.")}><div><b>{r.plan.group === "month" ? monthName(row.name) : row.name}</b><span>Impacto: {absoluteChange(pair(row, r.plan.metric), r.plan.metric)}</span><small>{period(r.plan.filters)} · conferir composição e causas na análise.</small></div><ChevronRight size={14} /></button>)}</div>}
+      {rankedSignals.length > 0 && (
+        <div className="ranked-signals">
+          <h3>Variações para investigar</h3>
+          {rankedSignals.map((row) => (
+            <button
+              className="signal"
+              key={row.key ?? row.name}
+              onClick={() =>
+                ask(
+                  "Analise a variação de " +
+                    (r.plan.group === "month" ? monthName(row.name) : row.name) +
+                    " em " +
+                    metricLabel(r.plan.metric, r.sourceInfo?.capabilities) +
+                    ". Separe os fatos das hipóteses e sugira uma ação.",
+                )
+              }
+            >
+              <div>
+                <b>{r.plan.group === "month" ? monthName(row.name) : row.name}</b>
+                <span>Impacto: {absoluteChange(pair(row, r.plan.metric), r.plan.metric)}</span>
+                <small>{period(r.plan.filters)} · conferir composição e causas na análise.</small>
+              </div>
+              <ChevronRight size={14} />
+            </button>
+          ))}
+        </div>
+      )}
     </section>
   );
 }

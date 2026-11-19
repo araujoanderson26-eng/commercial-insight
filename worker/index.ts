@@ -11,9 +11,11 @@ import { controlledHmlModelPreflight } from "./openai-budget";
 import { productionAIStatus, productionAIModelPreflight } from './production-ai-budget';
 import { classifyWorkerError, classifyWorkerErrorDetail } from "./error-diagnostics";
 import {
+  allowedMobileOrigin,
   audit,
   body,
   config,
+  corsHeaders,
   digest,
   fail,
   json,
@@ -23,6 +25,7 @@ import {
   Problem,
   publicUser,
   required,
+  scheduleBackground,
   stmt,
   userSchema,
   type DbUser,
@@ -30,13 +33,37 @@ import {
 } from "./core";
 import { finish, start, MicrosoftProblem, type CallbackStage } from "./entra";
 
+function edgeCache(): Cache | null {
+  return typeof caches !== "undefined" && "default" in caches
+    ? (caches as unknown as { default: Cache }).default
+    : null;
+}
+
+async function edgeCacheKey(endpoint: string, scopeParts: (string | number | null)[], payload: unknown): Promise<Request> {
+  const keyHash = await digest(JSON.stringify([scopeParts, payload]));
+  return new Request("https://cache.commercial-insight.internal/v1/" + endpoint + "/" + keyHash, { method: "GET" });
+}
+
+function withCors(res: Response, e: Env, req: Request): Response {
+  const extra = corsHeaders(e, req);
+  if (!Object.keys(extra).length) return res;
+  const headers = new Headers(res.headers);
+  for (const [k, v] of Object.entries(extra)) headers.set(k, v);
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+}
+
 async function api(req: Request, e: Env, ctx: ExecutionContext) {
   const url = new URL(req.url),
     p = url.pathname.slice(4),
     method = req.method;
+  const reqOrigin = req.headers.get("origin");
+  const mobileOrigin = allowedMobileOrigin(e, reqOrigin);
+  if (method === "OPTIONS" && mobileOrigin)
+    return new Response(null, { status: 204, headers: corsHeaders(e, req) });
   if (
     method !== "GET" &&
-    (req.headers.get("origin") !== origin(e) || req.headers.get("sec-fetch-site") === "cross-site")
+    !mobileOrigin &&
+    (reqOrigin !== origin(e) || req.headers.get("sec-fetch-site") === "cross-site")
   )
     fail(403, "Origem da solicitação não autorizada.");
   if (!["GET", "POST", "PUT", "DELETE"].includes(method)) fail(405, "Método inválido.");
@@ -44,7 +71,7 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
   if (p === "/microsoft/callback" && method === "GET") {
     const diagnostic: CallbackStage = { stage: "session" };
     try {
-      const { user, hash } = await authenticate(e, req);
+      const { user, hash } = await authenticate(e, req, ctx);
       diagnostic.stage = "config";
       const { model, revision } = await config(e);
       await finish(e, required(model), revision, user, hash, url, diagnostic);
@@ -56,7 +83,7 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
       return redirectProfile(e, "erro");
     }
   }
-  const { user: u, hash } = await authenticate(e, req),
+  const { user: u, hash } = await authenticate(e, req, ctx),
     { model, revision } = await config(e);
   const owner = u.id;
   if (p !== "/auth/profile") assertControlledHmlUser(e, owner);
@@ -91,6 +118,34 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
   }
   if (p === "/data/status" || p === "/data/options" || p === "/data/search" || p.startsWith("/admin/data")) {
     if ((p === "/data/options" || p === "/data/search") && method === "POST") await limit(e, "options:" + owner, 30, 60);
+    const cache = edgeCache();
+    if (cache && p === "/data/options" && method === "POST") {
+      if (u.role === "operador" || u.update_only) fail(403, "O operador de atualização não possui acesso às análises comerciais.");
+      const t0 = Date.now();
+      const reqFilters = filtersSchema.parse(await body(req.clone()));
+      await checkAccess(e, u, revision, hash);
+      const statusInfo = await dataStatus(e);
+      if (statusInfo.source === "manual" && statusInfo.active?.id) {
+        const cacheKey = await edgeCacheKey("options", [owner, u.scope_version, revision, statusInfo.active.id], reqFilters);
+        const cached = await cache.match(cacheKey);
+        if (cached) {
+          const payload = await cached.json();
+          return json(payload, 200, { "X-Cache": "HIT", "Server-Timing": "app;dur=" + (Date.now() - t0) });
+        }
+        const response = await manualRoute(req, e, u, p);
+        if (response) {
+          await checkAccess(e, u, revision, hash);
+          const payload = await response.json();
+          scheduleBackground(
+            ctx,
+            cache.put(cacheKey, new Response(JSON.stringify(payload), {
+              headers: { "Content-Type": "application/json", "Cache-Control": "public, max-age=3600" },
+            })),
+          );
+          return json(payload, 200, { "X-Cache": "MISS", "Server-Timing": "app;dur=" + (Date.now() - t0) });
+        }
+      }
+    }
     const response = await manualRoute(req, e, u, p);
     if (response) {
       if (p === "/data/options" || p === "/data/search") await checkAccess(e, u, revision, hash);
@@ -342,13 +397,50 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
     return json({ report, commentary, ...(visit ? { visit } : {}) });
   }
   if (p === "/report" && method === "POST") {
+    const t0 = Date.now();
     const plan = planSchema.parse(await body(req));
     await limit(e, "report:" + owner, 50, 60);
     const provider = await dataProvider(e, model, revision, u);
+    const cache = edgeCache();
+    if (provider.sourceType === "manual" && provider.versionId) {
+      await checkAccess(e, u, revision, hash);
+      const cacheKey = cache
+        ? await edgeCacheKey("report", [owner, u.scope_version, revision, provider.versionId], plan)
+        : null;
+      if (cache && cacheKey) {
+        const cached = await cache.match(cacheKey);
+        if (cached) {
+          const cachedReport = await cached.json();
+          scheduleBackground(ctx, audit(e, owner, "relatorio_consultado", plan.group).run());
+          return json(cachedReport, 200, { "X-Cache": "HIT", "Server-Timing": "app;dur=" + (Date.now() - t0) });
+        }
+      }
+      const report = await provider.query(plan);
+      await checkAccess(e, u, revision, hash);
+      scheduleBackground(
+        ctx,
+        Promise.all([
+          ...(cache && cacheKey
+            ? [
+                cache
+                  .put(
+                    cacheKey,
+                    new Response(JSON.stringify(report), {
+                      headers: { "Content-Type": "application/json", "Cache-Control": "public, max-age=3600" },
+                    }),
+                  )
+                  .catch(() => {}),
+              ]
+            : []),
+          audit(e, owner, "relatorio_consultado", plan.group).run().catch(() => {}),
+        ]),
+      );
+      return json(report, 200, { "X-Cache": "MISS", "Server-Timing": "app;dur=" + (Date.now() - t0) });
+    }
     const report = await provider.query(plan);
     await checkAccess(e, u, revision, hash);
-    await audit(e, owner, "relatorio_consultado", plan.group).run();
-    return json(report);
+    scheduleBackground(ctx, audit(e, owner, "relatorio_consultado", plan.group).run());
+    return json(report, 200, { "X-Cache": "BYPASS", "Server-Timing": "app;dur=" + (Date.now() - t0) });
   }
   if (p === "/chat" && method === "POST") {
     const v = z
@@ -461,16 +553,20 @@ export default {
   async fetch(req: Request, e: Env, ctx: ExecutionContext) {
     try {
       if (!new URL(req.url).pathname.startsWith("/api/")) return e.ASSETS.fetch(req);
-      return await api(req, e, ctx);
+      return withCors(await api(req, e, ctx), e, req);
     } catch (err) {
-      if (err instanceof Problem) return json({ error: err.message }, err.status);
+      if (err instanceof Problem) return withCors(json({ error: err.message }, err.status), e, req);
       if (err instanceof z.ZodError)
-        return json(
-          { error: "Revise os campos enviados.", fields: err.issues.map((v) => v.path.join(".")) },
-          400,
+        return withCors(
+          json(
+            { error: "Revise os campos enviados.", fields: err.issues.map((v) => v.path.join(".")) },
+            400,
+          ),
+          e,
+          req,
         );
       if (err instanceof Error && ["TimeoutError", "AbortError"].includes(err.name))
-        return json({ error: "O provedor demorou para responder. Tente novamente." }, 504);
+        return withCors(json({ error: "O provedor demorou para responder. Tente novamente." }, 504), e, req);
       console.error(
         JSON.stringify({
           event: "request_failed",
@@ -479,7 +575,7 @@ export default {
       );
       const diagnostic: HeadersInit = e.APP_ORIGIN === "https://commercial-insight-hml.araujo-anderson26.workers.dev"
         && e.HML_REAL_DATA_AUTHORIZATION !== undefined ? { "X-Hml-Diagnostic": classifyWorkerError(err), "X-Hml-Diagnostic-Detail": classifyWorkerErrorDetail(err) } : {};
-      return json({ error: "Não foi possível concluir a operação." }, 500, diagnostic);
+      return withCors(json({ error: "Não foi possível concluir a operação." }, 500, diagnostic), e, req);
     }
   },
   async scheduled(event: ScheduledController, e: Env) {

@@ -11,6 +11,10 @@
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.worker.json",
     "lint": "oxlint src worker shared scripts tests --deny-warnings",
     "build": "npm run typecheck && vite build && node scripts/package-preparer.mjs && node scripts/sw.mjs",
+    "build:mobile": "vite build --mode mobile && node scripts/sw.mjs",
+    "mobile:sync": "npm run build:mobile && npx cap sync",
+    "mobile:android": "npm run mobile:sync && npx cap open android",
+    "mobile:ios": "npm run mobile:sync && npx cap open ios",
     "test": "node --import tsx --test tests/*.test.ts",
     "test:ui": "node --import tsx tests/ui-smoke.ts",
     "test:executive": "node --import tsx tests/executive-ui-smoke.ts",
@@ -22,16 +26,20 @@
     "deploy": "node scripts/check-release.mjs && npm run build && wrangler deploy"
   },
   "dependencies": {
+    "@capacitor/core": "^8.6.2",
+    "@capacitor/splash-screen": "^8.0.2",
+    "@capacitor/status-bar": "^8.0.4",
     "@fontsource-variable/inter": "^5.2.5",
     "@noble/hashes": "^2.4.0",
+    "echarts": "^6.1.0",
     "jose": "^6.1.0",
     "lucide-react": "^0.468.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "recharts": "^3.4.1",
     "zod": "^4.1.12"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.6.2",
     "@cloudflare/workers-types": "5.20261117.1",
     "@playwright/test": "^1.65.1",
     "@tailwindcss/vite": "^4.1.0",

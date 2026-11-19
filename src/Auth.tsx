@@ -1,6 +1,7 @@
 import { ArrowLeft, ArrowRight, BarChart3, Eye, EyeOff, LockKeyhole, Sparkles } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { api, Brand, Credit, ErrorBox, message } from "./ui";
+import { isNativeApp, setNativeToken } from "./lib/runtime";
 export default function Auth({ done }: { done: () => void }) {
   const [code] = useState(() => (location.pathname === "/redefinir" ? location.hash.slice(1) : ""));
   const [mode, setMode] = useState<"login" | "forgot" | "reset">(code ? "reset" : "login"),
@@ -17,7 +18,11 @@ export default function Auth({ done }: { done: () => void }) {
     setNote("");
     try {
       if (mode === "login") {
-        await api("auth/login", "POST", { email, password: pw });
+        const loginRes = await api<{ ok: boolean; token?: string }>("auth/login", "POST", {
+          email,
+          password: pw,
+        });
+        if (isNativeApp() && loginRes?.token) setNativeToken(loginRes.token);
         if (location.pathname === "/redefinir") history.replaceState({}, "", "/");
         done();
       } else if (mode === "forgot") {
