@@ -232,7 +232,7 @@ const blank: User = {
   national: false,
   entraOid: null,
 };
-export function Team({ self }: { self: string }) {
+export function Team({ self, scopeLabel = "Regionais" }: { self: string; scopeLabel?: string }) {
   const [users, S] = useState<User[]>([]),
     [edit, U] = useState<User | null>(null),
     [regions, R] = useState(""),
@@ -282,7 +282,7 @@ export function Team({ self }: { self: string }) {
           <Users size={15} /> Administração
         </div>
         <h1>Equipe e permissões</h1>
-        <p>Defina quem pode consultar cada regional e carteira.</p>
+        <p>Defina quem pode consultar {scopeLabel.toLowerCase()} e carteiras autorizadas.</p>
       </div>
       {err && <ErrorBox>{err}</ErrorBox>}
       <section className="panel">
@@ -360,8 +360,9 @@ export function Team({ self }: { self: string }) {
               />
             </label>
             <label>
-              Regionais · uma por linha
+              {scopeLabel} · um valor por linha
               <textarea value={regions} onChange={(e) => R(e.target.value)} />
+              {scopeLabel === "Representantes" && <small className="muted">Este campo limita o acesso aos representantes autorizados. Para gerentes, informe os representantes da equipe. Regional, gerente e UF nas análises são filtros adicionais e não ampliam esse acesso.</small>}
             </label>
             <label>
               Clientes · um por linha

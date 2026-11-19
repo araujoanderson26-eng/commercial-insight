@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { configSchema, filtersSchema, planSchema, type Report } from "../shared/domain";
 import { passwordHash } from "../shared/password.mjs";
-import { dataProvider } from "./providers";
-import { dataStatus, manualRoute, processManualJobs } from "./manual";
+import { assertAssistantAccess, dataProvider } from "./providers";
+import { dataStatus, manualRoute, processManualJobs, processManualQueue, type ManualJob } from "./manual";
 import { comment, interpret } from "./assistant";
 import { authenticate, authRoute, origin } from "./auth";
 import {
@@ -78,12 +78,17 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
         activeVersionId: data.active?.id ?? null,
         extractedAt: data.active?.extractedAt ?? null,
         stale: data.stale,
+        capabilities: data.source === "manual" ? data.active?.capabilities : undefined,
       },
     });
   }
   if (p === "/data/status" || p === "/data/options" || p.startsWith("/admin/data")) {
+    if (p === "/data/options" && method === "POST") await limit(e, "options:" + owner, 30, 60);
     const response = await manualRoute(req, e, u, p);
-    if (response) return response;
+    if (response) {
+      if (p === "/data/options") await checkAccess(e, u, revision, hash);
+      return response;
+    }
   }
   if (p === "/microsoft/start" && method === "POST")
     return json(await start(e, required(model), revision, u, hash));
@@ -303,15 +308,19 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
           ).all<{ question: string; plan: string }>()
         ).results.reverse()
       : [];
+    await checkAccess(e, u, revision, hash);
+    await assertAssistantAccess(e, provider);
     const plan = await interpret(e, provider.semantics, v.question, v.filters, previous),
       report = await provider.query(plan);
     await checkAccess(e, u, revision, hash);
+    await assertAssistantAccess(e, provider);
     const commentary = await comment(e, v.question, report).catch(() => ({
       summary:
         "Os indicadores foram consultados na fonte identificada. A interpretação da OpenAI está temporariamente indisponível.",
       actions: [],
     }));
     await checkAccess(e, u, revision, hash);
+    await assertAssistantAccess(e, provider);
     const turn = crypto.randomUUID();
     const thread = v.conversation
       ? stmt(e, "UPDATE conversations SET updated=? WHERE id=? AND owner=?", now(), id, owner)
@@ -408,4 +417,7 @@ export default {
       ),
     ]);
   },
-} satisfies ExportedHandler<Env>;
+  async queue(batch: MessageBatch<ManualJob>, e: Env) {
+    await processManualQueue(batch, e);
+  },
+} satisfies ExportedHandler<Env, ManualJob>;

@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
 import { api, Busy, Empty, ErrorBox, message } from "./ui";
+import { metrics, type DataCapabilities } from "../shared/domain";
 
 type ValidationReport = {
   checks?: { name: string; status: string; detail: string }[];
@@ -60,6 +61,7 @@ type DataState = {
     to: string;
     rows: number;
     tables: number;
+    capabilities?: DataCapabilities;
   } | null;
   history: ImportItem[];
   limits: { partBytes: number; maxBytes: number; format: string };
@@ -336,6 +338,9 @@ export function DataUpdates({ changed }: { changed: () => void }) {
   }, [sending]);
 
   const active = state?.active;
+  const publishedReceipt = active && currentId === active.id
+    ? state?.history.find((item) => item.id === currentId && item.status === "published")
+    : undefined;
   const activeAge = active
     ? Date.now() - dateValue(active.sourceUpdatedAt || active.extractedAt).getTime()
     : 0;
@@ -516,7 +521,15 @@ export function DataUpdates({ changed }: { changed: () => void }) {
         <p>Publique uma base completa e acompanhe a validação dos indicadores.</p>
       </div>
       {error && <ErrorBox>{error}</ErrorBox>}
-      {notice && <div className="notice" role="status">{notice}</div>}
+      {notice && !publishedReceipt && <div className="notice" role="status">{notice}</div>}
+      {publishedReceipt && active && <section className="panel du-receipt" role="status" aria-label="Confirmação da atualização">
+        <div className="mini"><CheckCircle2 size={17} /> Atualização concluída</div>
+        <h2>Base atualizada com sucesso</h2>
+        <p>Publicada em {date(active.publishedAt)} por {active.actor}.</p>
+        <p>{n(active.tables)} tabelas · {n(active.rows)} linhas da origem · período de {active.from} a {active.to}.</p>
+        <small>Versão {active.id}. Os indicadores já consultam esta base.</small>
+        {active.capabilities && <p>Indicadores disponíveis: {active.capabilities.metrics.map((metric) => active.capabilities?.labels?.[metric] ?? metrics[metric].label).join(", ")}.</p>}
+      </section>}
       {!state ? <Busy label="Carregando a fonte de dados…" /> : <>
         <section className="panel">
           <div className="sectionhead">
@@ -550,7 +563,7 @@ export function DataUpdates({ changed }: { changed: () => void }) {
         </section>
         <section className="panel">
           <div className="sectionhead"><div><div className="mini"><UploadCloud size={14} /> Atualização completa</div><h2>Enviar nova base</h2></div></div>
-          <ol className="du-steps"><li>Abra o PBIX atualizado no Power BI Desktop.</li><li>Em Ferramentas externas, clique em <b>Preparar atualização Comercial Insight</b>.</li><li>Envie o pacote <b>.ci.ndjson</b> gerado pelo preparador.</li></ol>
+          <ol className="du-steps"><li>Abra o PBIX atualizado no Power BI Desktop.</li><li>Em Ferramentas externas, clique em <b>Preparar atualização Comercial Insight</b> e aguarde a preparação.</li><li>Salve e envie o pacote <b>.ci.ndjson</b>. Aguarde a confirmação <b>Base atualizada com sucesso</b>.</li></ol>
           <div className="du-links"><a href="/preparador-comercial-insight.zip" download><Download size={14} />Baixar preparador</a><a href="/atualizacao-dados.md" target="_blank" rel="noreferrer">Instalação e instruções</a></div>
           {unfinished && !sending && <div className="du-callout"><Clock3 size={17} /><span>Há um envio incompleto de <b>{unfinished.filename}</b>. Selecione o mesmo pacote para retomar as partes já recebidas.</span></div>}
           <div className={`du-drop ${dragging ? "du-dragging" : ""}`} onDragOver={(ev) => { ev.preventDefault(); if (!sending) setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={drop}>
@@ -563,7 +576,7 @@ export function DataUpdates({ changed }: { changed: () => void }) {
           <p className="sub du-upload-note">A publicação acontece automaticamente após todas as validações obrigatórias. A versão atual permanece disponível durante o processamento.</p>
           {sending && <div className="du-progress" role="status"><div><LoaderCircle className="spin" size={15} /><b>{stage === "hash" ? "Verificando o arquivo no computador" : "Enviando pacote"}</b><span>{progress(sent, file?.size ?? 0).toFixed(0)}%</span></div><progress max={100} value={progress(sent, file?.size ?? 0)} /><small>{bytes(sent)} de {bytes(file?.size ?? 0)} · mantenha esta página aberta até concluir o envio.</small></div>}
           <div className="du-actions"><button className="primary" disabled={!file || sending || saving || stage === "accepted"} onClick={upload}><UploadCloud size={16} />{sending ? "Enviando…" : "Enviar e atualizar base"}</button>{sending && <button className="soft" onClick={() => controller.current?.abort()}><X size={15} />Interromper envio</button>}</div>
-          {pending && <div className="du-job" role="status"><div className="sectionhead"><div><b><LoaderCircle size={15} className="spin" />{labels[pending.status] ?? pending.status}</b><p>{pending.filename}</p></div><button className="textlink" onClick={() => cancel(pending.id)}>Cancelar importação</button></div><progress max={100} value={progress(pending.processedBytes, pending.bytes)} /><p>{bytes(pending.processedBytes)} verificados de {bytes(pending.bytes)} · {n(pending.processedRows ?? pending.rows)} linhas processadas, incluindo a projeção. {pending.status === "validating" ? `${n(pending.report?.controls?.length ?? 0)} controles DAX conferidos.` : ""}</p><small>O processamento aceito continua no servidor. Você pode fechar esta página e voltar para acompanhar.</small></div>}
+          {pending && <div className="du-job" role="status"><div className="sectionhead"><div><b><LoaderCircle size={15} className="spin" />{labels[pending.status] ?? pending.status}</b><p>{pending.filename}</p></div><button className="textlink" onClick={() => cancel(pending.id)}>Cancelar importação</button></div><progress max={100} value={progress(pending.processedBytes, pending.bytes)} /><p>{bytes(pending.processedBytes)} verificados de {bytes(pending.bytes)} · {n(pending.processedRows ?? pending.rows)} linhas processadas. {pending.status === "validating" ? `${n(pending.report?.controls?.length ?? 0)} controles DAX conferidos.` : ""}</p><small>O processamento aceito continua no servidor. Você pode fechar esta página e voltar para acompanhar.</small></div>}
         </section>
         <section className="panel">
           <div className="sectionhead"><div><div className="mini"><History size={14} /> Rastreabilidade</div><h2>Histórico de importações</h2></div><button className="soft compact" onClick={() => load().catch((e) => setError(message(e)))}><RefreshCw size={14} />Atualizar</button></div>

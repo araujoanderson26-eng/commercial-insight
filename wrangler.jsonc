@@ -13,6 +13,8 @@
   "workers_dev": true,
   "preview_urls": false,
 
+  "limits": { "cpu_ms": 60000 },
+
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
@@ -38,12 +40,17 @@
     }
   ],
 
+  "queues": {
+    "producers": [{ "binding": "MANUAL_JOBS", "queue": "commercial-insight-manual-jobs" }],
+    "consumers": [{ "queue": "commercial-insight-manual-jobs", "max_batch_size": 1, "max_batch_timeout": 1, "max_concurrency": 1, "max_retries": 5, "retry_delay": 30 }]
+  },
+
   "vars": {
    "APP_ORIGIN": "https://commercial-insight.araujoempresarial.com.br",
     "OPENAI_MODEL": "gpt-4.1-mini",
     "RETENTION_DAYS": "90",
-    "MANUAL_MAX_BYTES": "134217728",
-    "MANUAL_D1_CAPACITY_BYTES": "471859200"
+    "MANUAL_MAX_BYTES": "536870912",
+    "MANUAL_D1_CAPACITY_BYTES": "9663676416"
   },
 
   "observability": {

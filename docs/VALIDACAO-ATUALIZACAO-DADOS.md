@@ -1,5 +1,7 @@
 # Validação da atualização manual — 18/11/2026
 
+> Registro histórico da entrega inicial **v1**. Os limites, o plano da conta, o processamento, a retenção e as pendências descritos abaixo representam aquele estágio. O estado atual e as evidências da integração nativa Panizzon constam de [INTEGRACAO-POWERBI-D1.md](INTEGRACAO-POWERBI-D1.md); a rotina vigente está no [manual semanal](MANUAL-ATUALIZACAO-SEMANAL.md).
+
 ## Escopo entregue
 
 Fonte manual separada do conector Microsoft, preparador externo Windows TOM/ADOMD, pacote versionado UTF-8, upload multipart privado R2, snapshots D1 e ativação atômica com geração. O plano de implementação foi: preservar autenticação e UI; entregar extração e contrato; importar com checkpoints; integrar consultas/IA; validar e publicar.

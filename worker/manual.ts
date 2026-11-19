@@ -2,13 +2,15 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { metricKeys, monthsBetween, filtersSchema, type Filters, type Metric, type Plan, type Report, type Row } from "../shared/domain";
 import {
-  MANUAL_SOURCE, UPLOAD_PART_BYTES, MAX_MANIFEST_BYTES, MAX_DATA_PART_BYTES,
+  MANUAL_SOURCE, UPLOAD_PART_BYTES, MAX_MANIFEST_BYTES, MAX_DATA_PART_BYTES,MAX_PART_ROWS,
   DEFAULT_MAX_PACKAGE_BYTES, decimalInteger, factSchema, manifestSchema,
   type ManualManifest, type ManualMetric, type ControlFilters,
 } from "../shared/manual";
 import { audit, body, fail, json, now, stmt, type DbUser, type Env } from "./core";
+import { nativeCapabilities, nativeControl, nativeControlResult, nativeOptions, nativePartStatements, nativeStorageTables, nativeValues, queryNative, validateNativeModel,validateNativeStorage,type NativeResult } from "./native-model";
 
-type ManualEnv = Env & { BUCKET: R2Bucket; MANUAL_MAX_BYTES?: string; MANUAL_ALLOW_SYNTHETIC?: string };
+export type ManualJob={jobId:string};
+type ManualEnv = Env & { BUCKET: R2Bucket; MANUAL_MAX_BYTES?: string; MANUAL_ALLOW_SYNTHETIC?: string; MANUAL_JOBS?:Queue<ManualJob> };
 type ImportRow = {
   id: string; owner: string; actor: string; filename: string; bytes: number; sha256: string;
   object_key: string; upload_id: string | null; status: string; base_generation: number;
@@ -49,6 +51,7 @@ export async function manualContext(e: Env, versionId?: string) {
   const { row, manifest } = await publishedVersion(e, versionId);
   return {
     versionId: row.id,
+    capabilities:manifest.formatVersion===2?nativeCapabilities(manifest):undefined,
     measures: Object.fromEntries(metricKeys.map((key) => {
       const m = manifest.metrics.find((m) => m.id === key && m.status === "validated" && m.kind !== "unavailable");
       return [key, m?.originalName ?? null];
@@ -59,7 +62,7 @@ function activeInfo(row: ImportRow, source:SourceRow) {
   const m = parsed(row)!;
   return { id: row.id, publishedAt: iso(source.active_at??row.published!), actor: source.active_actor??row.actor, importedPublishedAt:iso(row.published!), uploadedAt:iso(row.created), extractedAt: m.extractedAt,
     sourceUpdatedAt: m.sourceUpdatedAt, from: m.projection.from, to: m.projection.to,
-    rows: m.inventory.tables.reduce((sum,table)=>sum+table.rowCount,0), projectionRows:m.projection.rowCount, processedRows:row.rows, tables: row.tables, model: m.model.name, referenceDate: m.referenceDate };
+    rows: m.inventory.tables.reduce((sum,table)=>sum+table.rowCount,0), projectionRows:m.projection.rowCount, processedRows:row.rows, tables: row.tables, model: m.model.name, referenceDate: m.referenceDate, capabilities:m.formatVersion===2?nativeCapabilities(m):undefined };
 }
 export async function dataStatus(e: Env) {
   const s = await sourceRow(e);
@@ -130,7 +133,7 @@ export async function manualRoute(req: Request, e: Env, u: DbUser, path: string)
       return json({part,etag:result.etag,uploadedBytes:(await getImport(e,row.id)).uploaded_bytes});
     }
     if (action === "complete" && method === "POST") {
-      if (["queued","importing","validating","published"].includes(row.status)) return json({id:row.id,status:row.status});
+      if (["queued","importing","validating","published"].includes(row.status)) {if(row.status!=="published")await wakeManualJob(e,row.id);return json({id:row.id,status:row.status});}
       if (row.status !== "uploading" || !row.upload_id) fail(409,"O envio não está aberto.");
       const parts = (await stmt(e,"SELECT part AS partNumber,etag,bytes FROM ci_upload_parts WHERE import_id=? ORDER BY part",row.id).all<{partNumber:number;etag:string;bytes:number}>()).results;
       const expected = Math.ceil(row.bytes/UPLOAD_PART_BYTES);
@@ -140,6 +143,7 @@ export async function manualRoute(req: Request, e: Env, u: DbUser, path: string)
       const object = existingObject ?? await manualEnv(e).BUCKET.resumeMultipartUpload(row.object_key,row.upload_id).complete(parts.map(({partNumber,etag})=>({partNumber,etag})));
       if(object.size!==row.bytes) fail(400,"Tamanho final divergente.");
       await e.DB.batch([stmt(e,"UPDATE ci_imports SET status='queued',updated=? WHERE id=? AND status='uploading'",now(),row.id),audit(e,u.id,"atualizacao_recebida",row.id)]);
+      await wakeManualJob(e,row.id);
       return json({id:row.id,status:"queued"});
     }
     if(action==="retry" && method==="POST") {
@@ -153,6 +157,7 @@ export async function manualRoute(req: Request, e: Env, u: DbUser, path: string)
         stmt(e,"UPDATE ci_sources SET latest_import_id=?,updated=? WHERE id=?",row.id,now(),MANUAL_SOURCE),
         audit(e,u.id,"atualizacao_retomada",row.id),
       ]);
+      if(status==="queued")await wakeManualJob(e,row.id);
       return json({id:row.id,status,partBytes:UPLOAD_PART_BYTES,parts:Math.ceil(row.bytes/UPLOAD_PART_BYTES),uploadedParts:[]});
     }
     if(action==="cancel" && method==="POST") {
@@ -195,24 +200,28 @@ function validateManifest(m:ManualManifest,e:Env) {
     if(t.id==="__projection__" || ids.has(t.id) || names.has(t.name)) throw new Error("Inventário contém tabelas duplicadas.");
     ids.add(t.id);names.add(t.name);
     if(t.sourceRowCount!==t.rowCount) throw new Error("Contagem da origem ausente ou divergente em "+t.name);
-    if(!t.rowCount && !t.allowEmpty) throw new Error("Tabela vazia sem autorização explícita: "+t.name);
+    const metadataOnly=m.formatVersion===2&&t.metadataOnly===true&&!t.allowEmpty&&t.rowCount===0&&t.parts.length===0&&m.inventory.measures.some(x=>typeof x==="object"&&x!==null&&"table"in x&&x.table===t.name)&&!m.inventory.relationships.some(x=>typeof x==="object"&&x!==null&&(("fromTable"in x&&x.fromTable===t.id)||("toTable"in x&&x.toTable===t.id)))&&!Object.values(m.nativeModel??{}).some(x=>typeof x==="object"&&x!==null&&"table"in x&&x.table===t.id);
+    if(t.metadataOnly===true&&!metadataOnly)throw Error("Tabela marcada como metadados contém dependências, linhas ou autorização de vazio incompatível: "+t.name);
+    if(!t.rowCount && !t.allowEmpty&&!metadataOnly) throw new Error("Tabela vazia sem autorização explícita: "+t.name);
     if(new Set(t.columns.map(c=>c.name)).size!==t.columns.length) throw new Error("Colunas duplicadas em "+t.name);
     validateParts(t.parts,t.rowCount,t.name);bytes+=t.parts.reduce((n,p)=>n+p.bytes,0);
   }
-  validateParts(m.projection.parts,m.projection.rowCount,"projeção");
+  if(m.formatVersion===1)validateParts(m.projection.parts,m.projection.rowCount,"projeção");
+  else validateNativeModel(m);
   bytes+=m.projection.parts.reduce((n,p)=>n+p.bytes,0);
   if(bytes>maxBytes(e)) throw new Error("Volume exportado excede a capacidade configurada. Nenhum dado será truncado.");
   const metricIds=new Set<string>();
   for(const metric of m.metrics) {
     if(metricIds.has(metric.id)) throw new Error("Identificador de métrica duplicado.");metricIds.add(metric.id);
-    if(metric.unit!==({revenue:"money",returns:"money",buyers:"count",margin:"percent"} as const)[metric.id]) throw new Error("Unidade incompat?vel com o indicador do aplicativo: "+metric.id);
+    if(metric.unit!==({gross:"money",revenue:"money",returns:"money",buyers:"count",margin:"percent"} as const)[metric.id]) throw new Error("Unidade incompatível com o indicador do aplicativo: "+metric.id);
     if(metric.status!=="validated" || metric.kind==="unavailable") continue;
-    if(metric.supportedFilters.length!==6 || new Set(metric.supportedFilters).size!==6) throw new Error("Métrica não comprovada para todos os filtros usados pelo aplicativo: "+metric.id);
+    if(m.formatVersion===1&&(metric.supportedFilters.length!==6 || new Set(metric.supportedFilters).size!==6)) throw new Error("Métrica não comprovada para todos os filtros usados pelo aplicativo: "+metric.id);
+    if(m.formatVersion===2&&nativeCapabilities(m).filters.some(f=>!metric.supportedFilters.includes(f)))throw Error("Métrica relacional sem suporte a um filtro declarado.");
     if(metric.kind==="sum" && !metric.component) throw new Error("Componente de soma ausente.");
     if(metric.kind==="ratio" && (!metric.numerator || !metric.denominator)) throw new Error("Componentes da razão ausentes.");
     if(metric.kind==="distinctClient" && metric.id!=="buyers") throw new Error("Contagem distinta incompatível com a métrica.");
     const controls=m.controls.filter(c=>c.metric===metric.id);
-    for(const context of ["total","month","region","client","product","state"] as const) {
+    for(const context of (m.formatVersion===2?["total","month","region","client","product","state","category","regional",...(m.nativeModel?.regions.manager?["manager"]:[])]:["total","month","region","client","product","state"])) {
       if(!controls.some(c=>c.context===context)) throw new Error("Controle DAX obrigatório ausente: "+metric.id+" / "+context);
     }
     if(!controls.some(c=>c.context==="total" && c.filters.from===m.projection.from && c.filters.to===m.projection.to)) throw new Error("Controle total não cobre todo o histórico: "+metric.id);
@@ -259,7 +268,7 @@ async function loadManifest(e:Env,row:ImportRow) {
   if(end<0 || end>MAX_MANIFEST_BYTES) throw new Error("Manifesto excede 1 MiB ou não termina com LF.");
   const text=new TextDecoder("utf-8",{fatal:true,ignoreBOM:false}).decode(bytes.subarray(0,end));
   const manifest=manifestSchema.parse(JSON.parse(text));validateManifest(manifest,e);
-  const storage=await stmt(e,"SELECT (SELECT COALESCE(SUM(length(value)),0) FROM ci_raw_rows)+(SELECT COALESCE(SUM(length(value)+length(region)+length(client)+length(product)+length(category)+length(state)+64),0) FROM ci_facts) AS bytes").first<{bytes:number}>();
+  const storage=await stmt(e,storageBytesSql()).first<{bytes:number}>();
   const capacity=Number((e as Env & {MANUAL_D1_CAPACITY_BYTES?:string}).MANUAL_D1_CAPACITY_BYTES)||450*1024**2;
   if((storage?.bytes??0)*2+row.bytes*3>capacity) throw new Error("Capacidade insuficiente para coexistir com o snapshot completo e índices. Redimensione ou revise retenção antes da carga; nenhum dado será truncado.");
   const size=end+1+entries(manifest).reduce((n,p)=>n+p.part.bytes,0);
@@ -279,7 +288,7 @@ async function importPart(e:Env,row:ImportRow,m:ManualManifest) {
   const tableId=entry.table?.id??"__projection__";
   const writes:D1PreparedStatement[]=[],insertRows:(string|number|null)[][]=[];
   if(entry.table) {
-    const v=z.object({kind:z.literal("rows"),table:z.literal(entry.table.id),part:z.literal(entry.part.index),rows:z.array(z.object({row:z.number().int().positive(),values:z.array(z.union([z.string(),z.boolean(),z.null()]))}).strict()).max(100)}).strict().parse(data);
+    const v=z.object({kind:z.literal("rows"),table:z.literal(entry.table.id),part:z.literal(entry.part.index),rows:z.array(z.object({row:z.number().int().positive(),values:z.array(z.union([z.string(),z.boolean(),z.null()]))}).strict()).max(m.formatVersion===2?MAX_PART_ROWS:100)}).strict().parse(data);
     if(v.rows.length!==entry.part.rows) throw new Error("Contagem da parte divergente: "+entry.table.name);
     const preceding=entry.table.parts.slice(0,entry.part.index-1).reduce((n,p)=>n+p.rows,0);
     for(const [i,r] of v.rows.entries()) {
@@ -287,6 +296,7 @@ async function importPart(e:Env,row:ImportRow,m:ManualManifest) {
       for(let c=0;c<r.values.length;c++) validateCell(r.values[c],entry.table.columns[c].type,entry.table.name,r.row,entry.table.columns[c].name);
       insertRows.push([row.id,tableId,r.row,JSON.stringify(r.values)]);
     }
+    writes.push(...nativePartStatements(e,m,row.id,tableId,v.rows));
   } else {
     const v=z.object({kind:z.literal("facts"),part:z.literal(entry.part.index),rows:z.array(factSchema).max(100)}).strict().parse(data);
     if(v.rows.length!==entry.part.rows) throw new Error("Contagem de fatos divergente.");
@@ -317,7 +327,8 @@ function validateCell(value:string|boolean|null,type:string,table:string,row:num
   const t=type.toLowerCase();
   let valid=true;
   if(["int64","integer","whole number"].includes(t)) valid=typeof value==="string" && /^-?\d+$/.test(value);
-  else if(["decimal","double","currency","decimalnumber","decimal number"].includes(t)) valid=typeof value==="string" && /^-?(0|[1-9]\d*)(\.\d+)?$/.test(value);
+  else if(t==="double")valid=typeof value==="string"&&/^-?(0|[1-9]\d*)(\.\d+)?([Ee][+-]?\d+)?$/.test(value)&&Number.isFinite(Number(value));
+  else if(["decimal","currency","decimalnumber","decimal number"].includes(t)) valid=typeof value==="string" && /^-?(0|[1-9]\d*)(\.\d+)?$/.test(value);
   else if(["boolean","bool"].includes(t)) valid=typeof value==="boolean";
   else if(["datetime","date"].includes(t)) valid=typeof value==="string" && Number.isFinite(Date.parse(value));
   else valid=typeof value==="string";
@@ -377,6 +388,8 @@ function dateBounds(from:string,to:string,offset:number) {
 }
 export async function queryManual(e:Env,u:DbUser,p:Plan,versionId?:string):Promise<Report> {
   const {row,manifest:m}=await publishedVersion(e,versionId);
+  if(m.formatVersion===2){const report=await queryNative(e,u,p,m,row.id);report.sourceInfo=sourceInfo(row,m);return report;}
+  if(!["month","client","region","product","category"].includes(p.group)||p.filters.state||p.filters.regional||p.filters.manager)fail(422,"Este filtro ou agrupamento não está disponível no pacote legado.");
   const selected=m.metrics.find(x=>x.id===p.metric&&x.status==="validated"&&x.kind!=="unavailable");
   if(!selected) fail(422,"Indicador indisponível nesta versão manual: "+(m.metrics.find(x=>x.id===p.metric)?.reason??"sem equivalência comprovada com o modelo Power BI"));
   const acl=security(u,p), results=[];
@@ -399,10 +412,11 @@ export async function queryManual(e:Env,u:DbUser,p:Plan,versionId?:string):Promi
     const score=(r:Row)=>p.order==="current"?(r.values[p.metric].current??-Infinity):(r.values[p.metric].current??0)-(r.values[p.metric].previous??0);
     rows.sort((a,b)=>(p.order==="decline"?1:-1)*(score(a)-score(b))||a.name.localeCompare(b.name,"pt-BR"));
   }
-  const sourceInfo={versionId:row.id,extractedAt:m.extractedAt,sourceUpdatedAt:m.sourceUpdatedAt,referenceDate:m.referenceDate,coverage:{from:m.projection.from,to:m.projection.to},publishedAt:iso(row.published!),model:m.model.name,metrics:Object.fromEntries(metricKeys.map(id=>{const metric=m.metrics.find(x=>x.id===id);return [id,{status:metric?.status??"unavailable",reason:metric?.reason??(!metric?"Métrica não mapeada nesta versão.":undefined)}];}))};
-  return {total:pairRow("Total",results[0].total,results[1].total,m),rows:rows.slice(0,30),plan:p,asOf:new Date().toISOString(),truncated:rows.length>30,source:"Arquivo manual (D1)",sourceInfo};
+  return {total:pairRow("Total",results[0].total,results[1].total,m),rows:rows.slice(0,30),plan:p,asOf:new Date().toISOString(),truncated:rows.length>30,source:"Arquivo manual (D1)",sourceInfo:sourceInfo(row,m)};
 }
+function sourceInfo(row:ImportRow,m:ManualManifest):NonNullable<Report["sourceInfo"]>{return {versionId:row.id,extractedAt:m.extractedAt,sourceUpdatedAt:m.sourceUpdatedAt,referenceDate:m.referenceDate,coverage:{from:m.projection.from,to:m.projection.to},publishedAt:iso(row.published!),model:m.model.name,metrics:Object.fromEntries(metricKeys.map(id=>{const metric=m.metrics.find(x=>x.id===id);return [id,{status:metric?.status??"unavailable",reason:metric?.reason??(!metric?"Métrica não mapeada nesta versão.":undefined)}];})),capabilities:m.formatVersion===2?nativeCapabilities(m):undefined};}
 async function controlValue(e:Env,id:string,m:ManualManifest,metric:ManualMetric,filters:ControlFilters) {
+  if(m.formatVersion===2)return nativeControl(e,m,id,filters,metric.id);
   const where=["date>=?","date<=?"],args:(string|number|null)[]=[filters.from,filters.to];
   for(const key of ["region","client","product","category","state"] as const) if(filters[key]) {where.push(key+"=?");args.push(filters[key]!);}
   const rows=await aggregate(e,id,m,where,args),r=rows[0];
@@ -428,7 +442,8 @@ async function validateAndPublish(e:Env,row:ImportRow,m:ManualManifest) {
       const count=rawCounts.find(c=>c.table_id===table.id);
       if((count?.n??0)!==table.rowCount || (table.rowCount>0&&!parts.some(p=>p.table_id===table.id&&p.rows===table.rowCount&&p.parts===table.parts.length))) throw new Error("Contagem D1 divergente: "+table.name);
     }
-    const facts=await stmt(e,"SELECT COUNT(*) AS n,MIN(date) AS first,MAX(date) AS last FROM ci_facts WHERE version_id=?",row.id).first<{n:number;first:string;last:string}>();
+    if(m.formatVersion===2)await validateNativeStorage(e,m,row.id);
+    const facts=m.formatVersion===2?await stmt(e,"SELECT COUNT(*) AS n,MIN(date) AS first,MAX(date) AS last FROM (SELECT date FROM ci_native_sales WHERE version_id=? UNION ALL SELECT date FROM ci_native_returns WHERE version_id=?)",row.id,row.id).first<{n:number;first:string;last:string}>():await stmt(e,"SELECT COUNT(*) AS n,MIN(date) AS first,MAX(date) AS last FROM ci_facts WHERE version_id=?",row.id).first<{n:number;first:string;last:string}>();
     if(facts?.n!==m.projection.rowCount || facts.first!==m.projection.from || facts.last!==m.projection.to) throw new Error("Contagem ou cobertura da projeção não confere com o D1.");
     pass("contagens","Origem, exportação, todas as partes e D1 reconciliados sem descartar linhas.");
     await checkpoint("keys");return;}
@@ -437,9 +452,10 @@ async function validateAndPublish(e:Env,row:ImportRow,m:ManualManifest) {
       for(const check of checks.slice(cursor,cursor+8)) await check(e,row.id);
       report.keyCursor=cursor+Math.min(8,checks.length-cursor);
       if(report.keyCursor<checks.length) {await checkpoint("keys");return;}
-      pass("chaves_referencias","Chaves declaradas e referências de todos os relacionamentos inventariados foram verificadas integralmente; linhas de fatos iguais são preservadas.");
+      pass("chaves_referencias",m.formatVersion===2?"Colunas e unicidade dos lados um verificadas. Relações limitadas muitos-para-muitos preservam chaves sem correspondência na origem; controles DAX validam sua propagação, sem excluir linhas brutas.":"Chaves declaradas e referências de todos os relacionamentos inventariados foram verificadas integralmente; linhas de fatos iguais são preservadas.");
       await checkpoint("precision");return;}
     if(report.stage==="precision") {
+    if(m.formatVersion===2){const r=await stmt(e,"SELECT SUM(ABS(amount)) AS n FROM (SELECT amount FROM ci_native_sales WHERE version_id=? UNION ALL SELECT amount FROM ci_native_returns WHERE version_id=?)",row.id,row.id).first<{n:number|null}>();if(r?.n!=null&&!Number.isSafeInteger(r.n))throw Error("Os fatos excedem a precisão monetária segura.");}
     for(const [component] of componentScales(m)) {
       const p='$.'+JSON.stringify(component),r=await stmt(e,"SELECT SUM(ABS(CAST(json_extract(value,?) AS INTEGER))) AS n FROM ci_facts WHERE version_id=?",p,row.id).first<{n:number|null}>();
       if(r?.n!=null&&!Number.isSafeInteger(r.n)) throw new Error("Volume do componente excede precisão inteira segura: "+component);
@@ -453,29 +469,37 @@ async function validateAndPublish(e:Env,row:ImportRow,m:ManualManifest) {
       if(p.model.id!==m.model.id) throw new Error("Modelo de origem mudou. Use uma identidade de fonte própria ou corrija o pacote.");
       if(m.projection.from>p.projection.from || m.projection.to<p.projection.to || m.projection.rowCount<p.projection.rowCount*0.5) throw new Error("Perda material de histórico ou volume em relação à versão ativa. A base anterior foi preservada.");
       const schema=(x:ManualManifest)=>JSON.stringify(x.inventory.tables.map(t=>({id:t.id,columns:t.columns.map(c=>({name:c.name,type:c.type}))})).sort((a,b)=>a.id.localeCompare(b.id)));
-      if(schema(p)!==schema(m) || JSON.stringify(p.metrics)!==JSON.stringify(m.metrics) || JSON.stringify(p.inventory.relationships)!==JSON.stringify(m.inventory.relationships)) throw new Error("O esquema mudou. O mapeamento e os controles precisam de revisão explícita antes da publicação.");
+      const incompatible=p.formatVersion===2&&m.formatVersion===2?nativeCompatibility(p)!==nativeCompatibility(m):schema(p)!==schema(m)||JSON.stringify(p.metrics)!==JSON.stringify(m.metrics)||JSON.stringify(p.inventory.relationships)!==JSON.stringify(m.inventory.relationships)||p.formatVersion!==m.formatVersion;
+      if(incompatible) throw new Error("O esquema mudou. O mapeamento e os controles precisam de revisão explícita antes da publicação.");
       pass("continuidade","Identidade, esquema e cobertura histórica compatíveis com a versão ativa.");
     }
     // D1 capacity is a conservative configured ceiling; no automatic plan purchase or truncation.
-    const stored=await stmt(e,"SELECT (SELECT COALESCE(SUM(length(value)),0) FROM ci_raw_rows)+(SELECT COALESCE(SUM(length(value)+length(region)+length(client)+length(product)+length(category)+length(state)+64),0) FROM ci_facts) AS bytes").first<{bytes:number}>();
+    const stored=await stmt(e,storageBytesSql()).first<{bytes:number}>();
     const capacity=Number((e as Env & {MANUAL_D1_CAPACITY_BYTES?:string}).MANUAL_D1_CAPACITY_BYTES)||450*1024**2;
     if((stored?.bytes??0)*2>capacity) throw new Error("Estimativa conservadora de D1 com índices e versões excede a capacidade configurada. Redimensione ou revise a retenção sem truncar dados.");
     pass("capacidade","Estimativa conservadora com coexistência de versões dentro do teto configurado.");
     await checkpoint("controls");return;}
     if(report.stage==="controls") {
     const cursor=report.controlCursor??0;
-    for(const c of m.controls.slice(cursor,cursor+12)) {
+    const controlBatch=m.controls.slice(cursor,cursor+12),nativeCache=new Map<string,NativeResult>();
+    const cacheKey=(filters:ControlFilters)=>JSON.stringify(Object.entries(filters).sort(([a],[b])=>a.localeCompare(b)));
+    if(m.formatVersion===2){
+      const contexts=new Map(controlBatch.map(c=>[cacheKey(c.filters),c.filters]));
+      const results=await nativeValues(e,row.id,[...contexts.values()]);let index=0;
+      for(const key of contexts.keys())nativeCache.set(key,results[index++]);
+    }
+    for(const c of controlBatch) {
       const metric=m.metrics.find(x=>x.id===c.metric&&x.status==="validated"&&x.kind!=="unavailable");
       if(!metric) continue;
-      const observed=await controlValue(e,row.id,m,metric,c.filters),actual=observed.value,expected=c.expected===null?null:Number(c.expected);
+      const observed=m.formatVersion===2?nativeControlResult(m,nativeCache.get(cacheKey(c.filters))!,metric.id):await controlValue(e,row.id,m,metric,c.filters),actual=observed.value,expected=c.expected===null?null:Number(c.expected);
       if(expected!==null&&!Number.isFinite(expected)) throw new Error("Controle contém resultado esperado inválido.");
             let passed:boolean;
       if(actual===null||expected===null) passed=actual===expected;
-      else if(metric.kind==="sum") {
+      else if(metric.kind==="sum"||(metric.kind==="native"&&metric.id!=="buyers")) {
         const expectedInteger=decimalInteger(c.expected!,metric.scale),toleranceInteger=decimalInteger(c.tolerance,metric.scale);
         const difference=BigInt(observed.raw!)-BigInt(expectedInteger);
         passed=(difference<0n?-difference:difference)<=BigInt(toleranceInteger);
-      } else if(metric.kind==="distinctClient") passed=actual===expected;
+      } else if(metric.kind==="distinctClient"||(metric.kind==="native"&&metric.id==="buyers")) passed=actual===expected;
       else passed=Math.abs(actual-expected)<=Number(c.tolerance)+Math.min(1e-9,Number.EPSILON*Math.max(Math.abs(actual),Math.abs(expected))*4);
       report.controls.push({metric:c.metric,context:c.context,expected:c.expected,actual:actual===null?null:String(actual),passed,filters:c.filters,referenceDate:c.referenceDate,dax:c.dax,tolerance:c.tolerance});
     }
@@ -495,20 +519,22 @@ async function validateAndPublish(e:Env,row:ImportRow,m:ManualManifest) {
       await stmt(e,"UPDATE ci_imports SET status='superseded',report=?,error=?,updated=? WHERE id=? AND status='validating' AND lease_token=?",JSON.stringify(report),"Outra importação ou restauração tem precedência. Esta versão não foi ativada.",now(),row.id,row.lease_token).run();
     }
   } catch(err) {
+    if(transientD1Error(err))throw err;
     const message=errorText(err);report.errors.push({message});report.checks.push({name:"publicacao",status:"failed",detail:message});
     await stmt(e,"UPDATE ci_imports SET status='failed',report=?,error=?,updated=? WHERE id=? AND status='validating' AND lease_token=?",JSON.stringify(report),message,now(),row.id,row.lease_token).run();
   }
 }
 /** Cron is the durable driver: each validated part and its checkpoint is committed together. */
-export async function processManualJobs(e:Env) {
+export async function processManualJobs(e:Env,jobId?:string) {
   const started=Date.now();
-  const row=await stmt(e,"SELECT * FROM ci_imports WHERE status IN ('queued','importing','validating') AND lease_until<? ORDER BY seq LIMIT 1",now()).first<ImportRow>();
-  if(!row) return;
+  const row=await stmt(e,"SELECT * FROM ci_imports WHERE status IN ('queued','importing','validating') AND lease_until<?"+(jobId?" AND id=?":"")+" ORDER BY seq LIMIT 1",now(),...(jobId?[jobId]:[])).first<ImportRow>();
+  if(!row){await wakeManualJob(e,jobId);return;}
   const lease=crypto.randomUUID();
   const locked=await stmt(e,"UPDATE ci_imports SET lease_token=?,lease_until=? WHERE id=? AND status IN ('queued','importing','validating') AND lease_until<?",lease,now()+120,row.id,now()).run();
-  if(!locked.meta.changes) return;
+  if(!locked.meta.changes){await wakeManualJob(e,jobId);return;}
+  let retryDelay=0;
   try {
-    for(let i=0;i<2&&Date.now()-started<45000;i++) {
+    for(let i=0;i<10&&Date.now()-started<45000;i++) {
       const current=await getImport(e,row.id);
       if(current.lease_token!==lease||!["queued","importing","validating"].includes(current.status)) break;
       if(current.status==="queued") await loadManifest(e,current);
@@ -516,15 +542,51 @@ export async function processManualJobs(e:Env) {
       else {await validateAndPublish(e,current,parsed(current)!);break;}
     }
   } catch(err) {
+    if(transientD1Error(err)){retryDelay=30;return;}
     const message=errorText(err);
     await stmt(e,"UPDATE ci_imports SET status='failed',error=?,report=?,updated=? WHERE id=? AND lease_token=? AND status IN ('queued','importing','validating')",message,JSON.stringify({checks:[{name:"importacao",status:"failed",detail:message}],controls:[],errors:[{message}],metrics:[]}),now(),row.id,lease).run();
   } finally {
     await stmt(e,"UPDATE ci_imports SET lease_token=NULL,lease_until=0 WHERE id=? AND lease_token=?",row.id,lease).run();
+    await wakeManualJob(e,row.id,retryDelay);
   }
 }
 
+/** Queue payload contains only an opaque ID; D1 remains the durable source of truth. */
+async function wakeManualJob(e:Env,jobId?:string,minimumDelay=1){
+  const queue=(e as ManualEnv).MANUAL_JOBS;if(!queue)return;
+  try{
+    const row=await stmt(e,"SELECT id,lease_until FROM ci_imports WHERE status IN ('queued','importing','validating')"+(jobId?" AND id=?":"")+" ORDER BY seq LIMIT 1",...(jobId?[jobId]:[])).first<{id:string;lease_until:number}>();
+    if(row)await queue.send({jobId:row.id},{delaySeconds:Math.min(120,Math.max(minimumDelay,row.lease_until-now()+1))});
+  }catch{/* Scheduled recovery resumes persisted jobs when the optional accelerator is unavailable. */}
+}
+function transientD1Error(error:unknown){
+  const message=error instanceof Error?error.message:"";
+  return /\bSQLITE_(?:BUSY|LOCKED)\b/i.test(message)||(/\bD1(?:_ERROR| API error)\b/i.test(message)&&/\b(?:timeout|timed out|overloaded|temporarily unavailable|too many requests|429)\b/i.test(message));
+}
+export async function processManualQueue(batch:MessageBatch<ManualJob>,e:Env){
+  for(const message of batch.messages){
+    const job=z.object({jobId:z.uuid()}).strict().safeParse(message.body);
+    if(!job.success){message.ack();continue;}
+    try{await processManualJobs(e,job.data.jobId);message.ack();}catch{message.retry({delaySeconds:30});}
+  }
+}
+
+function nativeCompatibility(m:ManualManifest){
+  const n=m.nativeModel!;
+  const bindings:([string,Record<string,string|null|undefined>])[]=[];
+  for(const [role,value]of Object.entries(n))if(typeof value==="object"&&value!==null&&"table"in value)bindings.push([role,value as unknown as Record<string,string|null|undefined>]);
+  const tables=bindings.map(([role,ref])=>{const t=m.inventory.tables.find(t=>t.id===ref.table)!;return {role,id:t.id,name:t.name,columns:Object.entries(ref).filter(([key,value])=>key!=="table"&&value!=null).map(([key,value])=>({binding:key,name:value,type:t.columns.find(c=>c.name===value)!.type})).sort((a,b)=>a.binding.localeCompare(b.binding))};}).sort((a,b)=>a.role.localeCompare(b.role));
+  // Both manifests already passed the exact recognizer, so kind+bound refs capture semantics;
+  // whitespace, function case and equivalent blank-to-zero syntax need no weekly remapping.
+  const recipes=Object.fromEntries(Object.entries(n.recipes).map(([id,recipe])=>[id,{measure:recipe.measure,kind:recipe.kind}]));
+  const metrics=m.metrics.filter(metric=>["gross","revenue","returns","buyers"].includes(metric.id)).map(({id,originalName,unit,kind,scale,status})=>({id,originalName,unit,kind,scale,status})).sort((a,b)=>a.id.localeCompare(b.id));
+  return JSON.stringify({nativeModel:{...n,recipes},tables,metrics});
+}
+
 export async function manualOptions(e:Env,u:DbUser,filters:Filters) {
-  const {row}=await publishedVersion(e);
+  const {row,manifest}=await publishedVersion(e);
+  if(manifest.formatVersion===2)return nativeOptions(e,u,filters,manifest,row.id);
+  if(filters.state||filters.regional||filters.manager)fail(422,"Filtro indisponível neste pacote legado.");
   const plan:Plan={group:"month",metric:"revenue",order:"current",filters};
   const acl=security(u,plan),[start,end]=dateBounds(filters.from,filters.to,0);
   const values={region:[] as string[],client:[] as string[],product:[] as string[]},truncated={region:false,client:false,product:false};
@@ -557,6 +619,7 @@ function structuralChecks(m:ManualManifest) {
     const from=column(relation.fromTable,relation.fromColumn),to=column(relation.toTable,relation.toColumn);
     if(relation.fromCardinality.toLowerCase()==="one") uniqueness(relation.fromTable,relation.fromColumn,false);
     if(relation.toCardinality.toLowerCase()==="one") uniqueness(relation.toTable,relation.toColumn,false);
+    if(m.formatVersion===2)continue;
     checks.push(async(e,id)=>{
       const missing=await stmt(e,"SELECT row_no AS row FROM ci_raw_rows WHERE version_id=? AND table_id=? AND json_extract(value,?) IS NOT NULL AND json_extract(value,?) NOT IN (SELECT json_extract(value,?) FROM ci_raw_rows WHERE version_id=? AND table_id=? AND json_extract(value,?) IS NOT NULL) LIMIT 1",id,relation.fromTable,from.path,from.path,to.path,id,relation.toTable,to.path).first<{row:number}>();
       if(missing) throw new Error("Tabela "+from.table.name+", coluna "+relation.fromColumn+", linha "+missing.row+": referência não encontrada em "+to.table.name+" / "+relation.toColumn+".");
@@ -564,3 +627,5 @@ function structuralChecks(m:ManualManifest) {
   }
   return checks;
 }
+
+function storageBytesSql(){return "SELECT (SELECT COALESCE(SUM(length(value)),0) FROM ci_raw_rows)+(SELECT COALESCE(SUM(length(value)+length(region)+length(client)+length(product)+length(category)+length(state)+64),0) FROM ci_facts)"+nativeStorageTables.map(name=>"+(SELECT COALESCE(SUM(length(display)+128),0) FROM "+name+")").join("")+" AS bytes";}

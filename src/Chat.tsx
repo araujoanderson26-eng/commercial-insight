@@ -10,14 +10,12 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
-  groups,
-  metrics,
   type Commentary,
   type Filters,
   type Plan,
   type Report,
 } from "../shared/domain";
-import { api, Busy, Empty, ErrorBox, Graph, Kpis, message, period } from "./ui";
+import { api, Busy, Empty, ErrorBox, Graph, Kpis, message, period, groupLabel, metricLabel } from "./ui";
 type Turn = {
   id: string;
   question: string;
@@ -57,11 +55,11 @@ function Answer({ turn, onLoad }: { turn: Turn; onLoad: (r: Report, c: Commentar
           <Sparkles size={15} /> Comercial Insight
         </div>
         <h2>
-          {metrics[turn.plan.metric].label} · {groups[turn.plan.group]}
+          {metricLabel(turn.plan.metric, turn.report?.sourceInfo?.capabilities)} · {groupLabel(turn.plan.group, turn.report?.sourceInfo?.capabilities)}
         </h2>
         <p className="sub">
           {period(turn.plan.filters)}
-          {[turn.plan.filters.region, turn.plan.filters.client, turn.plan.filters.product]
+          {[turn.plan.filters.region, turn.plan.filters.client, turn.plan.filters.product, turn.plan.filters.regional, turn.plan.filters.state, turn.plan.filters.manager]
             .filter(Boolean)
             .map((t) => " · " + t)}
         </p>

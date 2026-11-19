@@ -1,10 +1,12 @@
 import { z } from "zod";
 import {
   planSchema,
+  filterDimensions,
   type Commentary,
   type Filters,
   type ModelConfig,
   type Report,
+  type DataCapabilities,
 } from "../shared/domain";
 import { fail, type Env } from "./core";
 const str = { type: "string" };
@@ -60,7 +62,7 @@ async function structured(
 }
 export async function interpret(
   e: Env,
-  m: Pick<ModelConfig, "allowAI" | "measures">,
+  m: Pick<ModelConfig, "allowAI" | "measures"> & { capabilities?: DataCapabilities },
   question: string,
   filters: Filters,
   prior: { question: string; plan: string }[],
@@ -72,10 +74,12 @@ export async function interpret(
   const schema = shape({
     supported: { type: "boolean" },
     reason: str,
-    group: { type: "string", enum: ["month", "region", "client", "product", "category"] },
+    group: { type: "string", enum: m.capabilities?.groups ?? ["month", "region", "client", "product", "category"] },
     metric: { type: "string", enum: allowed },
     order: { type: "string", enum: ["current", "decline", "growth"] },
-    filters: shape({ from: str, to: str, region: str, client: str, product: str }),
+    filters: shape({ from: str, to: str, region: str, client: str, product: str,
+      ...Object.fromEntries((m.capabilities?.filters ?? []).filter(k => !["region", "client", "product"].includes(k)).map(k => [k,str])),
+    }),
   });
   const result = await structured(
     e,
@@ -88,6 +92,7 @@ export async function interpret(
       prior: prior.map((v) => ({ question: v.question, plan: JSON.parse(v.plan) })),
       today: new Date().toISOString().slice(0, 10),
       measures: allowed,
+      dimensions: m.capabilities,
     },
   );
   if (result.supported !== true)
@@ -103,7 +108,7 @@ export async function interpret(
   });
   if (!plan.success)
     fail(422, "O recorte solicitado precisa de um período entre 1 e 24 meses completos.");
-  for (const k of ["region", "client", "product"] as const) {
+  for (const k of filterDimensions) {
     if (filters[k] && plan.data.filters[k] && filters[k] !== plan.data.filters[k])
       fail(422, "Altere o filtro ativo para analisar outra entidade.");
     if (filters[k]) plan.data.filters[k] = filters[k];

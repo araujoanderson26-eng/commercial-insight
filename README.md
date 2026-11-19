@@ -4,7 +4,7 @@
 
 Aplicativo web instalável para consultar snapshots comerciais no D1 ou um modelo semântico no Power BI Service e interpretar seus resultados em português. O projeto reúne frontend React, API Cloudflare Workers, banco D1 e arquivos privados R2 no mesmo domínio. Login, consultas e conversas precisam do Worker e do banco.
 
-A rotina de atualização manual, instalação do preparador Windows, restauração e limites semânticos estão em [Atualização de dados](docs/ATUALIZACAO-DADOS.md). A tela administrativa usa `/admin/atualizacao-dados`. O modo manual usa o login próprio e só publica depois de validar integralmente o pacote. O primeiro aceite do modelo real ainda depende do PBIX e da conciliação de suas medidas.
+A rotina do operador está no [Manual de atualização semanal](docs/MANUAL-ATUALIZACAO-SEMANAL.md). Instalação do preparador Windows, restauração e limites semânticos estão em [Atualização de dados](docs/ATUALIZACAO-DADOS.md). A tela administrativa usa `/admin/atualizacao-dados`. O modo manual usa o login próprio e só publica depois de validar integralmente o pacote. Os resultados do aceite real devem ser conferidos no relatório de integração da entrega.
 
 ## Primeira execução no computador
 
@@ -53,7 +53,7 @@ Acesse **http://localhost:8787** no mesmo computador. Para que o navegador envie
 | Atualização de dados | Selecione a fonte, envie o pacote completo, acompanhe validações e restaure uma versão anterior. Exclusivo de administradores. |
 | Auditoria | Eventos recentes de acesso, consulta, alteração de usuário e configuração. |
 
-Os indicadores da interface são faturamento, margem comercial, clientes compradores e devoluções monetárias. No modo online, vêm das medidas do modelo. No modo manual, apenas implementações explicitamente mapeadas e reconciliadas são calculadas no D1; as demais aparecem indisponíveis. O preparador inicial suporta valores aditivos e clientes distintos de um fato. Margem, estoque, litros, metas e medidas especiais exigem implementação e aceite específicos. A variação da margem aparece em pontos percentuais; rankings por ganho ou queda usam diferença absoluta.
+Os indicadores e dimensões disponíveis dependem da fonte. O contrato nativo Panizzon separa faturamento bruto, devoluções e faturamento líquido e calcula clientes distintos; representante, regional, gerente e UF dependem dos campos comprovados. No modo online, os valores vêm das medidas do modelo. No modo manual, apenas implementações explicitamente mapeadas e reconciliadas são calculadas no D1. O formato legado de um fato continua aceito. Margem, estoque, litros, metas e medidas especiais exigem implementação e aceite específicos. A variação da margem aparece em pontos percentuais; rankings por ganho ou queda usam diferença absoluta.
 
 ## Publicação e integrações
 

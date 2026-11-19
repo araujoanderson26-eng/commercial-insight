@@ -1,13 +1,21 @@
-import type { ModelConfig, Plan, Report } from "../shared/domain";
+import type { DataCapabilities, ModelConfig, Plan, Report } from "../shared/domain";
 import { query as powerBIQuery } from "./analysis";
-import { required, type DbUser, type Env } from "./core";
+import { config, fail, required, type DbUser, type Env } from "./core";
 import { manualContext, queryManual, sourceSettings } from "./manual";
 
 export interface DataProvider {
   sourceType: "manual" | "powerbi";
   versionId: string | null;
-  semantics: Pick<ModelConfig, "allowAI" | "measures">;
+  semantics: Pick<ModelConfig, "allowAI" | "measures"> & { capabilities?: DataCapabilities };
   query(plan: Plan): Promise<Report>;
+}
+
+/** Re-read policy at each outbound AI boundary; the data snapshot stays pinned. */
+export async function assertAssistantAccess(env: Env, provider: DataProvider) {
+  const allowed = provider.sourceType === "manual"
+    ? (await sourceSettings(env)).allowAI
+    : (await config(env)).model?.allowAI;
+  if (!allowed) fail(409, "O administrador desabilitou a análise com IA para esta fonte.");
 }
 
 export class PowerBIProvider implements DataProvider {
@@ -23,7 +31,7 @@ export class PowerBIProvider implements DataProvider {
 export class ManualD1Provider implements DataProvider {
   readonly sourceType = "manual";
   constructor(private env: Env, private user: DbUser, readonly versionId: string,
-    readonly semantics: Pick<ModelConfig, "allowAI" | "measures">) {}
+    readonly semantics: Pick<ModelConfig, "allowAI" | "measures"> & { capabilities?: DataCapabilities }) {}
   query(plan: Plan) { return queryManual(this.env, this.user, plan, this.versionId); }
 }
 
@@ -35,5 +43,5 @@ export async function dataProvider(env: Env, model: ModelConfig | null, revision
     return new PowerBIProvider(env, model, revision, user);
   const context = await manualContext(env, historical?.versionId ?? undefined);
   return new ManualD1Provider(env, user, context.versionId,
-    { allowAI: settings.allowAI, measures: context.measures });
+    { allowAI: settings.allowAI, measures: context.measures, capabilities: context.capabilities });
 }

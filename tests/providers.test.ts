@@ -219,3 +219,112 @@ test("carteira e regional são uma interseção na API e escopo nacional exige p
   sql.prepare("UPDATE users SET regions='[]',clients='[]' WHERE id=?").run(userId);
   assert.equal((await request("report", plan)).status, 403, "national flag on a commercial role does not grant national access");
 });
+
+test("opções não retornam nomes quando o escopo é revogado durante a consulta", async (t) => {
+  const { env, sql } = makeStore();
+  t.after(() => sql.close());
+  const userId = randomUUID(), secret = "3".repeat(64);
+  sql.prepare("INSERT INTO users(id,email,name,password,role,regions,clients,created) VALUES(?,?,?,?,?,?,?,unixepoch())")
+    .run(userId, "revoked-options@provider.test", "Gerente sintético", "test", "gerente", '["Sul"]', "[]");
+  sql.prepare("INSERT INTO sessions(hash,user_id,version,expires,seen) VALUES(?,?,1,unixepoch()+3600,unixepoch())")
+    .run(createHash("sha256").update(secret).digest("hex"), userId);
+  const version = seedVersion(sql, userId, testFacts);
+  sql.prepare("UPDATE ci_sources SET source='manual',active_version_id=?").run(version);
+  const originalPrepare = env.DB.prepare.bind(env.DB);
+  let revoked = false;
+  t.mock.method(env.DB, "prepare", (text: string) => {
+    const wrap = (statement: D1PreparedStatement): D1PreparedStatement => new Proxy(statement, {
+      get(target, property) {
+        if (property === "bind") return (...args: (string | number | null)[]) => wrap(target.bind(...args));
+        if (property === "all") return async () => {
+          const result = await target.all();
+          if (!revoked && text.startsWith("SELECT DISTINCT region AS value FROM ci_facts")) {
+            revoked = true;
+            sql.prepare("UPDATE users SET regions='[\"Norte\"]',version=version+1,scope_version=scope_version+1 WHERE id=?").run(userId);
+          }
+          return result;
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    return wrap(originalPrepare(text));
+  });
+  const response = await worker.fetch(new Request(env.APP_ORIGIN + "/api/data/options", {
+    method: "POST", headers: { Origin: env.APP_ORIGIN, Cookie: "__Host-ci=" + secret, "Content-Type": "application/json" }, body: JSON.stringify(filters),
+  }), env, {} as ExecutionContext);
+  assert.equal(revoked, true, "revocation must occur after an authorized options query starts");
+  assert.equal(response.status, 403);
+  const payload = await response.json() as Record<string, unknown>;
+  assert.match(String(payload.error), /acesso mudou durante a consulta/i);
+  assert.equal("values" in payload, false);
+  assert.doesNotMatch(JSON.stringify(payload), /0001|Sul|Norte/);
+});
+
+test("opções limitam consultas caras antes da SQL e isolam a cota por usuário", async (t) => {
+  const fixedNow = Date.now();
+  t.mock.method(Date, "now", () => fixedNow);
+  const { env, sql } = makeStore();
+  t.after(() => sql.close());
+  const identities = ["4", "5"].map((digit) => ({ id: randomUUID(), secret: digit.repeat(64) }));
+  for (const identity of identities) {
+    sql.prepare("INSERT INTO users(id,email,name,password,role,regions,clients,created) VALUES(?,?,?,?,?,?,?,unixepoch())")
+      .run(identity.id, identity.id + "@limited-options.test", "Gerente sintético", "test", "gerente", '["Sul"]', "[]");
+    sql.prepare("INSERT INTO sessions(hash,user_id,version,expires,seen) VALUES(?,?,1,unixepoch()+3600,unixepoch())")
+      .run(createHash("sha256").update(identity.secret).digest("hex"), identity.id);
+  }
+  const version = seedVersion(sql, identities[0].id, testFacts);
+  sql.prepare("UPDATE ci_sources SET source='manual',active_version_id=?").run(version);
+  const originalPrepare = env.DB.prepare.bind(env.DB);
+  let optionsQueries = 0;
+  t.mock.method(env.DB, "prepare", (text: string) => {
+    if (text.startsWith("SELECT DISTINCT region AS value FROM ci_facts")) optionsQueries++;
+    return originalPrepare(text);
+  });
+  const request = (secret: string) => worker.fetch(new Request(env.APP_ORIGIN + "/api/data/options", {
+    method: "POST", headers: { Origin: env.APP_ORIGIN, Cookie: "__Host-ci=" + secret, "Content-Type": "application/json" }, body: JSON.stringify(filters),
+  }), env, {} as ExecutionContext);
+  for (let index = 0; index < 30; index++) assert.equal((await request(identities[0].secret)).status, 200);
+  assert.equal(optionsQueries, 30);
+  const blocked = await request(identities[0].secret);
+  assert.equal(blocked.status, 429);
+  assert.equal(optionsQueries, 30, "a blocked request must not prepare the costly options query");
+  assert.equal((await request(identities[1].secret)).status, 200);
+  assert.equal(optionsQueries, 31, "another owner keeps an independent quota");
+});
+
+for (const revokeAt of ["plano_comercial", "leitura_comercial"] as const) {
+  test(`revogar IA durante ${revokeAt} interrompe o chat sem persistir a resposta`, async (t) => {
+    const { env, sql } = makeStore();
+    t.after(() => sql.close());
+    const userId = randomUUID(), secret = "6".repeat(64);
+    sql.prepare("INSERT INTO users(id,email,name,password,role,regions,clients,created) VALUES(?,?,?,?,?,?,?,unixepoch())")
+      .run(userId, "revoked-ai@provider.test", "Gerente sintético", "test", "gerente", '["Sul"]', "[]");
+    sql.prepare("INSERT INTO sessions(hash,user_id,version,expires,seen) VALUES(?,?,1,unixepoch()+3600,unixepoch())")
+      .run(createHash("sha256").update(secret).digest("hex"), userId);
+    const version = seedVersion(sql, userId, testFacts);
+    sql.prepare("UPDATE ci_sources SET source='manual',active_version_id=?,allow_ai=1").run(version);
+    const outbound: string[] = [];
+    t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      assert.equal(String(input), "https://api.openai.com/v1/responses");
+      const name = JSON.parse(String(init?.body)).text.format.name as string;
+      outbound.push(name);
+      if (name === revokeAt) sql.exec("UPDATE ci_sources SET allow_ai=0");
+      const answer = name === "plano_comercial"
+        ? { supported: true, reason: "", ...plan }
+        : { summary: "Interpretação sintética.", actions: [] };
+      return Response.json({ status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify(answer) }] }] });
+    });
+    const response = await worker.fetch(new Request(env.APP_ORIGIN + "/api/chat", {
+      method: "POST", headers: { Origin: env.APP_ORIGIN, Cookie: "__Host-ci=" + secret, "Content-Type": "application/json" },
+      body: JSON.stringify({ question: "Analise meu faturamento", filters, conversation: null }),
+    }), env, {} as ExecutionContext);
+    assert.equal(response.status, 409);
+    const payload = await response.json() as Record<string, unknown>;
+    assert.match(String(payload.error), /OpenAI|IA|habilit|autoriz/i);
+    assert.deepEqual(outbound, revokeAt === "plano_comercial" ? ["plano_comercial"] : ["plano_comercial", "leitura_comercial"]);
+    assert.equal("report" in payload, false);
+    assert.equal(sql.prepare("SELECT COUNT(*) AS n FROM turns").get()!.n, 0);
+    assert.equal(sql.prepare("SELECT COUNT(*) AS n FROM conversations").get()!.n, 0);
+  });
+}

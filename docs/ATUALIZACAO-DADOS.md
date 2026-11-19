@@ -5,10 +5,10 @@ Desenvolvido por Anderson de Araujo.
 ## Rotina semanal
 
 1. Obtenha e abra no Power BI Desktop o PBIX atualizado **com dados**. Aguarde a atualização terminar.
-2. Em **Ferramentas externas**, clique em **Preparar atualização Comercial Insight** e depois em **Preparar atualização**. Salve o único pacote `.ci.ndjson`.
+2. Em **Ferramentas externas**, clique em **Preparar atualização Comercial Insight**. Com o perfil já salvo, aguarde a extração e validação automáticas. Quando a janela **Salvar** abrir, salve o pacote `.ci.ndjson` e aguarde a conclusão.
 3. Entre com o login próprio do Comercial Insight e abra **Administração > Atualização de dados** (`/admin/atualizacao-dados`). Selecione **Arquivo manual**.
 4. Selecione ou arraste o pacote e clique em **Enviar e atualizar base**. Esse clique autoriza a publicação automática quando todas as validações obrigatórias passarem.
-5. Aguarde o estado de publicação. Arquivo enviado, importação em andamento e versão publicada são estados diferentes. Somente a publicação troca a base consultada.
+5. Aguarde **Base atualizada com sucesso** e confira data, responsável, tabelas, linhas, período e versão. Arquivo enviado, importação em andamento e versão publicada são estados diferentes. Somente a publicação troca a base consultada. O [manual semanal](MANUAL-ATUALIZACAO-SEMANAL.md) apresenta a rotina completa do operador.
 
 Após o servidor aceitar o envio completo, a importação continua pelo processamento persistente mesmo com a página fechada. Reabra a tela para acompanhar os checkpoints. Uma interrupção durante o envio ainda exige concluir ou reenviar o arquivo; os dados ativos continuam disponíveis.
 
@@ -16,7 +16,7 @@ O vínculo Microsoft não é necessário para consultar a fonte manual. **Power 
 
 ## Preparador: instalação e primeira configuração
 
-Baixe o código do preparador pelo link da área administrativa, extraia-o e execute `Instalar.cmd`. A instalação compila um executável Windows x64 com Microsoft TOM/ADOMD.NET e registra o botão do Power BI. A elevação do Windows serve para escrever o registro da ferramenta no diretório documentado pela Microsoft. Reinicie o Desktop depois da instalação.
+Extraia todo o ZIP e execute `Instalar.cmd` na primeira instalação ou `Atualizar.cmd` para preservar uma instalação existente. O pacote Windows x64 pronto inclui `runtime/`, com executável selfcontained e dependências Microsoft TOM/ADOMD; não baixa SDK no computador do operador. O ZIP de fontes não inclui `runtime/` e compila com o SDK oficial, exigindo internet. A primeira instalação registra o botão do Power BI; a elevação serve apenas para esse registro. Reinicie o Desktop depois de registrar ou reparar o botão.
 
 A primeira execução solicita a identidade da fonte, fato, dimensões, medida DAX de faturamento e coluna aditiva equivalente. Os nomes são selecionados do modelo real; não se deduzem fórmulas por nomes ou capturas de tela. Documente quem revisou a granularidade e a propagação de filtros. O perfil é salvo localmente para uso recorrente. Guarde uma cópia privada do mapeamento se reinstalar o computador: ele contém o GUID estável da fonte.
 
@@ -34,7 +34,7 @@ A versão anterior permanece ativa durante a carga. Cada parte tem contagem, tam
 
 Na área administrativa, use **Restaurar** sobre uma versão anterior validada e ainda mantida no D1. A restauração troca o ponteiro da versão; não soma snapshots. Se uma versão tiver sido retirada do D1 no futuro, será necessária recarga do pacote privado, e isso deve ser informado antes de restaurar.
 
-As consultas aplicam no backend as regionais e carteiras do cadastro. Quando as duas listas existem, aplica-se sua interseção. Cada resposta usa uma versão única e identifica fonte, extração, período e filtros. A base semanal não representa informação em tempo real. O envio à IA respeita a autorização da fonte e contém resultados agregados do escopo permitido.
+As consultas aplicam no backend o escopo e a carteira do cadastro. No contrato nativo Panizzon, o escopo salvo em `user.regions` continua vinculado ao campo comprovado `Base Clientes[Representantes]`, exibido como **Representantes** na administração. Para gerentes, cadastre os representantes autorizados da equipe. Os filtros adicionais de regional, gerente e UF não ampliam esse acesso. Quando as listas de escopo e clientes existem, aplica-se sua interseção. Cada resposta usa uma versão única e identifica fonte, extração, período e filtros. A base semanal não representa informação em tempo real. O envio à IA respeita a autorização da fonte e contém resultados agregados do escopo permitido.
 
 O aviso de desatualização começa em sete dias e pode ser alterado pelo administrador. Data de extração/atualização da origem é diferente da data de upload/publicação. Sem versão válida, o aplicativo deve informar a ausência de base.
 
@@ -52,15 +52,21 @@ Os controles têm filtros exatos, consulta DAX, data de referência, resultado e
 
 Os recortes conciliados são evidência dos contextos registrados no pacote e no relatório de importação. Não provam equivalência de toda combinação DAX possível. Conversas antigas conservam a referência à versão usada.
 
-**Aceite do modelo real pendente:** nenhum PBIX Panizzon foi fornecido no projeto para esta implementação. Não há atestado de extração real, equivalência das medidas ou primeira carga de produção. O exemplo `exemplo-sintetico.ci.ndjson` é exclusivo de desenvolvimento e deve ser rejeitado em produção. Compilação, self-test e testes sintéticos não substituem o aceite com o PBIX real.
+O contrato nativo v2 acrescenta dois fatos e a propagação de filtros comprovada nos metadados, preservando a compatibilidade v1. Bruto usa as mercadorias de `Faturamento`, devoluções usa `DEVOLUÇÃO` e líquido usa a diferença; clientes usa contagem distinta. A versão exata deve passar nos controles DAX antes de gerar e antes de publicar o pacote. O relatório de integração da entrega registra o estado do aceite com o modelo real. O exemplo `exemplo-sintetico.ci.ndjson` é exclusivo de desenvolvimento e deve ser rejeitado em produção. Compilação, self-test e testes sintéticos não substituem esse aceite.
+
+Uma fonte que já tenha snapshot v1 ativo exige migração revisada para adotar o contrato v2: a publicação semanal bloqueia automaticamente a troca de formato. Esse bloqueio não exige remapeamento nas atualizações seguintes de uma fonte v2 compatível.
 
 ## Capacidade e recuperação operacional
 
-O arquivo é UTF-8 NDJSON sem compressão: um manifesto versionado e partes limitadas a 100 linhas de origem e 1 MiB. O manifesto admite 1 MiB. Cada parte contém contagem, tamanho e checksum; não há extração ZIP ou caminhos de arquivo para executar no servidor. O upload usa partes R2 em vez de pressupor um POST de tamanho arbitrário.
+O arquivo é UTF-8 NDJSON sem compressão: um manifesto versionado e partes limitadas a 100 linhas no formato v1 ou 1.000 no formato nativo v2, sempre com no máximo 1 MiB. O manifesto admite 1 MiB. Cada parte contém contagem, tamanho e checksum; não há extração ZIP ou caminhos de arquivo para executar no servidor. O upload usa partes R2 em vez de pressupor um POST de tamanho arbitrário.
 
-O limite inicial de pacote é 128 MiB e deve respeitar o plano efetivo, o tamanho atual do D1, os índices e a coexistência de versões. O orçamento conservador inicial é 450 MiB, considerando as versões mantidas e uma estimativa de dados multiplicada por dois para estrutura e índices; uma estimativa não comprova o espaço real do modelo. A consulta do plano por Billing não estava autorizada na conexão disponível (HTTP 403), portanto não se afirma que a conta seja Free ou Paid. O tamanho compactado do PBIX não é uma estimativa suficiente. Cargas acima dos limites devem ser bloqueadas para dimensionamento, sem truncar histórico ou contratar planos automaticamente. A retenção deve manter pelo menos uma versão anterior recuperável e pacotes privados de rastreabilidade.
+O limite configurado nesta entrega é **512 MiB por pacote** e deve respeitar o tamanho atual do D1, os índices e a coexistência de versões. O plano **Workers Paid existente** foi confirmado no Dashboard Cloudflare, em **Workers > Plans**, em 18/11/2026. A consulta por Billing continua sem autorização na conexão disponível (HTTP 403); esse endpoint não substitui a confirmação feita no painel.
 
-O processamento inicial é deliberadamente limitado a duas partes por minuto, aproximadamente 200 linhas de parte por minuto, contando separadamente os dados brutos e a projeção. A conciliação avança em até doze controles por minuto. Bases grandes podem levar horas ou mais; a interface mostra progresso persistente. O checksum integral do pacote usa leitura sequencial em uma etapa e precisa ser homologado com o volume real e a CPU do plano antes da primeira carga. O modelo de produção não deve ser considerado homologado apenas porque um pacote pequeno passou. Se o tempo semanal ou o volume excederem essa capacidade, amplie o processamento durável e valide os limites efetivos antes de usar em produção.
+O teto operacional configurado é **9 GiB (9.663.676.416 bytes)**. Esse teto não comprova que a base e as versões retidas cabem: o tamanho real do SQLite, das tabelas normalizadas e dos índices ainda precisa ser medido. A estimativa de dados multiplicada por dois e o tamanho compactado do PBIX não comprovam o espaço efetivo. Cargas acima do teto devem ser bloqueadas para dimensionamento, sem truncar histórico. A retenção deve manter pelo menos uma versão anterior recuperável e pacotes privados de rastreabilidade; a medição e a quantidade efetivamente suportada de snapshots ficam registradas no [relatório de integração](INTEGRACAO-POWERBI-D1.md).
+
+O processamento avança em até dez partes por invocação, dentro de uma janela de 45 segundos; cada parte contém até 100 registros no v1 ou 1.000 no v2, respeitado o limite de bytes. Dados brutos, normalização e checkpoint são gravados atomicamente. A conciliação avança em até doze controles por invocação, reutilizando os contextos e calculando as quatro métricas nativas na mesma consulta. Quando a Queue estiver provisionada e vinculada, ela continua os trabalhos até a conclusão; o cron de um minuto é a alternativa persistente. A existência da configuração não comprova o provisionamento remoto da Queue. Sem ela, uma base grande pode levar horas. A interface mostra o progresso e o tempo real depende de volume, D1, fila e validações; não há promessa de duração fixa.
+
+O checksum integral do pacote usa leitura sequencial em uma etapa e precisa ser homologado com o volume real e a CPU do plano antes da primeira carga. O modelo de produção não deve ser considerado homologado apenas porque um pacote pequeno passou. Se o tempo semanal ou o volume excederem essa capacidade, amplie o processamento durável e valide os limites efetivos antes de usar em produção.
 
 Antes de migrations remotas, confirme conta, Worker, ambiente e UUID do D1 em `wrangler.jsonc`, exporte backup/registre o ponto de recuperação e aplique somente migrations aditivas. O fluxo e os comandos de implantação ficam em [IMPLANTACAO.md](IMPLANTACAO.md). O aceite remoto deve verificar autenticação, autorização por API, tela administrativa, bindings, processamento de tarefas e a versão efetivamente ativa no D1.
 

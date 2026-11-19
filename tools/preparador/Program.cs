@@ -14,13 +14,23 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
-        ApplicationConfiguration.Initialize();
         if (args.Contains("--self-test"))
         {
-            try { PackageWriter.SelfTest(); Environment.Exit(0); }
-            catch { Environment.Exit(1); }
+            try
+            {
+                PackageWriter.SelfTest(); MappingSettings.SelfTest(); SearchPicker.SelfTest();
+                if (Arg("--report") is { Length: > 0 } report) File.WriteAllText(report, "{\"status\":\"passed\",\"checks\":[\"consistency\",\"semantic\",\"package\",\"atomic-publication\",\"mapping\",\"search\"]}", new UTF8Encoding(false));
+                Environment.Exit(0);
+            }
+            catch (Exception ex)
+            {
+                if (Arg("--report") is { Length: > 0 } report) File.WriteAllText(report, System.Text.Json.JsonSerializer.Serialize(new { status = "failed", type = ex.GetType().Name, error = ex.Message }), new UTF8Encoding(false));
+                Environment.Exit(1);
+            }
             return;
         }
+        if (PreparerCli.TryRun(args, out int code)) { Environment.Exit(code); return; }
+        ApplicationConfiguration.Initialize();
         string Arg(string name)
         {
             int i = Array.IndexOf(args, name);
@@ -40,7 +50,7 @@ internal sealed record Mapping(string ModelName, string FactTable, Dictionary<st
     List<MetricMapping> Metrics, bool AdditivityReviewed, string ReviewNote, string SourceId, List<string> AllowEmptyTables);
 internal sealed record PartInfo(int index, long rows, long bytes, string sha256);
 internal sealed record TableInfo(string id, string name, object[] columns, long rowCount, long sourceRowCount, bool allowEmpty,
-    string storageMode, object[] partitions, object metadata, List<PartInfo> parts);
+    string storageMode, object[] partitions, object metadata, List<PartInfo> parts, bool metadataOnly = false);
 internal sealed record ProjectionInfo(long rowCount, string from, string to, string grain, string[] dimensions, List<PartInfo> parts);
 internal sealed record ColumnInfo(string Table, string Name, string Type, bool Hidden, bool IsKey,
     bool Nullable, string? Expression, string Format, string SourceColumn);
@@ -56,6 +66,9 @@ internal sealed class MainForm : Form
     private readonly TextBox log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill };
     private readonly Button configure = new() { Text = "Configurar mapeamento", Width = 190, Height = 36 };
     private readonly Button prepare = new() { Text = "Preparar atualização", Width = 190, Height = 36, Enabled = false };
+    private readonly Button reconnect = new() { Text = "Reconectar ao modelo", Width = 170, Height = 36 };
+    private readonly Button validate = new() { Text = "Validar pacote existente", Width = 190, Height = 36 };
+    private readonly DiagnosticLog diagnostic = new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ComercialInsight", "logs"));
     private readonly string settingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ComercialInsight", "mapeamento.json");
     private ModelInfo? model;
     private Mapping? mapping;
@@ -64,146 +77,104 @@ internal sealed class MainForm : Form
         this.server = server; this.database = database;
         Text = "Preparar atualização Comercial Insight";
         Width = 820; Height = 600; MinimumSize = new Size(640, 440); StartPosition = FormStartPosition.CenterScreen;
-        var actions = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 62, Padding = new Padding(10) };
-        actions.Controls.AddRange([configure, prepare]); Controls.Add(log); Controls.Add(description); Controls.Add(actions);
+        var actions = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 100, Padding = new Padding(10), AutoScroll = true };
+        var openLog = new Button { Text = "Abrir log", Width = 100, Height = 36 };
+        openLog.Click += (_, _) => System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(diagnostic.Path) { UseShellExecute = true });
+        actions.Controls.AddRange([configure, prepare, reconnect, validate, openLog]); Controls.Add(log); Controls.Add(description); Controls.Add(actions);
         configure.Enabled = false;
         configure.Click += (_, _) => ConfigureMapping();
         prepare.Click += async (_, _) => await Prepare();
-        Shown += async (_, _) => await LoadModel();
+        reconnect.Click += async (_, _) => await LoadModel();
+        validate.Click += async (_, _) => await ValidateExisting();
+        Shown += async (_, _) => { await LoadModel(); if (model != null && mapping != null) await Prepare(); };
     }
-    private void Log(string text) => BeginInvoke(() => log.AppendText($"{DateTime.Now:HH:mm:ss} {text}{Environment.NewLine}"));
+    private void Log(string text)
+    {
+        diagnostic.Write(text);
+        if (!IsDisposed && IsHandleCreated) BeginInvoke(() => { if (!IsDisposed) log.AppendText($"{DateTime.Now:HH:mm:ss} {text}{Environment.NewLine}"); });
+    }
     private async Task LoadModel()
     {
+        reconnect.Enabled = prepare.Enabled = configure.Enabled = false;
         try
         {
             if (!Regex.IsMatch(server, @"^(localhost|127\.0\.0\.1|\[::1\]):\d{1,5}$", RegexOptions.IgnoreCase) || string.IsNullOrWhiteSpace(database))
                 throw new InvalidOperationException("Inicie pelo botão Ferramentas externas do Power BI Desktop. Apenas o modelo local é aceito; conexões corporativas remotas não são abertas pelo preparador.");
             Log("Lendo metadados TOM do modelo local...");
-            model = await Task.Run(() => { using var source = new ModelSource(server, database); return source.Inspect(); });
+            model = await Task.Run(() => { using var source = new ModelSource(server, database, Log); return source.Inspect(); });
             Log($"Modelo: {model.Name}; {model.TableNames.Count} tabelas; {model.Measures.Count} medidas. Nenhum dado foi enviado à internet.");
             if (File.Exists(settingsPath))
             {
-                mapping = JsonSerializer.Deserialize<Mapping>(await File.ReadAllTextAsync(settingsPath), PackageWriter.Json);
+                mapping = MappingSettings.Load(await File.ReadAllTextAsync(settingsPath));
                 if (mapping != null && (!model.TableNames.Contains(mapping.FactTable) || mapping.Dimensions.Values.Any(f => !model.Columns.Any(c => c.Table == f.Table && c.Name == f.Column)) || mapping.Metrics.Any(m => !model.Measures.Any(x => x.Name == m.Measure))))
-                { mapping = null; Log("O mapeamento salvo não corresponde aos objetos deste modelo. Configure antes de preparar."); }
+                { Log("Há campos salvos que não correspondem ao modelo aberto. O mapeamento foi preservado; revise os campos em Configurar mapeamento."); }
                 else if (mapping != null) Log($"Perfil de fonte selecionado: {mapping.ModelName}. Confira se o PBIX aberto é a fonte comercial correta antes de preparar.");
             }
             configure.Enabled = true; prepare.Enabled = mapping != null;
             if (mapping == null) ConfigureMapping();
         }
         catch (Exception ex) { ShowError(ex); }
+        finally { reconnect.Enabled = true; configure.Enabled = model != null; prepare.Enabled = model != null && mapping != null; }
     }
     private void ConfigureMapping()
     {
         if (model == null) return;
         using var dialog = new MappingForm(model, mapping);
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        if (dialog.Result == null) return;
+        try { MappingSettings.Save(settingsPath, dialog.Result); }
+        catch (Exception ex) { ShowError(ex); return; }
         mapping = dialog.Result;
-        Directory.CreateDirectory(Path.GetDirectoryName(settingsPath)!);
-        File.WriteAllText(settingsPath, JsonSerializer.Serialize(mapping, PackageWriter.Json), new UTF8Encoding(false));
         prepare.Enabled = true;
         Log("Mapeamento inicial salvo para este modelo. As consultas de controle serão reexecutadas a cada preparação.");
+    }
+    private async Task ValidateExisting()
+    {
+        using var file = new OpenFileDialog { Filter = "Pacote Comercial Insight (*.ci.ndjson)|*.ci.ndjson", CheckFileExists = true };
+        if (file.ShowDialog(this) != DialogResult.OK) return;
+        validate.Enabled = false;
+        try
+        {
+            var result = await Task.Run(() => PackageIntegrity.Validate(file.FileName));
+            Log($"Integridade do arquivo existente conferida: {result.Tables} tabelas; {result.RawRows} linhas da origem; SHA-256 {result.Sha256}.");
+            MessageBox.Show(this, $"Integridade conferida: {result.Tables} tabelas e {result.RawRows} linhas da origem.\nSHA-256: {result.Sha256}\n\nIsso não comprova a conciliação com o modelo atual nem publica dados no aplicativo. Para uma atualização, gere um novo pacote e aguarde as validações do servidor.", "Integridade do pacote", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex) { ShowError(ex); }
+        finally { validate.Enabled = true; }
     }
     private async Task Prepare()
     {
         if (mapping == null) return;
-        using var save = new SaveFileDialog { Filter = "Pacote Comercial Insight (*.ci.ndjson)|*.ci.ndjson", DefaultExt = "ci.ndjson",
-            FileName = $"ComercialInsight-{DateTime.Now:yyyy-MM-dd-HHmm}.ci.ndjson", OverwritePrompt = true };
-        if (save.ShowDialog(this) != DialogResult.OK) return;
-        prepare.Enabled = configure.Enabled = false;
+        string staging = Path.Combine(Path.GetTempPath(), "ci-preparacao-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(staging);
+        string prepared = Path.Combine(staging, "preparado.ci.ndjson");
+        prepare.Enabled = configure.Enabled = reconnect.Enabled = false;
         try
         {
-            await Task.Run(() => { using var source = new ModelSource(server, database); new PackageWriter(source, mapping, Log).Export(save.FileName); });
+            Log("Preparando e conciliando os dados. Ao concluir, você escolherá onde salvar o pacote.");
+            await Task.Run(() => { using var source = new ModelSource(server, database, Log); new PackageWriter(source, mapping, Log).Export(prepared); });
+            using var save = new SaveFileDialog { Filter = "Pacote Comercial Insight (*.ci.ndjson)|*.ci.ndjson", DefaultExt = "ci.ndjson",
+                FileName = $"ComercialInsight-{DateTime.Now:yyyy-MM-dd-HHmm}.ci.ndjson", OverwritePrompt = true };
+            if (save.ShowDialog(this) != DialogResult.OK) { Log("Salvamento cancelado. Nenhum pacote foi entregue ou enviado ao aplicativo."); return; }
+            await Task.Run(() => { using var publication = new AtomicPackageFile(save.FileName, Log); File.Copy(prepared, publication.TemporaryPath); publication.Publish(); });
             Log("Pacote concluído. Envie-o em Administração > Atualização de dados. A publicação ainda depende da validação no servidor.");
             MessageBox.Show(this, "Pacote preparado. No Comercial Insight, abra Administração > Atualização de dados e clique em Enviar e atualizar base.", "Preparação concluída", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex) { ShowError(ex); }
-        finally { prepare.Enabled = configure.Enabled = true; }
+        finally
+        {
+            try { if (File.Exists(prepared)) File.Delete(prepared); if (!Directory.EnumerateFileSystemEntries(staging).Any()) Directory.Delete(staging); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Log("Limpeza local pendente: " + ex.GetType().Name); }
+            prepare.Enabled = configure.Enabled = reconnect.Enabled = true;
+        }
     }
     private void ShowError(Exception ex)
     {
+        diagnostic.Error(ex);
         // Driver errors can contain connection details; only a reviewed application message is shown.
         string message = ex is InvalidOperationException or InvalidDataException ? ex.Message : "A leitura do modelo falhou. Confirme o PBIX aberto, a conclusão da atualização e a disponibilidade do modelo local. Nenhum pacote válido foi produzido.";
-        Log(message); MessageBox.Show(this, message, "Preparação interrompida", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-    }
-}
-
-internal sealed class MappingForm : Form
-{
-    internal Mapping? Result { get; private set; }
-    private readonly ModelInfo model;
-    private readonly ComboBox fact = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 520 };
-    private readonly Dictionary<string, ComboBox> dimensions = [];
-    private readonly Dictionary<string, ComboBox> measureFields = [];
-    private readonly Dictionary<string, ComboBox> valueFields = [];
-    private readonly NumericUpDown scale = new() { Minimum = 0, Maximum = 6, Value = 2 };
-    private readonly CheckBox reviewed = new() { AutoSize = true, Text = "Revisei a granularidade, a aditividade dos valores e a propagação de filtros." };
-    private readonly TextBox note = new() { Width = 520, PlaceholderText = "Responsável e fundamento da regra comercial (obrigatório)" };
-    private readonly TextBox modelName = new() { Width = 520, PlaceholderText = "Nome reconhecível da fonte comercial (ex.: nome do modelo)" };
-    private readonly CheckedListBox allowEmpty = new() { Width = 520, Height = 90, CheckOnClick = true };
-    internal MappingForm(ModelInfo model, Mapping? existing)
-    {
-        this.model = model;
-        Text = "Configuração inicial do modelo"; Width = 790; Height = 740; MinimumSize = new Size(650, 620); StartPosition = FormStartPosition.CenterParent;
-        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, ColumnCount = 2, Padding = new Padding(14) };
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 175)); grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        void Add(string label, Control c) { int r = grid.RowCount++; grid.Controls.Add(new Label { Text = label, AutoSize = true, MaximumSize = new Size(170, 0), Padding = new Padding(0, 8, 0, 0) }, 0, r); grid.Controls.Add(c, 1, r); }
-        Add("Regra suportada", new Label { Text = "Um fato com linhas completas; valores monetários aditivos e/ou clientes distintos. Medidas complexas, estoque, metas e margem ficam indisponíveis até implementação e conciliação específicas. Não deduza a regra pelo nome da medida.", AutoSize = true, MaximumSize = new Size(520, 0) });
-        Add("Identidade da fonte", modelName);
-        fact.Items.AddRange(model.TableNames.Cast<object>().ToArray()); Add("Tabela fato", fact);
-        foreach (var key in new[] { "date", "region", "client", "product", "category", "state" })
-        {
-            var c = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 520 };
-            c.Items.AddRange(model.Columns.Where(x => !x.Name.StartsWith("RowNumber-", StringComparison.Ordinal)).Select(x => (object)new Field(x.Table, x.Name)).ToArray());
-            dimensions.Add(key, c); Add(new Dictionary<string, string> { ["date"] = "Data do indicador", ["region"] = "Regional / representante", ["client"] = "Chave única do cliente", ["product"] = "Produto", ["category"] = "Categoria", ["state"] = "UF" }[key], c);
-        }
-        foreach (string id in new[] { "revenue", "returns", "buyers" })
-        {
-            var m = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 520 };
-            m.Items.Add("(indisponível)"); m.Items.AddRange(model.Measures.Select(x => (object)x.Name).Distinct().ToArray()); m.SelectedIndex = 0;
-            measureFields.Add(id, m); Add(id == "revenue" ? "Medida de faturamento *" : id == "returns" ? "Medida de devoluções" : "Medida clientes distintos", m);
-            if (id != "buyers")
-            {
-                var c = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 520 };
-                valueFields.Add(id, c); Add(id == "revenue" ? "Coluna aditiva faturamento *" : "Coluna aditiva devoluções", c);
-            }
-        }
-        fact.SelectedIndexChanged += (_, _) =>
-        {
-            foreach (var c in valueFields.Values)
-            {
-                c.Items.Clear(); c.Items.Add("(indisponível)");
-                c.Items.AddRange(model.Columns.Where(x => x.Table == fact.SelectedItem?.ToString() && new[] { "Int64", "Decimal", "Double" }.Contains(x.Type)).Select(x => (object)x.Name).ToArray()); c.SelectedIndex = 0;
-            }
-        };
-        allowEmpty.Items.AddRange(model.TableNames.Cast<object>().ToArray());
-        Add("Casas decimais monetárias", scale); Add("Tabelas autorizadas a ficarem vazias", allowEmpty); Add("Revisão inicial", reviewed); Add("Evidência da revisão", note);
-        var ok = new Button { Text = "Salvar mapeamento", Width = 180, Height = 36 };
-        ok.Click += (_, _) =>
-        {
-            if (modelName.Text.Trim().Length < 2 || modelName.Text.Trim().Length > 200 || fact.SelectedItem == null || dimensions.Values.Any(x => x.SelectedItem is not Field) || measureFields["revenue"].SelectedIndex < 1 || valueFields["revenue"].SelectedIndex < 1 || !reviewed.Checked || note.Text.Trim().Length < 12 || note.Text.Trim().Length > 500)
-            { MessageBox.Show(this, "Preencha as dimensões, a medida e coluna de faturamento e documente a revisão inicial."); return; }
-            var metrics = new List<MetricMapping>();
-            foreach (var (id, c) in measureFields)
-            {
-                if (c.SelectedIndex < 1) continue;
-                if (id != "buyers" && valueFields[id].SelectedIndex < 1) { MessageBox.Show(this, $"Selecione a coluna de {id} ou deixe a medida indisponível."); return; }
-                metrics.Add(new MetricMapping(id, c.SelectedItem!.ToString()!, id == "buyers" ? null : valueFields[id].SelectedItem!.ToString(), id == "buyers" ? 0 : (int)scale.Value));
-            }
-            string sourceId = existing != null && existing.ModelName == modelName.Text.Trim() && Guid.TryParse(existing.SourceId, out _) ? existing.SourceId : Guid.NewGuid().ToString();
-            Result = new Mapping(modelName.Text.Trim(), fact.SelectedItem!.ToString()!, dimensions.ToDictionary(x => x.Key, x => (Field)x.Value.SelectedItem!), metrics, true, note.Text.Trim(), sourceId, allowEmpty.CheckedItems.Cast<string>().ToList());
-            DialogResult = DialogResult.OK;
-        };
-        Add("", ok); Controls.Add(grid);
-        if (existing != null)
-        {
-            modelName.Text = existing.ModelName;
-            fact.SelectedItem = existing.FactTable;
-            foreach (var (key, c) in dimensions) { var item = c.Items.Cast<Field>().FirstOrDefault(x => x == existing.Dimensions.GetValueOrDefault(key)); if (item != null) c.SelectedItem = item; }
-            foreach (var metric in existing.Metrics) { measureFields[metric.Id].SelectedItem = metric.Measure; if (metric.Column != null) valueFields[metric.Id].SelectedItem = metric.Column; }
-            scale.Value = existing.Metrics.FirstOrDefault(x => x.Id == "revenue")?.Scale ?? 2; reviewed.Checked = existing.AdditivityReviewed; note.Text = existing.ReviewNote;
-            for (int i = 0; i < allowEmpty.Items.Count; i++) allowEmpty.SetItemChecked(i, existing.AllowEmptyTables?.Contains(allowEmpty.Items[i]!.ToString()!) == true);
-        }
+        Log("FALHA — " + message);
+        MessageBox.Show(this, message + Environment.NewLine + Environment.NewLine + "Log privado: " + diagnostic.Path + Environment.NewLine + "Corrija a causa e use Preparar atualização novamente. Nenhum arquivo de preparação anterior foi validado por esta tentativa.", "Preparação interrompida", MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 }
 
@@ -212,15 +183,29 @@ internal sealed class ModelSource : IDisposable
     private readonly Server tom = new();
     private readonly AdomdConnection connection;
     private readonly string database;
-    internal ModelSource(string server, string database)
+    private readonly DateTimeOffset extractionStarted = DateTimeOffset.UtcNow;
+    private readonly Dictionary<string, ConsistencySnapshot> snapshots = new(StringComparer.Ordinal);
+    private readonly HashSet<string> databaseNames = new(StringComparer.OrdinalIgnoreCase);
+    internal Action<string>? Diagnostic { get; }
+    internal ModelSource(string server, string database, Action<string>? diagnostic = null)
     {
-        this.database = database;
+        if (!Regex.IsMatch(server, @"^(localhost|127\.0\.0\.1|\[::1\]):\d{1,5}$", RegexOptions.IgnoreCase) || string.IsNullOrWhiteSpace(database))
+            throw new InvalidOperationException("Inicie a ferramenta pelo Power BI Desktop. O preparador aceita somente o modelo local; nenhum pacote foi publicado.");
+        this.database = database; Diagnostic = diagnostic; databaseNames.Add(database);
         var cs = new System.Data.Common.DbConnectionStringBuilder { ["Data Source"] = server, ["Initial Catalog"] = database, ["Application Name"] = "Comercial Insight Preparador somente leitura" };
-        tom.Connect(cs.ConnectionString);
-        connection = new AdomdConnection(cs.ConnectionString); connection.Open();
+        connection = new AdomdConnection(cs.ConnectionString);
+        try { tom.Connect(cs.ConnectionString); connection.Open(); Diagnostic?.Invoke("connection.open result=success mode=read-only-operations"); }
+        catch (Exception ex)
+        {
+            Diagnostic?.Invoke("connection.open result=failed type=" + ex.GetType().Name);
+            connection.Dispose(); tom.Dispose();
+            throw new InvalidOperationException("Não foi possível conectar ao modelo local. Reabra o PBIX, aguarde o carregamento e inicie novamente por Ferramentas externas. Nenhum pacote novo foi publicado.", ex);
+        }
     }
     internal IEnumerable<object?[]> Read(string dax)
     {
+        if (ConsistencyGuard.Classify(dax).Kind != ModelCommandKind.ReadOnly)
+            throw new InvalidOperationException("O preparador permite somente consultas de leitura ao modelo.");
         using var command = connection.CreateCommand(); command.CommandTimeout = 0; command.CommandText = dax;
         using var reader = command.ExecuteReader();
         while (reader.Read())
@@ -232,16 +217,58 @@ internal sealed class ModelSource : IDisposable
     }
     internal void AssertIdle()
     {
-        foreach (var row in Read("SELECT * FROM $SYSTEM.DISCOVER_COMMANDS"))
-            foreach (var value in row)
-                if (value is string text && Regex.IsMatch(text, @"<(?:\w+:)?(?:Alter|Create|Delete|Process|Refresh|Batch)\b|\""(?:refresh|createOrReplace|alter)\""\s*:", RegexOptions.IgnoreCase))
-                    throw new InvalidOperationException("Foi detectada uma alteração/atualização concorrente no modelo. Aguarde sua conclusão e prepare novamente.");
+        List<Dictionary<string, object?>> sessions, commands;
+        try
+        {
+            sessions = ReadNamed("SELECT SESSION_SPID, SESSION_ID, SESSION_CURRENT_DATABASE FROM $SYSTEM.DISCOVER_SESSIONS");
+            commands = ReadNamed("SELECT SESSION_SPID, COMMAND_TEXT, COMMAND_START_TIME, COMMAND_END_TIME FROM $SYSTEM.DISCOVER_COMMANDS");
+        }
+        catch (Exception ex)
+        {
+            Diagnostic?.Invoke("consistency.inspection result=failed type=" + ex.GetType().Name);
+            throw new InvalidOperationException("Não foi possível verificar os comandos do modelo. A preparação foi interrompida para preservar a consistência. Confirme o acesso ao modelo local e tente novamente; consulte o log de diagnóstico.", ex);
+        }
+        var ownSessionIds = new HashSet<string>(new[] { connection.SessionID, tom.SessionID }.Where(x => !string.IsNullOrEmpty(x)), StringComparer.OrdinalIgnoreCase);
+        var ownSpids = sessions.Where(s => ownSessionIds.Contains(Convert.ToString(s.GetValueOrDefault("SESSION_ID"), CultureInfo.InvariantCulture) ?? ""))
+            .Select(s => Convert.ToInt32(s["SESSION_SPID"], CultureInfo.InvariantCulture)).ToHashSet();
+        var relevant = new List<ModelCommand>();
+        foreach (var row in commands)
+        {
+            if (!row.ContainsKey("COMMAND_TEXT") || !row.ContainsKey("COMMAND_END_TIME") || !row.ContainsKey("SESSION_SPID"))
+                throw new InvalidOperationException("O modelo não retornou os campos necessários para verificar comandos concorrentes. Consulte o log de diagnóstico; nenhum pacote foi publicado.");
+            int? spid = row["SESSION_SPID"] is null or DBNull ? null : Convert.ToInt32(row["SESSION_SPID"], CultureInfo.InvariantCulture);
+            var session = sessions.FirstOrDefault(s => Equals(Convert.ToString(s.GetValueOrDefault("SESSION_SPID"), CultureInfo.InvariantCulture), spid?.ToString(CultureInfo.InvariantCulture)));
+            string currentDatabase = Convert.ToString(session?.GetValueOrDefault("SESSION_CURRENT_DATABASE"), CultureInfo.InvariantCulture) ?? "";
+            if (currentDatabase.Length > 0 && !databaseNames.Contains(currentDatabase)) continue;
+            relevant.Add(new(spid, Convert.ToString(row["COMMAND_TEXT"], CultureInfo.InvariantCulture) ?? "", ConsistencyGuard.ServerTime(row.GetValueOrDefault("COMMAND_START_TIME")), ConsistencyGuard.ServerTime(row["COMMAND_END_TIME"])));
+        }
+        ConsistencyGuard.AssertIdle(relevant, ownSpids, extractionStarted, Diagnostic);
+    }
+    private List<Dictionary<string, object?>> ReadNamed(string query)
+    {
+        using var command = connection.CreateCommand(); command.CommandTimeout = 30; command.CommandText = query;
+        using var reader = command.ExecuteReader();
+        var rows = new List<Dictionary<string, object?>>();
+        while (reader.Read())
+        {
+            var row = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < reader.FieldCount; i++) row.Add(reader.GetName(i), reader.IsDBNull(i) ? null : reader.GetValue(i));
+            rows.Add(row);
+        }
+        return rows;
+    }
+    internal void AssertUnchanged(ModelInfo before, ModelInfo after)
+    {
+        if (!snapshots.TryGetValue(before.Fingerprint, out var left) || !snapshots.TryGetValue(after.Fingerprint, out var right))
+            throw new InvalidOperationException("A evidência de consistência do modelo está incompleta. Prepare novamente; nenhum pacote novo foi publicado.");
+        ConsistencyGuard.AssertEquivalent(left, right, Diagnostic);
     }
     internal ModelInfo Inspect()
     {
         tom.Refresh();
         var db = tom.Databases.Cast<Database>().SingleOrDefault(x => x.ID == database || x.Name == database)
             ?? throw new InvalidOperationException("O modelo local não está disponível. Abra um PBIX com dados incorporados, não um relatório thin/live.");
+        databaseNames.Add(db.ID); databaseNames.Add(db.Name);
         db.Refresh(true);
         var tables = db.Model.Tables.ToList();
         if (tables.Count == 0) throw new InvalidOperationException("Este relatório não contém tabelas locais. Obtenha um PBIX com dados ou uma exportação completa autorizada.");
@@ -308,8 +335,16 @@ internal sealed class ModelSource : IDisposable
                 dependencies.Add(item);
             }
         }
-        string fingerprint = PackageWriter.Hash(JsonSerializer.SerializeToUtf8Bytes(new { columns, measures, relationships, partitions, tableMetadata,
-            modified = Property(db, "LastUpdate"), schema = Property(db, "LastSchemaUpdate"), mode = db.Model.DefaultMode.ToString() }, PackageWriter.Json));
+        // Metadata query counters/session activity are deliberately absent. Persisted processing timestamps remain mandatory evidence.
+        var structuralPartitions = tables.SelectMany(t => t.Partitions.Select(p => new { table = t.Name, name = p.Name, mode = p.Mode.ToString(),
+            sourceType = p.Source?.GetType().Name ?? "none", expression = p.Source is CalculatedPartitionSource calculated ? calculated.Expression : null })).ToArray();
+        var processingState = tables.SelectMany(t => t.Partitions.Select(p => new { table = t.Name, name = p.Name, state = Property(p, "State"),
+            refreshedTime = Property(p, "RefreshedTime"), modifiedTime = Property(p, "ModifiedTime") })).ToArray();
+        var snapshot = ConsistencyGuard.Snapshot(new { columns, measures, relationships, partitions = structuralPartitions, tableMetadata, mode = db.Model.DefaultMode.ToString() },
+            new { partitions = processingState, modified = Property(db, "LastUpdate"), schema = Property(db, "LastSchemaUpdate") });
+        string fingerprint = snapshot.Fingerprint;
+        snapshots[fingerprint] = snapshot;
+        Diagnostic?.Invoke($"consistency.snapshot result=captured structure_sha256={snapshot.StructuralHash} data_sha256={snapshot.DataHash} tables={tables.Count}");
         string? updated = tables.SelectMany(t => t.Partitions).Select(p => Property(p, "RefreshedTime")).Where(x => DateTimeOffset.TryParse(x, CultureInfo.InvariantCulture, DateTimeStyles.None, out var date) && date.Year >= 2001).Max();
         string semanticJson = JsonSerializer.Serialize(new { columns, measures, relationships, tableMetadata, partitions }, PackageWriter.Json);
         if (Regex.IsMatch(semanticJson, @"(?:password|pwd|client_secret|access_token|refresh_token|AccountKey|SharedAccessSignature)\s*(?:=|:)\s*[^\s,;]+", RegexOptions.IgnoreCase))
@@ -321,7 +356,13 @@ internal sealed class ModelSource : IDisposable
         var v = value.GetType().GetProperty(name)?.GetValue(value);
         return v is DateTime date ? date.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture) : Convert.ToString(v, CultureInfo.InvariantCulture);
     }
-    public void Dispose() { connection.Dispose(); tom.Disconnect(); tom.Dispose(); }
+    public void Dispose()
+    {
+        // Cleanup failures do not turn an already validated/exported package into a false failure.
+        try { connection.Dispose(); } catch (Exception ex) { Diagnostic?.Invoke("connection.close component=adomd type=" + ex.GetType().Name); }
+        try { tom.Disconnect(); } catch (Exception ex) { Diagnostic?.Invoke("connection.close component=tom-disconnect type=" + ex.GetType().Name); }
+        try { tom.Dispose(); } catch (Exception ex) { Diagnostic?.Invoke("connection.close component=tom type=" + ex.GetType().Name); }
+    }
 }
 
 internal sealed class PackageWriter(ModelSource source, Mapping mapping, Action<string> log)
@@ -339,8 +380,11 @@ internal sealed class PackageWriter(ModelSource source, Mapping mapping, Action<
         if (!mapping.AdditivityReviewed || !Guid.TryParse(mapping.SourceId, out _) || !mapping.Metrics.Any(x => x.Id == "revenue")) throw new InvalidOperationException("O modelo ou mapeamento mudou. Refaça a configuração inicial.");
         foreach (var f in mapping.Dimensions.Values) if (!before.Columns.Any(c => c.Table == f.Table && c.Name == f.Column)) throw new InvalidOperationException($"A dimensão {f} não existe mais. Revise o mapeamento.");
         foreach (var m in mapping.Metrics) if (!before.Measures.Any(x => x.Name == m.Measure)) throw new InvalidOperationException($"A medida {m.Measure} não existe mais. Revise o mapeamento.");
-        string temporary = target + ".partial", bodyPath = target + ".body.partial";
-        if (File.Exists(temporary) || File.Exists(bodyPath)) throw new InvalidOperationException("Já existe uma preparação parcial neste destino. Escolha outro nome de arquivo.");
+        var native = NativeModel.Recognize(before, mapping, log);
+        if (native != null) { new NativeExport(source, mapping, before, native, log).Export(target); return; }
+        SemanticPreflight.Validate(before, mapping, log);
+        var publication = new AtomicPackageFile(target, log);
+        string temporary = publication.TemporaryPath, bodyPath = publication.BodyPath;
         try
         {
             var tableInfo = new List<TableInfo>();
@@ -408,9 +452,9 @@ internal sealed class PackageWriter(ModelSource source, Mapping mapping, Action<
                 var controls = BuildControls(from, to, referenceDate, monthSet, distinct);
                 if (DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) != referenceDate) throw new InvalidOperationException("A data de referência mudou durante os controles. Prepare novamente para manter TODAY() consistente.");
                 output.Flush(true);
-                ValidateControls(bodyPath, controls);
+                ValidateControlRows(bodyPath, controls, log);
                 source.AssertIdle(); var after = source.Inspect();
-                if (before.Fingerprint != after.Fingerprint) throw new InvalidOperationException("O esquema ou o estado de atualização do modelo mudou durante a extração. Pacote invalidado; prepare novamente com o modelo estável.");
+                source.AssertUnchanged(before, after);
                 var metrics = mapping.Metrics.Select(m => (object)new Dictionary<string, object?>
                 {
                     ["id"] = m.Id, ["originalName"] = m.Measure,
@@ -438,16 +482,16 @@ internal sealed class PackageWriter(ModelSource source, Mapping mapping, Action<
                 output.Dispose();
                 using var body = File.OpenRead(bodyPath); body.CopyTo(final, 1024 * 1024); final.Flush(true);
             }
-            File.Move(temporary, target, true);
+            var validation = publication.Publish();
+            log($"Integridade local aprovada: {validation.Tables} tabelas, {validation.RawRows} linhas de origem, {validation.ProjectionRows} linhas de projeção, SHA-256 {validation.Sha256}.");
             log($"{tableInfo.Count} tabelas extraídas e preservadas no pacote privado. Cada parte tem SHA-256 e contagem verificável.");
         }
         finally
         {
-            if (File.Exists(temporary)) File.Delete(temporary);
-            if (File.Exists(bodyPath)) File.Delete(bodyPath);
+            publication.Dispose();
         }
     }
-    private void ValidateControls(string bodyPath, List<object> controls)
+    internal static void ValidateControlRows(string bodyPath, List<object> controls, Action<string> log)
     {
         using var document = JsonDocument.Parse(JsonSerializer.Serialize(controls, Json));
         var contexts = document.RootElement.EnumerateArray().Select(x => x.Clone()).ToArray();
@@ -540,9 +584,10 @@ internal sealed class PackageWriter(ModelSource source, Mapping mapping, Action<
         if (Math.Abs(scaled) > 9007199254740991m) throw new InvalidOperationException($"Componente {component}, linha {row}: valor excede a faixa inteira segura suportada pelo servidor.");
         return number.ToString("F" + scale, CultureInfo.InvariantCulture);
     }
-    private static byte[] Line(object value) => Encoding.UTF8.GetBytes(JsonSerializer.Serialize(value, Json) + "\n");
-    private static List<PartInfo> WriteParts(Stream output, IEnumerable<object> rows, Func<int, object[], object> envelope)
+    internal static byte[] Line(object value) => Encoding.UTF8.GetBytes(JsonSerializer.Serialize(value, Json) + "\n");
+    internal static List<PartInfo> WriteParts(Stream output, IEnumerable<object> rows, Func<int, object[], object> envelope, int maximumRows = 100)
     {
+        if (maximumRows is < 1 or > 1000) throw new ArgumentOutOfRangeException(nameof(maximumRows));
         var parts = new List<PartInfo>(); var batch = new List<object>(); int index = 1; int estimatedBytes = 0;
         void Flush()
         {
@@ -556,12 +601,17 @@ internal sealed class PackageWriter(ModelSource source, Mapping mapping, Action<
             int rowBytes = JsonSerializer.SerializeToUtf8Bytes(row, Json).Length + 1;
             if (rowBytes > 1024 * 1024 - 2048) throw new InvalidOperationException("Uma linha excede o tamanho seguro de parte. Nenhum campo foi truncado; dimensione o formato e o importador antes de prosseguir.");
             if (batch.Count > 0 && estimatedBytes + rowBytes > 1024 * 1024 - 2048) Flush();
-            batch.Add(row); estimatedBytes += rowBytes; if (batch.Count == 100) Flush();
+            batch.Add(row); estimatedBytes += rowBytes; if (batch.Count == maximumRows) Flush();
         }
         Flush(); return parts;
     }
     internal static void SelfTest()
     {
+        NativeDataSet.SelfTest();
+        ConsistencyGuard.SelfTest();
+        SemanticPreflight.SelfTest();
+        PackageIntegrity.SelfTest();
+        AtomicPackageFile.SelfTest();
         using var output = new MemoryStream();
         var rows = Enumerable.Range(1, 201).Select(n => (object)new { row = n, values = new object?[] { "0001", "São João \"Sul\"\nlinha", null, true, "-12.3400" } });
         var parts = WriteParts(output, rows, (part, values) => new { kind = "rows", table = "t-test", part, rows = values });
