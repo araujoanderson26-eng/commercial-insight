@@ -21,7 +21,21 @@ import {
   type Metric,
   type Plan,
   type Report,
+  type DataCapabilities,
+  type Group,
+  type Session,
 } from "../shared/domain";
+const legacyGroups: Group[] = ["month", "client", "region", "product", "category"];
+const legacyMetrics: Metric[] = ["revenue", "margin", "buyers", "returns"];
+export function sessionCapabilities(session: Session): DataCapabilities {
+  return session.data?.source === "manual" && session.data.capabilities
+    ? session.data.capabilities
+    : { metrics: legacyMetrics, groups: legacyGroups, filters: ["region", "client", "product"] };
+}
+export const groupLabel = (group: Group, capabilities?: DataCapabilities) => capabilities?.labels?.[group] ?? groups[group];
+export const metricLabel = (metric: Metric, capabilities?: DataCapabilities) => capabilities?.labels?.[metric] ?? metrics[metric].label;
+const reportMetricKeys = (report: Report) => report.sourceInfo?.capabilities?.metrics ?? metricKeys.filter((metric) => metric !== "gross" || report.sourceInfo?.metrics?.gross?.status === "validated" || report.total.values.gross?.current != null || report.total.values.gross?.previous != null);
+const pair = (row: Report["total"], metric: Metric) => row.values[metric] ?? { current: null, previous: null };
 export async function api<T>(path: string, method = "GET", payload?: unknown): Promise<T> {
   let response: Response;
   try {
@@ -101,7 +115,7 @@ export const monthName = (s: string, long = false) =>
     .replace(". de ", "/")
     .replace(" de ", "/");
 export const period = (f: Filters) => monthName(f.from) + " – " + monthName(f.to);
-export function useReport(plan: Plan, enabled: boolean, refresh = 0) {
+export function useReport(plan: Plan, enabled: boolean, refresh = 0, sourceKey = "") {
   const [state, set] = useState<{ data?: Report; error?: string; loading: boolean }>({
     loading: enabled,
   });
@@ -120,11 +134,11 @@ export function useReport(plan: Plan, enabled: boolean, refresh = 0) {
     return () => {
       alive = false;
     };
-  }, [key, enabled, refresh]);
+  }, [key, enabled, refresh, sourceKey]);
   return state;
 }
 export function Delta({ r, m }: { r: Report["total"]; m: Metric }) {
-  const d = change(r.values[m], m);
+  const d = change(pair(r, m), m);
   if (d === null) return <small className="muted">Sem base comparável</small>;
   const Icon = d < 0 ? ArrowDownRight : ArrowUpRight;
   return (
@@ -141,12 +155,13 @@ export function Delta({ r, m }: { r: Report["total"]; m: Metric }) {
 export function Kpis({ r }: { r: Report }) {
   return (
     <div className="kpis">
-      {metricKeys.map((m) => (
+      {reportMetricKeys(r).map((m) => (
         <div className="kpi" key={m}>
-          <span>{metrics[m].label}</span>
-          <strong title={pretty(r.total.values[m].current, m)}>
-            {pretty(r.total.values[m].current, m, true)}
+          <span>{metricLabel(m, r.sourceInfo?.capabilities)}</span>
+          <strong title={pretty(pair(r.total, m).current, m)}>
+            {pretty(pair(r.total, m).current, m, true)}
           </strong>
+          {r.sourceInfo?.metrics?.[m]?.status !== undefined && r.sourceInfo.metrics[m]?.status !== "validated" && <small className="muted">{r.sourceInfo.metrics[m]?.reason ?? "Indicador sem equivalência validada"}</small>}
           <Delta r={r.total} m={m} />
         </div>
       ))}
@@ -174,7 +189,7 @@ export function Graph({ r, metric = r.plan.metric }: { r: Report; metric?: Metri
           <h2>
             {isMonth
               ? "Evolução mensal"
-              : groups[r.plan.group] + " por " + metrics[metric].label.toLowerCase()}
+              : groupLabel(r.plan.group, r.sourceInfo?.capabilities) + " por " + metricLabel(metric, r.sourceInfo?.capabilities).toLowerCase()}
           </h2>
         </div>
         <button className="soft compact" onClick={() => setTable(!table)}>
@@ -182,7 +197,7 @@ export function Graph({ r, metric = r.plan.metric }: { r: Report; metric?: Metri
         </button>
       </div>
       <div className="chartsub">
-        {metrics[metric].label} · {period(f)}
+        {metricLabel(metric, r.sourceInfo?.capabilities)} · {period(f)}
       </div>
       {data.every((x) => x.atual === null && x.anterior === null) ? (
         <Empty title="Sem valores no recorte">Confira o indicador e os filtros selecionados.</Empty>
@@ -248,8 +263,7 @@ export function Graph({ r, metric = r.plan.metric }: { r: Report; metric?: Metri
       )}
       <div className="source">
         <span>
-          <Database size={12} /> Power BI · consulta{" "}
-          {new Date(r.asOf).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}
+          <Database size={12} /> {r.source} · {r.sourceInfo ? "extração " + new Date(r.sourceInfo.extractedAt).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" }) + " · versão " + r.sourceInfo.versionId.slice(0, 8) : "consulta " + new Date(r.asOf).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}
         </span>
         <span>
           {yr(f.to)} × {+yr(f.to) - 1}
@@ -260,10 +274,10 @@ export function Graph({ r, metric = r.plan.metric }: { r: Report; metric?: Metri
   );
 }
 export function Signals({ r, ask }: { r: Report; ask: (q: string) => void }) {
-  const items = metricKeys
-    .filter((m) => change(r.total.values[m], m) !== null)
+  const items = reportMetricKeys(r)
+    .filter((m) => change(pair(r.total, m), m) !== null)
     .sort((a, b) => {
-      const risk = (m: Metric) => (change(r.total.values[m], m)! > 0 !== metrics[m].up ? 1 : 0);
+      const risk = (m: Metric) => (change(pair(r.total, m), m)! > 0 !== metrics[m].up ? 1 : 0);
       return risk(b) - risk(a);
     });
   return (
@@ -275,17 +289,17 @@ export function Signals({ r, ask }: { r: Report; ask: (q: string) => void }) {
       <p className="sub">Comparação com os mesmos meses do ano anterior.</p>
       {items.length ? (
         items.map((m) => {
-          const d = change(r.total.values[m], m)!;
+          const d = change(pair(r.total, m), m)!;
           return (
             <button
               key={m}
               className="signal"
               onClick={() =>
-                ask("Analise a evolução de " + metrics[m].label + " no período selecionado.")
+                ask("Analise a evolução de " + metricLabel(m, r.sourceInfo?.capabilities) + " no período selecionado.")
               }
             >
               <div>
-                <b>{metrics[m].label}</b>
+                <b>{metricLabel(m, r.sourceInfo?.capabilities)}</b>
                 <span>{d === 0 ? "Estável" : d > 0 ? "Acima" : "Abaixo"} do ano anterior</span>
               </div>
               <Delta r={r.total} m={m} />

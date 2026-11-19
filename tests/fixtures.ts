@@ -41,7 +41,7 @@ export const user: User = {
 export function makeStore() {
   const sql = new DatabaseSync(":memory:");
   sql.exec("PRAGMA foreign_keys=ON");
-  for (const file of ["0001_inicial", "0002_respostas"])
+  for (const file of ["0001_inicial", "0002_respostas", "0003_manual_data", "0004_source_activation", "0005_native_model"])
     sql.exec(readFileSync(new URL("../migrations/" + file + ".sql", import.meta.url), "utf8"));
   class Prepared {
     constructor(

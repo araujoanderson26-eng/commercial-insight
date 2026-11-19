@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { configSchema, filtersSchema, planSchema, type Report } from "../shared/domain";
 import { passwordHash } from "../shared/password.mjs";
-import { query } from "./analysis";
+import { assertAssistantAccess, dataProvider } from "./providers";
+import { dataStatus, manualRoute, processManualJobs, processManualQueue, type ManualJob } from "./manual";
 import { comment, interpret } from "./assistant";
 import { authenticate, authRoute, origin } from "./auth";
 import {
@@ -22,7 +23,7 @@ import {
   type DbUser,
   type Env,
 } from "./core";
-import { finish, start } from "./entra";
+import { finish, start, MicrosoftProblem, type CallbackStage } from "./entra";
 
 async function api(req: Request, e: Env, ctx: ExecutionContext) {
   const url = new URL(req.url),
@@ -35,10 +36,26 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
     fail(403, "Origem da solicitação não autorizada.");
   if (!["GET", "POST", "PUT", "DELETE"].includes(method)) fail(405, "Método inválido.");
   if (p.startsWith("/auth/") && method === "POST") return authRoute(e, req, p.slice(6), ctx);
+  if (p === "/microsoft/callback" && method === "GET") {
+    const diagnostic: CallbackStage = { stage: "session" };
+    try {
+      const { user, hash } = await authenticate(e, req);
+      diagnostic.stage = "config";
+      const { model, revision } = await config(e);
+      await finish(e, required(model), revision, user, hash, url, diagnostic);
+      return redirectProfile(e, "vinculado");
+    } catch (err) {
+      console.warn(JSON.stringify({ event: "microsoft_callback_failed", stage: diagnostic.stage,
+        status: err instanceof Problem ? err.status : 500,
+        ...(err instanceof MicrosoftProblem ? { microsoft_status: err.providerStatus, microsoft_code: err.providerCode } : {}) }));
+      return redirectProfile(e, "erro");
+    }
+  }
   const { user: u, hash } = await authenticate(e, req),
     { model, revision } = await config(e);
   const owner = u.id;
   if (p === "/me" && method === "GET") {
+    const data = await dataStatus(e);
     const linked = await stmt(
       e,
       "SELECT 1 AS yes FROM microsoft_tokens WHERE owner=? AND revision=?",
@@ -53,20 +70,28 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
         configured: !!model && !!e.MS_CLIENT_SECRET,
         mode: model?.mode ?? "delegated",
         linked: !!linked,
-        ai: !!e.OPENAI_API_KEY && !!model?.allowAI,
+        ai: !!e.OPENAI_API_KEY && (data.source === "manual" ? data.allowAI : !!model?.allowAI),
+      },
+      data: {
+        source: data.source,
+        ready: data.source === "manual" ? !!data.active : !!model && !!e.MS_CLIENT_SECRET && (model.mode === "application" || !!linked),
+        activeVersionId: data.active?.id ?? null,
+        extractedAt: data.active?.extractedAt ?? null,
+        stale: data.stale,
+        capabilities: data.source === "manual" ? data.active?.capabilities : undefined,
       },
     });
   }
-  if (p === "/microsoft/start" && method === "POST")
-    return json(await start(e, required(model), revision, u, hash));
-  if (p === "/microsoft/callback" && method === "GET") {
-    try {
-      await finish(e, required(model), revision, u, hash, url);
-      return redirectProfile(e, "vinculado");
-    } catch {
-      return redirectProfile(e, "erro");
+  if (p === "/data/status" || p === "/data/options" || p.startsWith("/admin/data")) {
+    if (p === "/data/options" && method === "POST") await limit(e, "options:" + owner, 30, 60);
+    const response = await manualRoute(req, e, u, p);
+    if (response) {
+      if (p === "/data/options") await checkAccess(e, u, revision, hash);
+      return response;
     }
   }
+  if (p === "/microsoft/start" && method === "POST")
+    return json(await start(e, required(model), revision, u, hash));
   if (p === "/microsoft" && method === "DELETE") {
     await e.DB.batch([
       stmt(e, "DELETE FROM microsoft_tokens WHERE owner=?", owner),
@@ -206,7 +231,7 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
         (
           await stmt(
             e,
-            "SELECT id,question,created,plan FROM turns WHERE conversation=? ORDER BY rowid",
+            "SELECT id,question,created,plan,source_type,source_version FROM turns WHERE conversation=? ORDER BY rowid",
             threadId,
           ).all<{ id: string; question: string; created: number; plan: string }>()
         ).results.map((t) => ({ ...t, plan: JSON.parse(t.plan) })),
@@ -224,18 +249,13 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
     await limit(e, "report:" + owner, 50, 60);
     const turn = await stmt(
       e,
-      "SELECT t.plan,t.answer,t.evidence_hash FROM turns t JOIN conversations c ON c.id=t.conversation WHERE t.id=? AND c.owner=? AND c.version=? AND c.revision=?",
+      "SELECT t.plan,t.answer,t.evidence_hash,t.source_type,t.source_version FROM turns t JOIN conversations c ON c.id=t.conversation WHERE t.id=? AND c.owner=? AND c.version=? AND c.revision=?",
       historical,
       ...scope,
-    ).first<{ plan: string; answer: string | null; evidence_hash: string | null }>();
+    ).first<{ plan: string; answer: string | null; evidence_hash: string | null; source_type: "manual" | "powerbi" | null; source_version: string | null }>();
     if (!turn) fail(404, "Resposta indisponível.");
-    const report = await query(
-      e,
-      required(model),
-      revision,
-      u,
-      planSchema.parse(JSON.parse(turn.plan)),
-    );
+    const provider = await dataProvider(e, model, revision, u, { sourceType: turn.source_type ?? "powerbi", versionId: turn.source_version });
+    const report = await provider.query(planSchema.parse(JSON.parse(turn.plan)));
     await checkAccess(e, u, revision, hash);
     const same = turn.evidence_hash === (await evidence(report));
     const commentary =
@@ -243,7 +263,7 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
         ? JSON.parse(turn.answer)
         : {
             summary:
-              "Consulta atualizada no Power BI. Faça uma nova pergunta para interpretar os valores deste recorte.",
+              "Valores consultados na fonte identificada. Faça uma nova pergunta para interpretar este recorte.",
             actions: [],
           };
     await audit(e, owner, "resposta_reconsultada").run();
@@ -252,7 +272,8 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
   if (p === "/report" && method === "POST") {
     const plan = planSchema.parse(await body(req));
     await limit(e, "report:" + owner, 50, 60);
-    const report = await query(e, required(model), revision, u, plan);
+    const provider = await dataProvider(e, model, revision, u);
+    const report = await provider.query(plan);
     await checkAccess(e, u, revision, hash);
     await audit(e, owner, "relatorio_consultado", plan.group).run();
     return json(report);
@@ -266,7 +287,7 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
       })
       .parse(await body(req));
     await limit(e, "chat:" + owner, 18, 600);
-    const m = required(model);
+    const provider = await dataProvider(e, model, revision, u);
     const id = v.conversation || crypto.randomUUID();
     if (
       v.conversation &&
@@ -287,15 +308,19 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
           ).all<{ question: string; plan: string }>()
         ).results.reverse()
       : [];
-    const plan = await interpret(e, m, v.question, v.filters, previous),
-      report = await query(e, m, revision, u, plan);
     await checkAccess(e, u, revision, hash);
+    await assertAssistantAccess(e, provider);
+    const plan = await interpret(e, provider.semantics, v.question, v.filters, previous),
+      report = await provider.query(plan);
+    await checkAccess(e, u, revision, hash);
+    await assertAssistantAccess(e, provider);
     const commentary = await comment(e, v.question, report).catch(() => ({
       summary:
-        "Os indicadores foram consultados no Power BI. A interpretação da OpenAI está temporariamente indisponível.",
+        "Os indicadores foram consultados na fonte identificada. A interpretação da OpenAI está temporariamente indisponível.",
       actions: [],
     }));
     await checkAccess(e, u, revision, hash);
+    await assertAssistantAccess(e, provider);
     const turn = crypto.randomUUID();
     const thread = v.conversation
       ? stmt(e, "UPDATE conversations SET updated=? WHERE id=? AND owner=?", now(), id, owner)
@@ -311,7 +336,7 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
       thread,
       stmt(
         e,
-        "INSERT INTO turns(id,conversation,question,plan,created,answer,evidence_hash) VALUES(?,?,?,?,?,?,?)",
+        "INSERT INTO turns(id,conversation,question,plan,created,answer,evidence_hash,source_type,source_version) VALUES(?,?,?,?,?,?,?,?,?)",
         turn,
         id,
         v.question,
@@ -319,6 +344,8 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
         now(),
         JSON.stringify(commentary),
         await evidence(report),
+        provider.sourceType,
+        provider.versionId,
       ),
       audit(e, owner, "pergunta_consultada", plan.group),
     ]);
@@ -327,12 +354,12 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
   fail(404, "Recurso desconhecido.");
 }
 function evidence(report: Report) {
-  return digest(JSON.stringify([report.plan, report.total, report.rows, report.truncated]));
+  return digest(JSON.stringify([report.plan, report.total, report.rows, report.truncated, report.source, report.sourceInfo?.versionId]));
 }
 async function checkAccess(e: Env, u: DbUser, revision: number, hash: string) {
   const ok = await stmt(
     e,
-    "SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id AND u.version=s.version JOIN settings c ON c.id=1 WHERE s.hash=? AND u.id=? AND u.active=1 AND u.version=? AND c.revision=? AND s.expires>?",
+    "SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id AND u.version=s.version LEFT JOIN settings c ON c.id=1 WHERE s.hash=? AND u.id=? AND u.active=1 AND u.version=? AND COALESCE(c.revision,0)=? AND s.expires>?",
     hash,
     u.id,
     u.version,
@@ -374,7 +401,9 @@ export default {
       return json({ error: "Não foi possível concluir a operação." }, 500);
     }
   },
-  async scheduled(_event: ScheduledController, e: Env) {
+  async scheduled(event: ScheduledController, e: Env) {
+    await processManualJobs(e);
+    if (event.cron !== "17 4 * * *") return;
     const cutoff = now() - 86400 * Math.min(365, Math.max(1, Number(e.RETENTION_DAYS) || 90));
     await e.DB.batch([
       ...["sessions", "oauth_state", "recovery", "throttle"].map((t) =>
@@ -388,4 +417,7 @@ export default {
       ),
     ]);
   },
-} satisfies ExportedHandler<Env>;
+  async queue(batch: MessageBatch<ManualJob>, e: Env) {
+    await processManualQueue(batch, e);
+  },
+} satisfies ExportedHandler<Env, ManualJob>;

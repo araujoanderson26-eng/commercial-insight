@@ -27,17 +27,15 @@ import {
 import { useState } from "react";
 
 import {
-  groups,
-  metricKeys,
-  metrics,
   pretty,
   type Filters,
   type Group,
   type Metric,
   type Plan,
   type Session,
+  type FilterDimension,
 } from "../shared/domain";
-import { Busy, Delta, ErrorBox, Graph, Kpis, planFor, Signals, useReport } from "./ui";
+import { Busy, Delta, ErrorBox, Graph, Kpis, planFor, Signals, useReport, sessionCapabilities, groupLabel, metricLabel } from "./ui";
 export const mainNav = [
   { p: "inicio", label: "Início", icon: House },
   { p: "conversas", label: "Conversas", icon: MessageCircle },
@@ -47,6 +45,7 @@ export const mainNav = [
   { p: "alertas", label: "Alertas e ações", icon: Bell },
 ];
 export const adminNav = [
+  { p: "atualizacao-dados", label: "Atualização de dados", icon: RefreshCw },
   { p: "integracoes", label: "Integrações", icon: Link2 },
   { p: "equipe", label: "Equipe e permissões", icon: ShieldCheck },
   { p: "auditoria", label: "Auditoria", icon: BookOpen },
@@ -103,6 +102,12 @@ const cards = [
   },
 ];
 function Connection({ s, go }: { s: Session; go: Go }) {
+  if (s.data?.source === "manual") return (
+    <div className="connectbox">
+      <div><b>Nenhuma versão válida publicada</b><p>Os indicadores estarão disponíveis após a importação e validação do pacote.</p></div>
+      {s.user.role === "admin" && <button className="soft compact" onClick={() => go("atualizacao-dados")}>Atualizar dados<ArrowRight size={14} /></button>}
+    </div>
+  );
   const config = !s.integrations.configured;
   const title = config ? "Conecte o modelo semântico" : "Vincule sua conta Microsoft";
   return (
@@ -146,7 +151,7 @@ export function Home({
 }) {
   const [q, Q] = useState(""),
     [refresh, R] = useState(0),
-    report = useReport(planFor(filters), ready, refresh);
+    report = useReport(planFor(filters), ready, refresh, (s.data?.source ?? "powerbi") + "|" + (s.data?.activeVersionId ?? ""));
   const hour = Number(
     new Intl.DateTimeFormat("pt-BR", {
       hour: "2-digit",
@@ -170,7 +175,7 @@ export function Home({
           </h1>
           <p>
             Analise resultados, clientes e oportunidades
-            <br className="wideonly" /> com os dados do seu Power BI.
+            <br className="wideonly" /> com os dados da sua fonte comercial.
           </p>
         </div>
         <form
@@ -189,7 +194,8 @@ export function Home({
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.nativeEvent.isComposing) {
                 e.preventDefault();
-                q.trim().length > 1 ? ask(q) : card("pergunta");
+                if (q.trim().length > 1) ask(q);
+                else card("pergunta");
               }
             }}
             value={q}
@@ -278,14 +284,18 @@ export function Reports({
   go: Go;
   ask: (q: string) => void;
   initialGroup: Group;
-  drill: (key: "client" | "product" | "region", name: string) => void;
+  drill: (key: FilterDimension, name: string) => void;
 }) {
   const group0 = page === "clientes" ? "client" : page === "produtos" ? "product" : initialGroup;
   const [group, G] = useState<Group>(group0),
     [metric, M] = useState<Metric>("revenue"),
     [order, O] = useState<Plan["order"]>("current"),
     [refresh, R] = useState(0);
-  const report = useReport({ ...planFor(filters, group, metric), order }, ready, refresh);
+  const capabilities = sessionCapabilities(s);
+  const effectiveGroup = capabilities.groups.includes(group) ? group : "month";
+  const effectiveMetric = capabilities.metrics.includes(metric) ? metric : "revenue";
+  const report = useReport({ ...planFor(filters, effectiveGroup, effectiveMetric), order }, ready, refresh,
+    (s.data?.source ?? "powerbi") + "|" + (s.data?.activeVersionId ?? ""));
   const title = navs.find((n) => n.p === page)?.label || "Relatórios";
   return (
     <div className="stack">
@@ -307,25 +317,25 @@ export function Reports({
       <div className="panel toolbar">
         <label>
           Agrupar por
-          <select value={group} onChange={(e) => G(e.target.value as Group)}>
-            {Object.entries(groups).map(([k, v]) => (
+          <select value={effectiveGroup} onChange={(e) => G(e.target.value as Group)}>
+            {capabilities.groups.map((k) => (
               <option key={k} value={k}>
-                {v}
+                {groupLabel(k, capabilities)}
               </option>
             ))}
           </select>
         </label>
         <label>
           Indicador
-          <select value={metric} onChange={(e) => M(e.target.value as Metric)}>
-            {metricKeys.map((k) => (
+          <select value={effectiveMetric} onChange={(e) => M(e.target.value as Metric)}>
+            {capabilities.metrics.map((k) => (
               <option key={k} value={k}>
-                {metrics[k].label}
+                {metricLabel(k, capabilities)}
               </option>
             ))}
           </select>
         </label>
-        {group !== "month" && (
+        {effectiveGroup !== "month" && (
           <label>
             Ordenar por
             <select value={order} onChange={(e) => O(e.target.value as Plan["order"])}>
@@ -352,16 +362,16 @@ export function Reports({
           {page === "alertas" ? <Signals r={report.data} ask={ask} /> : <Graph r={report.data} />}
           <section className="panel">
             <div className="sectionhead">
-              <h2>{group === "month" ? "Detalhamento mensal" : "Ranking · " + groups[group]}</h2>
+              <h2>{effectiveGroup === "month" ? "Detalhamento mensal" : "Ranking · " + groupLabel(effectiveGroup, capabilities)}</h2>
               <span className="pill">
-                {report.data.rows.length} {group === "month" ? "meses" : "registros"}
+                {report.data.rows.length} {effectiveGroup === "month" ? "meses" : "registros"}
               </span>
             </div>
             <div className="tablewrap">
               <table>
                 <thead>
                   <tr>
-                    <th>{groups[group]}</th>
+                    <th>{groupLabel(effectiveGroup, capabilities)}</th>
                     <th>Período</th>
                     <th>Ano anterior</th>
                     <th>Variação</th>
@@ -371,24 +381,24 @@ export function Reports({
                   {report.data.rows.map((row) => (
                     <tr key={row.name}>
                       <td>
-                        {["region", "product", "client"].includes(group) ? (
+                        {capabilities.filters.includes(effectiveGroup as FilterDimension) && row.canDrill !== false ? (
                           <button
                             className="textlink"
                             onClick={() =>
-                              drill(group as "region" | "product" | "client", row.name)
+                              drill(effectiveGroup as FilterDimension, row.name)
                             }
                           >
                             {row.name}
                             <ChevronRight size={12} />
                           </button>
                         ) : (
-                          row.name
+                          <span title={row.canDrill === false ? "Grupo sem valor de filtro" : undefined}>{row.name}</span>
                         )}
                       </td>
-                      <td>{pretty(row.values[metric].current, metric)}</td>
-                      <td>{pretty(row.values[metric].previous, metric)}</td>
+                      <td>{pretty(row.values[effectiveMetric].current, effectiveMetric)}</td>
+                      <td>{pretty(row.values[effectiveMetric].previous, effectiveMetric)}</td>
                       <td>
-                        <Delta r={row} m={metric} />
+                        <Delta r={row} m={effectiveMetric} />
                       </td>
                     </tr>
                   ))}

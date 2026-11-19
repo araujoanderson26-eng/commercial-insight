@@ -64,7 +64,8 @@ export default function Profile({
         <div className="mini">
           <Link2 size={14} /> Fonte de dados
         </div>
-        <h2>Microsoft Power BI</h2>
+        <h2>{s.data?.source === "manual" ? "Arquivo manual no D1" : "Microsoft Power BI"}</h2>
+        {s.data?.source === "manual" && <p className="sub">A consulta usa o login deste aplicativo. O vínculo Microsoft fica disponível para uso futuro do conector online.</p>}
         <p className="sub">
           {!s.integrations.configured
             ? "O modelo ou a credencial do aplicativo aguarda configuração."

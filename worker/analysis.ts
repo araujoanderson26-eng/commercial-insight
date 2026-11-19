@@ -79,6 +79,8 @@ function expressions(m: ModelConfig, from: string, to: string) {
   return args.join(", ");
 }
 export function compile(m: ModelConfig, u: User, p: Plan) {
+  if (["state", "regional", "manager"].includes(p.group) || p.filters.state || p.filters.regional || p.filters.manager)
+    fail(422, "Este recorte está disponível na fonte manual compatível. O conector online ainda não possui esse mapeamento.");
   const acl = policy(u, m, p),
     { from, to } = p.filters;
   if (!m.measures[p.metric]) fail(422, "Indicador não mapeado no modelo.");
@@ -93,7 +95,7 @@ export function compile(m: ModelConfig, u: User, p: Plan) {
     }
     details = rows.join(",\n");
   } else {
-    const dim = col(m.columns[p.group]),
+    const dim = col(m.columns[p.group as "client" | "region" | "product" | "category"]),
       fields = metricKeys
         .flatMap((k) => ["c", "p"].flatMap((t) => [quoted(k + "_" + t), "[" + k + "_" + t + "]"]))
         .join(",");
@@ -185,12 +187,9 @@ export function readResult(
 export async function query(e: Env, m: ModelConfig, rev: number, u: DbUser, p: Plan) {
   const dax = compile(m, publicUser(u), p);
   const t = await access(e, m, rev, u);
+  const workspace = m.workspace === "me" ? "" : "/groups/" + m.workspace;
   const resp = await fetch(
-    "https://api.powerbi.com/v1.0/myorg/groups/" +
-      m.workspace +
-      "/datasets/" +
-      m.dataset +
-      "/executeQueries",
+    "https://api.powerbi.com/v1.0/myorg" + workspace + "/datasets/" + m.dataset + "/executeQueries",
     {
       method: "POST",
       headers: { Authorization: "Bearer " + t, "Content-Type": "application/json" },

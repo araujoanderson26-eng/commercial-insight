@@ -17,15 +17,17 @@ import {
   type Filters,
   type Group,
   type Session,
+  type FilterDimension,
 } from "../shared/domain";
 import { Audit, Integrations, Team } from "./Admin";
 import Auth from "./Auth";
 import Chat, { type Seed } from "./Chat";
 import Profile from "./Profile";
+import { DataUpdates } from "./DataUpdates";
 import "./style.css";
-import { api, Brand, Busy, Credit, Empty, ErrorBox, message, period } from "./ui";
+import { api, Brand, Busy, Credit, Empty, ErrorBox, message, period, sessionCapabilities } from "./ui";
 import { adminNav, Home, mainNav, navs, Reports } from "./WorkspaceViews";
-const cleanPath = () => location.pathname.split("/")[1] || "inicio";
+const cleanPath = () => location.pathname === "/admin/atualizacao-dados" ? "atualizacao-dados" : location.pathname.split("/")[1] || "inicio";
 function Modal({
   title,
   close,
@@ -73,7 +75,18 @@ function FilterForm({
   focusClient?: boolean;
 }) {
   const [f, F] = useState(value),
-    [err, E] = useState("");
+    [err, E] = useState(""),
+    [options, O] = useState<Partial<Record<FilterDimension, string[]>>>({});
+  const capabilities = sessionCapabilities(s);
+  const selectedDimensions = capabilities.filters;
+  useEffect(() => {
+    if (s.data?.source !== "manual" || !s.data.ready) return;
+    const valid = filtersSchema.safeParse(f);
+    if (!valid.success) return;
+    let alive = true;
+    api<{ values: typeof options }>("data/options", "POST", valid.data).then((v) => { if (alive) O(v.values); }).catch((e) => { if (alive) E(message(e)); });
+    return () => { alive = false; };
+  }, [s.data?.activeVersionId, f.from, f.to]);
   function save(e: FormEvent) {
     e.preventDefault();
     const parsed = filtersSchema.safeParse(f);
@@ -81,7 +94,10 @@ function FilterForm({
       E("Informe entre 1 e 24 meses completos e confira os filtros.");
       return;
     }
-    apply(parsed.data);
+    const supported = { ...parsed.data };
+    for (const dimension of ["regional", "state", "manager"] as const)
+      if (!capabilities.filters.includes(dimension)) delete supported[dimension];
+    apply(supported);
   }
   return (
     <form className="formpanel" onSubmit={save}>
@@ -98,14 +114,14 @@ function FilterForm({
           </label>
         ))}
       </div>
-      {(["region", "client", "product"] as const).map((k) => {
+      {selectedDimensions.map((k) => {
         const list = k === "region" ? s.user.regions : k === "client" ? s.user.clients : [];
-        const title = { region: "Regional", client: "Cliente", product: "Produto" }[k];
+        const title = capabilities.labels?.[k] ?? { region: "Regional", client: "Cliente", product: "Produto", regional: "Regional comercial", state: "UF", manager: "Gerente" }[k];
         return (
           <label key={k}>
             {title}
-            {list.length && s.user.role !== "admin" && !s.user.national ? (
-              <select value={f[k]} onChange={(e) => F({ ...f, [k]: e.target.value })}>
+            {list.length && !(s.user.role === "admin" || (s.user.role === "diretoria" && s.user.national)) ? (
+              <select value={f[k] ?? ""} onChange={(e) => F({ ...f, [k]: e.target.value })}>
                 <option value="">Todos no meu escopo</option>
                 {list.map((v) => (
                   <option key={v}>{v}</option>
@@ -113,13 +129,18 @@ function FilterForm({
               </select>
             ) : (
               <input
+                list={"source-options-" + k}
                 autoFocus={focusClient && k === "client"}
                 maxLength={140}
-                value={f[k]}
+                value={f[k] ?? ""}
                 onChange={(e) => F({ ...f, [k]: e.target.value })}
                 placeholder={"Todos · ou nome exato no modelo"}
               />
             )}
+            <datalist id={"source-options-" + k}>
+              {(options[k] ?? []).map((v) => <option key={v} value={v} />)}
+            </datalist>
+            {k === "region" && capabilities.labels?.region === "Representante" && <small className="muted">As permissões cadastradas para este campo continuam aplicadas ao representante autorizado.</small>}
           </label>
         );
       })}
@@ -144,12 +165,22 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
     [chatKey, K] = useState(0),
     [reportGroup, G] = useState<Group>("month");
   const ready =
-      s.integrations.configured && (s.integrations.mode === "application" || s.integrations.linked),
+      s.data?.ready ?? (s.integrations.configured && (s.integrations.mode === "application" || s.integrations.linked)),
     admin = s.user.role === "admin";
+  const sourceFilters = JSON.stringify(sessionCapabilities(s).filters);
+  useEffect(() => {
+    const supported = JSON.parse(sourceFilters) as FilterDimension[];
+    F((current) => {
+      const next = { ...current };
+      for (const dimension of ["regional", "state", "manager"] as const)
+        if (!supported.includes(dimension)) delete next[dimension];
+      return JSON.stringify(next) === JSON.stringify(current) ? current : next;
+    });
+  }, [sourceFilters]);
   function go(p: string) {
     W("");
     if (p !== page) {
-      history.pushState({}, "", p === "inicio" ? "/" : "/" + p);
+      history.pushState({}, "", p === "inicio" ? "/" : p === "atualizacao-dados" ? "/admin/atualizacao-dados" : "/" + p);
       V(p);
       window.scrollTo(0, 0);
     }
@@ -172,7 +203,7 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
     if (p === "analisar") return W("analisar");
     if (p === "visita") return W("visita");
     if (p === "regional") {
-      G("region");
+      G(sessionCapabilities(s).groups.includes("regional") ? "regional" : "region");
       return go("relatorios");
     }
     go(p);
@@ -250,7 +281,13 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
           </div>
         </header>
         <div className="content">
-          {!["integracoes", "equipe", "auditoria", "perfil", "mais"].includes(page) && (
+          {s.data?.source === "manual" && (
+            <div className="notice" role="status">
+              {s.data.extractedAt ? "Arquivo manual · base extraída em " + new Date(s.data.extractedAt).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" }) : "Arquivo manual · nenhuma versão válida publicada."}
+              {s.data.stale ? " · Base desatualizada: solicite uma atualização ao administrador." : ""}
+            </div>
+          )}
+          {!["integracoes", "atualizacao-dados", "equipe", "auditoria", "perfil", "mais"].includes(page) && (
             <div className="filterbar">
               <div className="filterdate">
                 <CalendarDays size={15} />
@@ -259,8 +296,8 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
               <button onClick={() => W("filtros")} className="filterbtn">
                 <SlidersHorizontal size={15} />
                 Filtros
-                {[filters.region, filters.client, filters.product].filter(Boolean).length > 0
-                  ? " · " + [filters.region, filters.client, filters.product].filter(Boolean).length
+                {sessionCapabilities(s).filters.map((dimension) => filters[dimension]).filter(Boolean).length > 0
+                  ? " · " + sessionCapabilities(s).filters.map((dimension) => filters[dimension]).filter(Boolean).length
                   : ""}
               </button>
             </div>
@@ -302,8 +339,10 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
             <Profile s={s} logout={logout} reload={reload} />
           ) : page === "integracoes" && admin ? (
             <Integrations changed={reload} />
+          ) : page === "atualizacao-dados" && admin ? (
+            <DataUpdates changed={reload} />
           ) : page === "equipe" && admin ? (
-            <Team self={s.user.id} />
+            <Team self={s.user.id} scopeLabel={sessionCapabilities(s).labels?.region === "Representante" ? "Representantes" : "Regionais"} />
           ) : page === "auditoria" && admin ? (
             <Audit />
           ) : page === "mais" ? (

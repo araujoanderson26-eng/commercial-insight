@@ -8,6 +8,7 @@ export const roles = {
 export type Role = keyof typeof roles;
 export const metrics = {
   revenue: { label: "Faturamento", unit: "money", up: true },
+  gross: { label: "Faturamento bruto", unit: "money", up: true },
   margin: { label: "Margem comercial", unit: "percent", up: true },
   buyers: { label: "Clientes compradores", unit: "count", up: true },
   returns: { label: "Devoluções", unit: "money", up: false },
@@ -19,8 +20,20 @@ export const groups = {
   region: "Regionais",
   product: "Produtos",
   category: "Categorias",
+  regional: "Regionais comerciais",
+  state: "UF",
+  manager: "Gerentes",
 } as const;
 export type Group = keyof typeof groups;
+export const filterDimensions = ["region", "client", "product", "regional", "state", "manager"] as const;
+export type FilterDimension = typeof filterDimensions[number];
+export type DataCapabilities = {
+  metrics: Metric[];
+  groups: Group[];
+  filters: FilterDimension[];
+  labels?: Partial<Record<FilterDimension | Group | Metric, string>>;
+  unavailable?: Partial<Record<FilterDimension | Group, string>>;
+};
 export const metricKeys = Object.keys(metrics) as Metric[];
 export const dateRE = /^\d{4}-(0[1-9]|1[0-2])$/;
 const month = z
@@ -29,7 +42,9 @@ const month = z
   .refine((s) => +s.slice(0, 4) >= 2001 && +s.slice(0, 4) <= 2100);
 const val = z.string().trim().max(140).default("");
 export const filtersSchema = z
-  .object({ from: month, to: month, region: val, client: val, product: val })
+  .object({ from: month, to: month, region: val, client: val, product: val,
+    regional: z.string().trim().max(140).optional(), state: z.string().trim().max(140).optional(), manager: z.string().trim().max(140).optional(),
+  })
   .strict()
   .refine((v) => {
     const n = monthsBetween(v.from, v.to);
@@ -49,22 +64,33 @@ export function defaultFilters(): Filters {
 }
 export const planSchema = z
   .object({
-    group: z.enum(["month", "client", "region", "product", "category"]),
-    metric: z.enum(["revenue", "margin", "buyers", "returns"]),
+    group: z.enum(["month", "client", "region", "product", "category", "regional", "state", "manager"]),
+    metric: z.enum(["revenue", "gross", "margin", "buyers", "returns"]),
     filters: filtersSchema,
     order: z.enum(["current", "decline", "growth"]),
   })
   .strict();
 export type Plan = z.infer<typeof planSchema>;
 export type Pair = { current: number | null; previous: number | null };
-export type Row = { name: string; values: Record<Metric, Pair> };
+export type Row = { name: string; values: Record<Metric, Pair>; canDrill?: boolean };
 export type Report = {
   total: Row;
   rows: Row[];
   plan: Plan;
   asOf: string;
   truncated: boolean;
-  source: "Power BI";
+  source: "Power BI" | "Arquivo manual (D1)";
+  sourceInfo?: {
+    versionId: string;
+    extractedAt: string;
+    sourceUpdatedAt: string | null;
+    referenceDate: string;
+    coverage: { from: string; to: string };
+    publishedAt?: string;
+    model?: string;
+    metrics?: Partial<Record<Metric, { status: "validated" | "pending" | "unavailable"; reason?: string }>>;
+    capabilities?: DataCapabilities;
+  };
 };
 export type Commentary = { summary: string; actions: string[] };
 export type User = {
@@ -88,6 +114,14 @@ export type Session = {
     ai: boolean;
   };
   expires: number;
+  data?: {
+    source: "manual" | "powerbi";
+    ready: boolean;
+    activeVersionId: string | null;
+    extractedAt: string | null;
+    stale: boolean;
+    capabilities?: DataCapabilities;
+  };
 };
 export const identifier = z
   .string()
@@ -100,7 +134,7 @@ export const configSchema = z
   .object({
     tenant: z.uuid(),
     application: z.uuid(),
-    workspace: z.uuid(),
+    workspace: z.uuid().or(z.literal("me")),
     dataset: z.uuid(),
     mode: z.enum(["delegated", "application"]),
     factTable: identifier,
@@ -113,13 +147,17 @@ export const configSchema = z
         margin: identifier.nullable(),
         buyers: identifier.nullable(),
         returns: identifier.nullable(),
+        gross: identifier.nullable().optional(),
       })
       .strict(),
     marginScale: z.enum(["fraction", "points"]),
     scopedMeasuresReviewed: z.boolean(),
     allowAI: z.boolean(),
   })
-  .strict();
+  .strict()
+  .refine((m) => m.workspace !== "me" || m.mode === "delegated", {
+    path: ["workspace"], message: "Meu workspace requer uma conta Microsoft vinculada no modo delegado.",
+  });
 export type ModelConfig = z.infer<typeof configSchema>;
 export function change(p: Pair, m: Metric) {
   if (p.current === null || p.previous === null) return null;
