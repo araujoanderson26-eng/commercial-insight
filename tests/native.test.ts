@@ -173,3 +173,19 @@ test("v2 continuity accepts unused inventory columns and keeps the full raw inve
   assert.equal((await dataStatus(s.env)).active?.id,third,String(s.sql.prepare("SELECT error FROM ci_imports WHERE id=?").get(third)?.error));
   s.sql.close();
 });
+
+test("retrying a fully loaded validation failure preserves checkpoints and reruns every validation without importing parts",async()=>{
+  const s=makeStore(),r2=fakeR2(),pkg=nativeFixture(),id=crypto.randomUUID(),key="local/complete-native";let rangeReads=0;
+  const get=r2.bucket.get.bind(r2.bucket);r2.bucket.get=(async(name:string,options?:R2GetOptions)=>{if(options?.range)rangeReads++;return get(name,options);}) as R2Bucket["get"];
+  Object.assign(s.env,{BUCKET:r2.bucket,MANUAL_ALLOW_SYNTHETIC:"true"});r2.objects.set(key,pkg.data);
+  s.sql.prepare("INSERT INTO ci_imports(id,owner,actor,filename,bytes,sha256,object_key,status,base_generation,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?)").run(id,admin.id,admin.name,"complete.ci.ndjson",pkg.data.length,pkg.sha256,key,"queued",0,1,1);s.sql.prepare("UPDATE ci_sources SET latest_import_id=?").run(id);
+  await processManualJobs(s.env);await processManualJobs(s.env);
+  const prepare=s.env.DB.prepare.bind(s.env.DB);s.env.DB.prepare=((sql:string)=>{if(sql.startsWith("SELECT COUNT(*) AS n FROM ci_native_sales"))throw Error("D1_ERROR: too many terms in compound SELECT: SQLITE_ERROR");return prepare(sql);}) as D1Database["prepare"];
+  await processManualJobs(s.env);s.env.DB.prepare=prepare;
+  const failed=s.sql.prepare("SELECT status,part_cursor,processed_bytes,rows,manifest FROM ci_imports WHERE id=?").get(id)!;assert.equal(failed.status,"failed");assert.equal(failed.processed_bytes,pkg.data.length);assert.equal((await dataStatus(s.env)).active,null);
+  const before=rangeReads,response=await manualRoute(new Request("https://example.test/api/admin/data/imports/"+id+"/retry",{method:"POST",headers:{"content-type":"application/json"},body:"{}"}),s.env,admin,"/admin/data/imports/"+id+"/retry");assert(response);const receipt=await response.json() as {status:string;resumedValidation:boolean};assert.equal(receipt.status,"validating");assert.equal(receipt.resumedValidation,true);
+  const resumed=s.sql.prepare("SELECT part_cursor,processed_bytes,rows,manifest,report FROM ci_imports WHERE id=?").get(id)!;assert.equal(resumed.part_cursor,failed.part_cursor);assert.equal(resumed.processed_bytes,failed.processed_bytes);assert.equal(resumed.rows,failed.rows);assert.equal(resumed.manifest,failed.manifest);assert.equal(resumed.report,null);
+  for(let i=0;i<25;i++)await processManualJobs(s.env);
+  assert.equal((await dataStatus(s.env)).active?.id,id);assert.equal(rangeReads,before);assert.equal(s.sql.prepare("SELECT COUNT(*) n FROM ci_native_sales WHERE version_id=?").get(id)?.n,4);
+  const report=JSON.parse(String(s.sql.prepare("SELECT report FROM ci_imports WHERE id=?").get(id)!.report));assert.equal(report.controls.length,36);assert(report.controls.every((c:{passed:boolean})=>c.passed));assert(report.checks.some((c:{name:string;status:string})=>c.name==="integridade"&&c.status==="passed"));s.sql.close();
+});

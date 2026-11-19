@@ -254,18 +254,23 @@ export async function nativeOptions(e:Env,u:DbUser,filters:Filters,m:ManualManif
   return {values,sourceVersion:version,truncated};
 }
 export function compileNativeOptions(version:string,context:NativeContext,groups:readonly Exclude<Group,"month">[]):Sql{
+  if(groups.length===0)throw Error("Nenhuma dimensão de opções foi solicitada.");
   const base=compileNativeContexts(version,[context],true),prefix=base.sql.slice(0,base.sql.lastIndexOf("\nSELECT c.k,c.name,")),tails:string[]=[],selects:string[]=[];
   for(const [index,group]of groups.entries()){
     const compiled=compileNativeGroups(version,[context],group,true),split=compiled.sql.lastIndexOf(" SELECT MIN(name) AS name FROM "),rename=(sql:string)=>sql.replace(/\bg_/g,"o"+index+"_");
     tails.push(rename(compiled.sql.slice(prefix.length,split)));selects.push("SELECT '"+group+"' AS dimension,name FROM ("+rename(compiled.sql.slice(split+1))+")");
   }
-  return {sql:(prefix+tails.join("")+" "+selects.join(" UNION ALL ")).replace("visible_sales AS (","visible_sales AS NOT MATERIALIZED ("),args:base.args};
+  // D1 limits each compound SELECT to five terms, unlike desktop SQLite's default 500.
+  // Nest binary compounds so all dimensions still share this one scoped CTE evaluation.
+  const compound=(parts:string[]):string=>parts.length===1?parts[0]:"SELECT * FROM ("+compound(parts.slice(0,Math.ceil(parts.length/2)))+") UNION ALL SELECT * FROM ("+compound(parts.slice(Math.ceil(parts.length/2)))+")";
+  return {sql:(prefix+tails.join("")+" "+compound(selects)).replace("visible_sales AS (","visible_sales AS NOT MATERIALIZED ("),args:base.args};
 }
 export const nativeStorageTables=Object.values(nativeTables);
 export async function validateNativeStorage(e:Env,m:ManualManifest,version:string){
-  const roles=Object.keys(nativeTables) as NativeRole[],query=roles.map(role=>"SELECT '"+role+"' AS role,COUNT(*) AS n FROM "+nativeTables[role]+" WHERE version_id=?").join(" UNION ALL ");
-  const rows=(await stmt(e,query,...roles.map(()=>version)).all<{role:NativeRole;n:number}>()).results;
-  for(const row of rows)if(row.n!==table(m,native(m)[row.role].table).rowCount)throw Error("Contagem normalizada divergente: "+row.role);
+  for(const role of Object.keys(nativeTables) as NativeRole[]){
+    const row=await stmt(e,"SELECT COUNT(*) AS n FROM "+nativeTables[role]+" WHERE version_id=?",version).first<{n:number}>();
+    if(row?.n!==table(m,native(m)[role].table).rowCount)throw Error("Contagem normalizada divergente: "+role);
+  }
   for(const [storage,column]of [["ci_native_regions","state"],["ci_native_calendar","date"]]){
     const duplicate=await stmt(e,"SELECT COUNT(*) AS n FROM "+storage+" WHERE version_id=? GROUP BY "+column+" HAVING COUNT(*)>1 LIMIT 1",version).first<{n:number}>();
     if(duplicate)throw Error("Chave do lado um duplicada após normalização da collation: "+storage);

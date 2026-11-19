@@ -149,6 +149,22 @@ export async function manualRoute(req: Request, e: Env, u: DbUser, path: string)
     if(action==="retry" && method==="POST") {
       if(!["failed","cancelled","superseded"].includes(row.status)) fail(409,"Esta importação não precisa de retomada.");
       const object=await manualEnv(e).BUCKET.head(row.object_key),s=await sourceRow(e);
+      const manifest=parsed(row),complete=manifest?entries(manifest):[];
+      if(row.status==="failed"&&object?.size===row.bytes&&manifest&&row.part_cursor===complete.length&&row.processed_bytes===row.bytes&&row.rows===complete.reduce((n,x)=>n+x.part.rows,0)){
+        validateManifest(manifest,e);
+        const checkpoints=(await stmt(e,"SELECT table_id,part,rows,sha256 FROM ci_parts WHERE version_id=?",row.id).all<{table_id:string;part:number;rows:number;sha256:string}>()).results;
+        const recorded=new Map(checkpoints.map(p=>[JSON.stringify([p.table_id,p.part]),p]));
+        if(checkpoints.length===complete.length&&complete.every(({table,part})=>{const p=recorded.get(JSON.stringify([table?.id??"__projection__",part.index]));return p?.rows===part.rows&&p.sha256===part.sha256;})){
+          const resumed=await e.DB.batch([
+            stmt(e,"UPDATE ci_imports SET status='validating',base_generation=?,error=NULL,report=NULL,lease_token=NULL,lease_until=0,updated=? WHERE id=? AND status='failed' AND EXISTS(SELECT 1 FROM ci_sources WHERE id=? AND generation=?)",s.generation,now(),row.id,MANUAL_SOURCE,s.generation),
+            stmt(e,"UPDATE ci_sources SET latest_import_id=?,updated=? WHERE id=? AND generation=? AND EXISTS(SELECT 1 FROM ci_imports WHERE id=? AND status='validating' AND base_generation=?)",row.id,now(),MANUAL_SOURCE,s.generation,row.id,s.generation),
+            audit(e,u.id,"atualizacao_retomada",row.id),
+          ]);
+          if(!resumed[0].meta.changes)fail(409,"A importação ou a fonte mudou durante a retomada. Atualize a página.");
+          await wakeManualJob(e,row.id);
+          return json({id:row.id,status:"validating",resumedValidation:true,partBytes:UPLOAD_PART_BYTES,parts:Math.ceil(row.bytes/UPLOAD_PART_BYTES),uploadedParts:[]});
+        }
+      }
       let uploadId=row.upload_id,status="queued";
       if(!object) { const upload=await manualEnv(e).BUCKET.createMultipartUpload(row.object_key,{httpMetadata:{contentType:"application/x-ndjson"},customMetadata:{importId:row.id,sourceId:MANUAL_SOURCE}});uploadId=upload.uploadId;status="uploading"; }
       await e.DB.batch([
