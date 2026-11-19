@@ -8,6 +8,7 @@ import { assistantStatus, isVisitRequest, prepareVisit } from "./commercial";
 import { authenticate, authRoute, origin } from "./auth";
 import { assertControlledHmlUser } from "./real-hml-policy";
 import { controlledHmlModelPreflight } from "./openai-budget";
+import { productionAIStatus } from './production-ai-budget';
 import { classifyWorkerError, classifyWorkerErrorDetail } from "./error-diagnostics";
 import {
   audit,
@@ -76,7 +77,7 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
         configured: !!model && !!e.MS_CLIENT_SECRET,
         mode: model?.mode ?? "delegated",
         linked: !!linked,
-        ai: !!e.OPENAI_API_KEY && (data.source === "manual" ? data.allowAI : !!model?.allowAI),
+        ai: !!e.OPENAI_API_KEY && (data.source === "manual" ? data.allowAI : !!model?.allowAI) && (await productionAIStatus(e,owner)).ready,
       },
       data: {
         source: data.source,
@@ -219,6 +220,14 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
   if (p === "/assistant/status" && method === "GET") {
     const provider = await dataProvider(e, model, revision, u);
     const result = assistantStatus(e, provider);
+    const financial = await productionAIStatus(e,owner);
+    if (!financial.ready) {
+      result.ready = false;
+      result.reason = financial.reason!;
+      result.pending.push(financial.reason!);
+      result.message = financial.message!;
+    }
+    if (financial.budget) result.budget = financial.budget;
     await checkAccess(e, u, revision, hash);
     return json(result);
   }
@@ -365,7 +374,7 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
         ).results.reverse()
       : [];
     await checkAccess(e, u, revision, hash);
-    await assertAssistantAccess(e, provider);
+    await assertAssistantAccess(e, provider, owner);
     const interpreted = await interpret(e, provider.semantics, v.question, v.filters, previous, owner);
     const plan = await resolvePlanEntities(provider, interpreted, v.filters);
     const visitRequested = isVisitRequest(v.question);
@@ -373,14 +382,14 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
     const report = await provider.query(plan);
     const visit = visitRequested ? await prepareVisit(provider, plan.filters) : undefined;
     await checkAccess(e, u, revision, hash);
-    await assertAssistantAccess(e, provider);
+    await assertAssistantAccess(e, provider, owner);
     const commentary = await comment(e, v.question, report, owner).catch(() => ({
       summary:
         "Os indicadores foram consultados na fonte identificada. A interpretação da OpenAI está temporariamente indisponível.",
       actions: [],
     }));
     await checkAccess(e, u, revision, hash);
-    await assertAssistantAccess(e, provider);
+    await assertAssistantAccess(e, provider, owner);
     const turn = crypto.randomUUID();
     const thread = v.conversation
       ? stmt(e, "UPDATE conversations SET updated=? WHERE id=? AND owner=?", now(), id, owner)

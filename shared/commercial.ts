@@ -59,7 +59,13 @@ export type AssistantStatus = {
   credentialConfigured: boolean;
   model: string;
   ready: boolean;
-  reason: "ready" | "source_disabled" | "credential_missing";
-  pending: ("source_disabled" | "credential_missing")[];
+  reason: "ready" | AssistantPending;
+  pending: AssistantPending[];
   message: string;
+  budget?: AssistantBudget;
 };
+export type AssistantPending = 'source_disabled' | 'credential_missing' | 'policy_disabled' | 'account_not_authorized'
+  | 'credits_unverified' | 'budget_exhausted' | 'request_in_progress' | 'budget_unavailable';
+export type AssistantBudget = { month: string; capUsd: number; reservedUsd: number; usageUpperUsd: number;
+  unknownUsageCount: number; remainingUsd: number; verifiedCreditRemainingUsd: number;
+  creditValidUntil: number; alerts: { thresholdUsd: number; event: string; created: number }[] };

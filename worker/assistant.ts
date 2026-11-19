@@ -70,7 +70,8 @@ async function structuredBody(e: Env,name: string,requestBody: string,actorId?: 
   try {
     res = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
-    headers: { Authorization: "Bearer " + e.OPENAI_API_KEY, "Content-Type": "application/json" },
+    headers: { Authorization: "Bearer " + e.OPENAI_API_KEY, "Content-Type": "application/json",
+      ...(reservation?.production ? { 'OpenAI-Organization': reservation.organizationId!, 'OpenAI-Project': reservation.projectId! } : {}) },
     body: requestBody,
     signal: AbortSignal.timeout(45000),
     });
@@ -92,7 +93,7 @@ async function structuredBody(e: Env,name: string,requestBody: string,actorId?: 
   }
   let data: Awaited<ReturnType<typeof readProviderResponse>>;
   try {
-    data = await readProviderResponse(res, reservation?.controlledReal === true);
+    data = await readProviderResponse(res, reservation?.controlledReal === true || reservation?.production === true);
   } catch (error) {
     await finishHmlOpenAI(e, reservation, { status: "response_error", httpStatus: res.status, requestId: res.headers.get("x-request-id") });
     throw error;

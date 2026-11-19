@@ -202,6 +202,7 @@ export default function Chat({
       P("");
       B(false);
       guard.current = false;
+      void api<AssistantStatus>("assistant/status").then(ST).catch(() => {});
     }
   }
   useEffect(() => {
@@ -264,6 +265,13 @@ export default function Chat({
       </div>
       {err && <ErrorBox>{err}</ErrorBox>}
       {status && !status.ready && <div className="panel assistant-status"><div><strong>Assistente aguardando configuração</strong><p>{status.message}</p></div><p className="sub">Você pode consultar os relatórios e preparar uma visita com os dados autorizados.</p><div className="report-actions"><a className="soft compact" href="/relatorios">Abrir relatórios</a><a className="soft compact" href="/visitas">Preparar visita</a></div></div>}
+        {status?.budget && <section className="panel" aria-label="Consumo da IA">
+          <strong>Orçamento da IA · {status.budget.month} (UTC)</strong>
+          <p>Limite mensal: US$ {status.budget.capUsd.toFixed(2)}. Reservas comprometidas: US$ {status.budget.reservedUsd.toFixed(4)}. Consumo com tokens conhecidos, sem desconto de cache: US$ {status.budget.usageUpperUsd.toFixed(6)}.</p>
+          <p className="sub">As reservas incluem margem de segurança e chamadas com consumo desconhecido; não são o valor da fatura. A disponibilidade depende também dos créditos verificados.</p>
+          {status.budget.unknownUsageCount > 0 && <p role="status">Há {status.budget.unknownUsageCount} chamada(s) sem consumo confirmado.</p>}
+          {status.budget.alerts.map(alert => <p role="alert" key={alert.thresholdUsd + alert.event}>{alert.event === 'budget_blocked' ? 'Novas chamadas bloqueadas por orçamento ou créditos insuficientes.' : `Alerta: as reservas atingiram US$ ${alert.thresholdUsd.toFixed(2)} no mês.`}</p>)}
+        </section>}
       {list ? (
         <section className="panel">
           {threads.length ? (

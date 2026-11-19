@@ -10,6 +10,7 @@ export interface Env extends CloudflareBindings {
   HML_SYNTHETIC_ONLY?: string;
   HML_OPENAI_BUDGET_USD?: string;
   HML_REAL_DATA_AUTHORIZATION?: string;
+  PRODUCTION_AI_BUDGET?: string;
 }
 export class Problem extends Error {
   constructor(

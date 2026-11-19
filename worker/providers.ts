@@ -4,6 +4,7 @@ import { query as powerBIQuery } from "./analysis";
 import { config, fail, required, type DbUser, type Env } from "./core";
 import { manualContext, manualCustomerDetails, manualSearch, queryManual, sourceSettings } from "./manual";
 import { assertControlledHmlAISource, assertControlledHmlUser, controlledHmlPolicy } from "./real-hml-policy";
+import { assertProductionAI } from './production-ai-budget';
 
 export interface DataProvider {
   sourceType: "manual" | "powerbi";
@@ -15,7 +16,8 @@ export interface DataProvider {
 }
 
 /** Re-read policy at each outbound AI boundary; the data snapshot stays pinned. */
-export async function assertAssistantAccess(env: Env, provider: DataProvider) {
+export async function assertAssistantAccess(env: Env, provider: DataProvider, actorId?: string) {
+  await assertProductionAI(env,actorId);
   await assertControlledHmlAISource(env);
   const allowed = provider.sourceType === "manual"
     ? (await sourceSettings(env)).allowAI
