@@ -16,7 +16,7 @@ Desenvolvido por Anderson de Araujo. Estado em 19/11/2026. Branch `feat/commerci
 
 O faturamento líquido continua **bruto menos devoluções uma única vez**. Fatos, DAX e caminhos muitos-para-muitos existentes foram preservados. Produto/categoria podem propagar devoluções pelo conjunto de clientes conforme o modelo oficial. Por isso, rankings podem ser não aditivos; somar suas linhas não reconstrói necessariamente o total.
 
-Os dois montantes específicos do exemplo fornecido não foram reproduzidos nos recortes investigados. Isso impede afirmar sua origem sem os filtros e a versão originais. Foram observados valores negativos explicáveis pela fórmula e pela atribuição comercial; não se declarou erro de extração com base apenas no sinal. Detalhes comerciais e exemplos reais estão apenas no relatório privado local.
+No período confirmado de janeiro a outubro de 2026, a linha do representante no ranking nacional coincide com a consulta filtrada individualmente no snapshot local. Os dois montantes específicos do exemplo fornecido não foram reproduzidos. Faltam os demais filtros, o usuário/escopo e a versão originais para afirmar sua origem. Foram observados valores negativos explicáveis pela fórmula e pela atribuição comercial; não se declarou erro de extração com base apenas no sinal. Detalhes comerciais e exemplos reais estão apenas no relatório privado local.
 
 ## Implementação
 
@@ -60,7 +60,7 @@ O primeiro ensaio de testes encontrou restrições de leitura do sandbox e depoi
 
 1. **OpenAI real:** falta cadastrar a chave, autorizar a fonte e validar uma chamada real com saldo/modelo disponíveis. Os testes de provedor usam mocks; não comprovam conectividade ou cobrança da conta.
 2. **Homologação remota:** configuração isolada pronta, provisionamento recusado pela revisão automática por persistência e possível cobrança. Nenhum recurso foi criado. O UUID marcador e a checagem impedem implantação acidental.
-3. **Exemplo financeiro original:** requer período, filtros combinados e versão da tela observada. O diagnóstico privado registra exatamente os recortes que foram reproduzidos.
+3. **Exemplo financeiro original:** janeiro–outubro de 2026 já foi conferido; ainda requer os demais filtros combinados, usuário/escopo e versão da tela observada. O diagnóstico privado registra exatamente os recortes reproduzidos.
 4. **Narrativa de IA:** guardas rejeitam números não sustentados e percentuais inválidos; não constituem prova formal de todas as associações e causas descritas pelo modelo. Gráficos/tabelas permanecem a evidência verificável; causas comerciais exigem confirmação.
 5. **Métricas especiais:** margem, estoque, metas, litros e quantidade continuam indisponíveis sem receita e conciliação específicas. O ticket derivado é por comprador, não por pedido.
 6. **Recorte temporal:** seleção operacional por meses, até 24; o corte diário é o homólogo do snapshot. Não se declara um relatório por dias arbitrários ou semana calendário completa.
@@ -69,3 +69,7 @@ O primeiro ensaio de testes encontrou restrições de leitura do sandbox e depoi
 9. **Operação:** retenção de snapshots e aceite físico de dispositivos/botão externo do Power BI continuam exigindo homologação da empresa.
 
 Não se declara o produto integralmente homologado enquanto essas dependências externas permanecerem abertas. O procedimento de aceite e publicação está em [Administração 2.0](ADMINISTRACAO-2.0.md); o roteiro comercial está no [Manual do usuário](MANUAL-USUARIO-2.0.md).
+
+## Revisão no GitHub
+
+[PR #2](https://github.com/araujoanderson26-eng/commercial-insight/pull/2), mantida como draft, branch `feat/commercial-insight-2`. A implementação foi publicada no commit `f7b9ebf`; documentação complementar permanece na mesma branch. Não há merge ou implantação de produção autorizados nesta entrega.
