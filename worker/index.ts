@@ -1,9 +1,10 @@
 import { z } from "zod";
 import { configSchema, filtersSchema, planSchema, type Report } from "../shared/domain";
 import { passwordHash } from "../shared/password.mjs";
-import { assertAssistantAccess, dataProvider } from "./providers";
+import { assertAssistantAccess, dataProvider, resolvePlanEntities } from "./providers";
 import { dataStatus, manualRoute, processManualJobs, processManualQueue, type ManualJob } from "./manual";
-import { comment, interpret } from "./assistant";
+import { comment, commentaryGrounded, factualCommentary, interpret } from "./assistant";
+import { assistantStatus, isVisitRequest, prepareVisit } from "./commercial";
 import { authenticate, authRoute, origin } from "./auth";
 import {
   audit,
@@ -82,14 +83,15 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
       },
     });
   }
-  if (p === "/data/status" || p === "/data/options" || p.startsWith("/admin/data")) {
-    if (p === "/data/options" && method === "POST") await limit(e, "options:" + owner, 30, 60);
+  if (p === "/data/status" || p === "/data/options" || p === "/data/search" || p.startsWith("/admin/data")) {
+    if ((p === "/data/options" || p === "/data/search") && method === "POST") await limit(e, "options:" + owner, 30, 60);
     const response = await manualRoute(req, e, u, p);
     if (response) {
-      if (p === "/data/options") await checkAccess(e, u, revision, hash);
+      if (p === "/data/options" || p === "/data/search") await checkAccess(e, u, revision, hash);
       return response;
     }
   }
+  if (u.role === "operador" && p !== "/auth/profile") fail(403, "O operador de atualização tem acesso somente à importação de pacotes e ao próprio perfil.");
   if (p === "/microsoft/start" && method === "POST")
     return json(await start(e, required(model), revision, u, hash));
   if (p === "/microsoft" && method === "DELETE") {
@@ -156,7 +158,7 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
       const fields = [
         user.name,
         user.email,
-        user.role,
+        user.role === "operador" ? "comercial" : user.role,
         JSON.stringify([...new Set(user.regions)]),
         JSON.stringify([...new Set(user.clients)]),
         +user.national,
@@ -167,19 +169,21 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
       const q = edit
         ? stmt(
             e,
-            "UPDATE users SET name=?,email=?,role=?,regions=?,clients=?,national=?,active=?,entra_oid=?,password=COALESCE(?,password),version=version+1,scope_version=scope_version+1 WHERE id=? AND (role<>'admin' OR active=0 OR ?=1 OR EXISTS(SELECT 1 FROM users other WHERE other.id<>users.id AND other.active=1 AND other.role='admin'))",
+            "UPDATE users SET name=?,email=?,role=?,regions=?,clients=?,national=?,active=?,entra_oid=?,password=COALESCE(?,password),update_only=?,version=version+1,scope_version=scope_version+1 WHERE id=? AND (role<>'admin' OR active=0 OR ?=1 OR EXISTS(SELECT 1 FROM users other WHERE other.id<>users.id AND other.active=1 AND other.role='admin'))",
             ...fields,
             pw,
+            +(user.role === "operador"),
             id,
             +(user.active && user.role === "admin"),
           )
         : stmt(
             e,
-            "INSERT INTO users(name,email,role,regions,clients,national,active,entra_oid,password,id,created) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO users(name,email,role,regions,clients,national,active,entra_oid,password,id,created,update_only) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             ...fields,
             pw,
             id,
             now(),
+            +(user.role === "operador"),
           );
       try {
         const result = await e.DB.batch([
@@ -207,6 +211,45 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
       );
   }
   const scope = [owner, u.scope_version, revision];
+  if (p === "/assistant/status" && method === "GET") {
+    const provider = await dataProvider(e, model, revision, u);
+    const result = assistantStatus(e, provider);
+    await checkAccess(e, u, revision, hash);
+    return json(result);
+  }
+  if (p === "/visit" && method === "POST") {
+    const filters = filtersSchema.parse(await body(req));
+    await limit(e, "visit:" + owner, 8, 600);
+    const provider = await dataProvider(e, model, revision, u);
+    const briefing = await prepareVisit(provider, filters);
+    await checkAccess(e, u, revision, hash);
+    await audit(e, owner, "visita_preparada").run();
+    return json(briefing);
+  }
+  if (p === "/saved-reports" && method === "GET") {
+    const records = (await stmt(e, "SELECT id,title,plan,question,favorite,created FROM saved_reports WHERE owner=? AND scope_version=? AND revision=? ORDER BY created DESC LIMIT 100", ...scope).all<{ id:string;title:string;plan:string;question:string|null;favorite:number;created:number }>()).results;
+    await checkAccess(e, u, revision, hash);
+    return json(records.map(record => ({...record, plan: planSchema.parse(JSON.parse(record.plan)), favorite:!!record.favorite})));
+  }
+  if (p === "/saved-reports" && method === "POST") {
+    const value = z.object({title:z.string().trim().min(2).max(120),plan:planSchema,question:z.string().trim().max(900).optional()}).strict().parse(await body(req));
+    await limit(e, "save-report:"+owner, 20, 600);
+    // Reauthorize the complete plan before persisting a reusable query.
+    const provider = await dataProvider(e, model, revision, u);
+    await provider.query(value.plan);
+    await checkAccess(e, u, revision, hash);
+    const id = crypto.randomUUID(), created = now();
+    const result = await stmt(e, "INSERT INTO saved_reports(id,owner,scope_version,revision,title,plan,question,created) SELECT ?,?,?,?,?,?,?,? WHERE (SELECT COUNT(*) FROM saved_reports WHERE owner=? AND scope_version=? AND revision=?)<100", id,...scope,value.title,JSON.stringify(value.plan),value.question??null,created,...scope).run();
+    if (!result.meta.changes) fail(409,"Limite de 100 relatórios salvos. Exclua um relatório para continuar.");
+    await audit(e,owner,"relatorio_salvo",id).run();
+    return json({id,title:value.title,plan:value.plan,question:value.question??null,favorite:true,created},201);
+  }
+  const savedId = p.match(/^\/saved-reports\/([0-9a-f-]{36})$/)?.[1];
+  if (savedId && method === "DELETE") {
+    const result = await stmt(e,"DELETE FROM saved_reports WHERE id=? AND owner=? AND scope_version=? AND revision=?",savedId,...scope).run();
+    if (!result.meta.changes) fail(404,"Relatório salvo indisponível.");
+    return json({ok:true});
+  }
   if (p === "/conversations" && method === "GET")
     return json(
       (
@@ -258,7 +301,7 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
     const report = await provider.query(planSchema.parse(JSON.parse(turn.plan)));
     await checkAccess(e, u, revision, hash);
     const same = turn.evidence_hash === (await evidence(report));
-    const commentary =
+    let commentary =
       same && turn.answer
         ? JSON.parse(turn.answer)
         : {
@@ -266,8 +309,14 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
               "Valores consultados na fonte identificada. Faça uma nova pergunta para interpretar este recorte.",
             actions: [],
           };
+    const hadVisit = Boolean(commentary.visit);
+    if (!commentaryGrounded(commentary, report)) commentary = factualCommentary(report);
+    // Recompute saved briefings against the pinned source and current ACL; never return cached customer details directly.
+    const visit = same && hadVisit ? await prepareVisit(provider, report.plan.filters) : undefined;
+    delete commentary.visit;
+    await checkAccess(e, u, revision, hash);
     await audit(e, owner, "resposta_reconsultada").run();
-    return json({ report, commentary });
+    return json({ report, commentary, ...(visit ? { visit } : {}) });
   }
   if (p === "/report" && method === "POST") {
     const plan = planSchema.parse(await body(req));
@@ -310,8 +359,12 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
       : [];
     await checkAccess(e, u, revision, hash);
     await assertAssistantAccess(e, provider);
-    const plan = await interpret(e, provider.semantics, v.question, v.filters, previous),
-      report = await provider.query(plan);
+    const interpreted = await interpret(e, provider.semantics, v.question, v.filters, previous);
+    const plan = await resolvePlanEntities(provider, interpreted, v.filters);
+    const visitRequested = isVisitRequest(v.question);
+    if (visitRequested && !plan.filters.client) fail(422, "Selecione um cliente ou informe seu código/nome para preparar a visita. Cadastros semelhantes exigem a escolha do código correto.");
+    const report = await provider.query(plan);
+    const visit = visitRequested ? await prepareVisit(provider, plan.filters) : undefined;
     await checkAccess(e, u, revision, hash);
     await assertAssistantAccess(e, provider);
     const commentary = await comment(e, v.question, report).catch(() => ({
@@ -342,29 +395,32 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
         v.question,
         JSON.stringify(plan),
         now(),
-        JSON.stringify(commentary),
+        JSON.stringify({ ...commentary, ...(visit ? { visit } : {}) }),
         await evidence(report),
         provider.sourceType,
         provider.versionId,
       ),
       audit(e, owner, "pergunta_consultada", plan.group),
     ]);
-    return json({ id, turn, report, commentary });
+    return json({ id, turn, report, commentary, ...(visit ? { visit } : {}) });
   }
   fail(404, "Recurso desconhecido.");
 }
 function evidence(report: Report) {
-  return digest(JSON.stringify([report.plan, report.total, report.rows, report.truncated, report.source, report.sourceInfo?.versionId]));
+  return digest(JSON.stringify(["commercial-2", report.plan, report.total, report.rows, report.truncated, report.source,
+    report.sourceInfo?.versionId, report.comparison, report.warnings]));
 }
 async function checkAccess(e: Env, u: DbUser, revision: number, hash: string) {
   const ok = await stmt(
     e,
-    "SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id AND u.version=s.version LEFT JOIN settings c ON c.id=1 WHERE s.hash=? AND u.id=? AND u.active=1 AND u.version=? AND COALESCE(c.revision,0)=? AND s.expires>?",
+    "SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id AND u.version=s.version LEFT JOIN settings c ON c.id=1 WHERE s.hash=? AND u.id=? AND u.active=1 AND u.version=? AND COALESCE(c.revision,0)=? AND s.expires>? AND u.scope_version=? AND u.update_only=?",
     hash,
     u.id,
     u.version,
     revision,
     now(),
+    u.scope_version,
+    +(u.role === "operador"),
   ).first();
   if (!ok) fail(403, "O acesso mudou durante a consulta. Atualize a página.");
 }

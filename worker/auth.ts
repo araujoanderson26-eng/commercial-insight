@@ -50,6 +50,7 @@ export async function authenticate(e: Env, req: Request) {
     now() - 3600,
   ).first<DbUser & { expires: number; seen: number }>();
   if (!user) fail(401, "Sua sessão terminou. Entre novamente.");
+  if (user.update_only) user.role = "operador";
   if (user.seen < now() - 60)
     await stmt(e, "UPDATE sessions SET seen=? WHERE hash=?", now(), hash).run();
   return { user, hash };

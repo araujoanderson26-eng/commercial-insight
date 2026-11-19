@@ -361,12 +361,12 @@ export function Team({ self, scopeLabel = "Regionais" }: { self: string; scopeLa
             </label>
             <label>
               {scopeLabel} · um valor por linha
-              <textarea value={regions} onChange={(e) => R(e.target.value)} />
+              <textarea value={regions} onChange={(e) => R(e.target.value)} disabled={edit.role === "operador"} />
               {scopeLabel === "Representantes" && <small className="muted">Este campo limita o acesso aos representantes autorizados. Para gerentes, informe os representantes da equipe. Regional, gerente e UF nas análises são filtros adicionais e não ampliam esse acesso.</small>}
             </label>
             <label>
               Clientes · um por linha
-              <textarea value={clients} onChange={(e) => C(e.target.value)} />
+              <textarea value={clients} onChange={(e) => C(e.target.value)} disabled={edit.role === "operador"} />
             </label>
             <label>
               {edit.id ? "Alterar senha (opcional)" : "Senha inicial"}
@@ -380,6 +380,7 @@ export function Team({ self, scopeLabel = "Regionais" }: { self: string; scopeLa
               />
             </label>
           </div>
+          {edit.role === "operador" && <p className="sub">Este perfil envia e acompanha os próprios pacotes. Consultas comerciais, IA, configurações, restauração e downloads da base são restritos.</p>}
           {edit.role === "diretoria" && (
             <label className="check">
               <input

@@ -1,0 +1,33 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "commercial-insight-hml",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-11-18",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "limits": { "cpu_ms": 60000 },
+  "assets": { "directory": "./dist", "binding": "ASSETS", "not_found_handling": "single-page-application", "run_worker_first": ["/api/*"] },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "commercial-insight-hml-db",
+    // Replace only with the UUID of the separately provisioned homologation D1.
+    "database_id": "00000000-0000-4000-8000-000000000000",
+    "migrations_dir": "migrations"
+  }],
+  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "commercial-insight-hml-arquivos" }],
+  "queues": {
+    "producers": [{ "binding": "MANUAL_JOBS", "queue": "commercial-insight-hml-jobs" }],
+    "consumers": [{ "queue": "commercial-insight-hml-jobs", "max_batch_size": 1, "max_batch_timeout": 1, "max_concurrency": 1, "max_retries": 5, "retry_delay": 30 }]
+  },
+  "vars": {
+    "APP_ORIGIN": "https://commercial-insight-hml.araujo-anderson26.workers.dev",
+    "OPENAI_MODEL": "gpt-4.1-mini",
+    "RETENTION_DAYS": "90",
+    "MANUAL_MAX_BYTES": "536870912",
+    "MANUAL_D1_CAPACITY_BYTES": "9663676416",
+    "MANUAL_ALLOW_SYNTHETIC": "true"
+  },
+  "observability": { "enabled": true, "traces": { "enabled": true, "head_sampling_rate": 0.01 }, "logs": { "enabled": true, "invocation_logs": false } },
+  "triggers": { "crons": ["* * * * *", "17 4 * * *"] }
+}

@@ -107,13 +107,14 @@ export type DbUser = {
   entra_oid: string | null;
   scope_version: number;
   version: number;
+  update_only?: number;
 };
 export function publicUser(r: DbUser): User {
   return {
     id: r.id,
     email: r.email,
     name: r.name,
-    role: r.role,
+    role: r.update_only ? "operador" : r.role,
     regions: JSON.parse(r.regions),
     clients: JSON.parse(r.clients),
     national: !!r.national,
@@ -127,7 +128,7 @@ export const userSchema = z
   .object({
     name: z.string().trim().min(2).max(90),
     email: emailSchema,
-    role: z.enum(["admin", "diretoria", "gerente", "comercial"]),
+    role: z.enum(["admin", "diretoria", "gerente", "comercial", "operador"]),
     national: z.boolean(),
     active: z.boolean(),
     regions: z.array(z.string().trim().min(1).max(140)).max(90),

@@ -7,7 +7,7 @@ import {
   type ManualManifest, type ManualMetric, type ControlFilters,
 } from "../shared/manual";
 import { audit, body, fail, json, now, stmt, type DbUser, type Env } from "./core";
-import { nativeCapabilities, nativeControl, nativeControlResult, nativeOptions, nativePartStatements, nativeStorageTables, nativeValues, queryNative, validateNativeModel,validateNativeStorage,type NativeResult } from "./native-model";
+import { nativeCapabilities, nativeControl, nativeControlResult, nativeCustomerDetails, nativeOptions, nativePeriod, nativeSearch, nativePartStatements, nativeStorageTables, nativeValues, queryNative, validateNativeModel,validateNativeStorage,type NativeResult } from "./native-model";
 
 export type ManualJob={jobId:string};
 type ManualEnv = Env & { BUCKET: R2Bucket; MANUAL_MAX_BYTES?: string; MANUAL_ALLOW_SYNTHETIC?: string; MANUAL_JOBS?:Queue<ManualJob> };
@@ -71,8 +71,20 @@ export async function dataStatus(e: Env) {
     active: active?.published ? activeInfo(active,s) : null,
     stale: active?.published ? Date.now()-new Date(parsed(active)!.sourceUpdatedAt??parsed(active)!.extractedAt).valueOf()>s.stale_days*86400000 : false };
 }
-async function status(e: Env) {
-  const rows = (await stmt(e, "SELECT * FROM ci_imports ORDER BY seq DESC LIMIT 30").all<ImportRow>()).results;
+export async function manualSearch(e: Env, u: DbUser, filters: Filters, dimension: "client" | "product" | "category", query: string, versionId?: string) {
+  if (u.role === "operador" || u.update_only) fail(403,"O operador de atualização não possui acesso às análises comerciais.");
+  const {row,manifest} = await publishedVersion(e,versionId);
+  if (manifest.formatVersion !== 2) fail(422,"A pesquisa por descrição requer um pacote nativo v2.");
+  return nativeSearch(e,u,filters,manifest,row.id,dimension,query);
+}
+export async function manualCustomerDetails(e: Env, u: DbUser, filters: Filters, versionId?: string) {
+  if (u.role === "operador" || u.update_only) fail(403,"O operador de atualização não possui acesso às análises comerciais.");
+  const {row,manifest} = await publishedVersion(e,versionId);
+  if (manifest.formatVersion !== 2) fail(422,"Os detalhes diários exigem um pacote nativo v2.");
+  return nativeCustomerDetails(e,u,filters,manifest,row.id);
+}
+async function status(e: Env, operator?: string) {
+  const rows = (await stmt(e, "SELECT * FROM ci_imports" + (operator ? " WHERE owner=?" : "") + " ORDER BY seq DESC LIMIT 30", ...(operator ? [operator] : [])).all<ImportRow>()).results;
   const history = [];
   for (const r of rows) {
     const manifest=parsed(r);
@@ -87,10 +99,21 @@ async function status(e: Env) {
 export async function manualRoute(req: Request, e: Env, u: DbUser, path: string): Promise<Response | null> {
   const method = req.method;
   if (path === "/data/status" && method === "GET") return json(await dataStatus(e));
-  if (path === "/data/options" && method === "POST") return json(await manualOptions(e,u,filtersSchema.parse(await body(req))));
+  if (path === "/data/options" && method === "POST") {
+    if (u.role === "operador") fail(403, "O operador de atualização não possui acesso às análises comerciais.");
+    return json(await manualOptions(e,u,filtersSchema.parse(await body(req))));
+  }
+  if (path === "/data/search" && method === "POST") {
+    if (u.role === "operador") fail(403, "O operador de atualização não possui acesso às análises comerciais.");
+    const value = z.object({filters:filtersSchema,dimension:z.enum(["client","product","category"]),query:z.string().trim().min(1).max(100)}).strict().parse(await body(req));
+    const source = await sourceRow(e);
+    if (source.source !== "manual") fail(422,"A pesquisa por descrição requer a fonte manual nativa.");
+    return json(await manualSearch(e,u,value.filters,value.dimension,value.query));
+  }
   if (!path.startsWith("/admin/data")) return null;
-  if (u.role !== "admin") fail(403, "Acesso exclusivo do administrador.");
-  if (path === "/admin/data" && method === "GET") return json(await status(e));
+  if (u.role !== "admin" && u.role !== "operador") fail(403, "Acesso exclusivo da administração ou operação de atualização.");
+  if (u.role === "operador" && (path === "/admin/data/settings" || path === "/admin/data/restore")) fail(403, "Somente o administrador pode configurar a fonte ou restaurar versões.");
+  if (path === "/admin/data" && method === "GET") return json(await status(e, u.role === "operador" ? u.id : undefined));
   if (path === "/admin/data/settings" && method === "PUT") {
     const v = z.object({ source: z.enum(["manual", "powerbi"]), staleDays: z.number().int().min(1).max(365), allowAI: z.boolean() }).strict().parse(await body(req));
     await e.DB.batch([stmt(e, "UPDATE ci_sources SET source=?,stale_days=?,allow_ai=?,updated=? WHERE id=?", v.source, v.staleDays, +v.allowAI, now(), MANUAL_SOURCE), audit(e,u.id,"fonte_comercial_configurada",v.source)]);
@@ -100,6 +123,7 @@ export async function manualRoute(req: Request, e: Env, u: DbUser, path: string)
     const v = z.object({ filename: z.string().min(1).max(200).regex(/\.ci\.ndjson$/i), bytes: z.number().int().min(100).max(maxBytes(e)), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(await body(req));
     const existing = await stmt(e, "SELECT * FROM ci_imports WHERE sha256=? AND bytes=?", v.sha256, v.bytes).first<ImportRow>();
     if (existing) {
+      if (u.role === "operador" && existing.owner !== u.id) fail(409, "Este pacote já foi recebido por outro operador. Consulte o administrador.");
       const uploadedParts = (await stmt(e, "SELECT part AS partNumber,etag FROM ci_upload_parts WHERE import_id=? ORDER BY part", existing.id).all()).results;
       return json({ id: existing.id, status: existing.status, existing: true, partBytes: UPLOAD_PART_BYTES, parts: Math.ceil(v.bytes / UPLOAD_PART_BYTES), uploadedParts });
     }
@@ -117,6 +141,7 @@ export async function manualRoute(req: Request, e: Env, u: DbUser, path: string)
   const match = path.match(/^\/admin\/data\/imports\/([a-f0-9-]{36})(?:\/(parts\/(\d+)|complete|cancel|retry|package|report))?$/);
   if (match) {
     const row = await getImport(e, match[1]), action = match[2];
+    if (u.role === "operador" && (row.owner !== u.id || action === "package")) fail(403, "Esta operação não está autorizada para o operador.");
     if (action?.startsWith("parts/") && method === "PUT") {
       if (row.status !== "uploading" || !row.upload_id) fail(409,"O envio não está aberto.");
       const part = Number(match[3]), count = Math.ceil(row.bytes / UPLOAD_PART_BYTES);
@@ -368,11 +393,12 @@ function outputValue(value:unknown,metric:ManualMetric):number|null {
   return n*(metric.kind==="ratio"&&metric.unit==="percent"?100:1);
 }
 function security(u:DbUser,p:Plan) {
+  if(u.role==="operador"||u.update_only)fail(403,"O operador de atualização não possui acesso às análises comerciais.");
   const regions=z.array(z.string()).parse(JSON.parse(u.regions)),clients=z.array(z.string()).parse(JSON.parse(u.clients));
   const national=u.role==="admin"||(u.role==="diretoria"&&!!u.national);
   if(!national && ((u.role==="gerente"&&!regions.length)||(!regions.length&&!clients.length))) fail(403,"Nenhuma carteira ou regional autorizada.");
   const clauses:string[]=[],args:(string|number|null)[]=[];
-  for(const [key,allowed] of [["region",regions],["client",clients],["product",[]]] as const) {
+  for(const [key,allowed] of [["region",regions],["client",clients],["product",[]],["category",[]]] as const) {
     const requested=p.filters[key],scoped=!national&&allowed.length>0;
     if(requested&&scoped&&!(allowed as readonly string[]).includes(requested)) fail(403,"Seleção fora do seu escopo.");
     const values=requested?[requested]:scoped?allowed:[];
@@ -410,9 +436,9 @@ export async function queryManual(e:Env,u:DbUser,p:Plan,versionId?:string):Promi
   if(!["month","client","region","product","category"].includes(p.group)||p.filters.state||p.filters.regional||p.filters.manager)fail(422,"Este filtro ou agrupamento não está disponível no pacote legado.");
   const selected=m.metrics.find(x=>x.id===p.metric&&x.status==="validated"&&x.kind!=="unavailable");
   if(!selected) fail(422,"Indicador indisponível nesta versão manual: "+(m.metrics.find(x=>x.id===p.metric)?.reason??"sem equivalência comprovada com o modelo Power BI"));
-  const acl=security(u,p), results=[];
+  const acl=security(u,p), results=[], period=nativePeriod(m,p.filters);
   for(const offset of [0,-1]) {
-    const [start,end]=dateBounds(p.filters.from,p.filters.to,offset),where=[...acl.clauses,"date>=?","date<?"],args=[...acl.args,start,end];
+    const range=offset===0?period.current:period.previous,where=[...acl.clauses,"date>=?","date<=?"],args=[...acl.args,range.from,range.to];
     const total=await aggregate(e,row.id,m,where,args);
     const details=await aggregate(e,row.id,m,where,args,p.group);
     results.push({total:total[0],details});
@@ -430,7 +456,14 @@ export async function queryManual(e:Env,u:DbUser,p:Plan,versionId?:string):Promi
     const score=(r:Row)=>p.order==="current"?(r.values[p.metric].current??-Infinity):(r.values[p.metric].current??0)-(r.values[p.metric].previous??0);
     rows.sort((a,b)=>(p.order==="decline"?1:-1)*(score(a)-score(b))||a.name.localeCompare(b.name,"pt-BR"));
   }
-  return {total:pairRow("Total",results[0].total,results[1].total,m),rows:rows.slice(0,30),plan:p,asOf:new Date().toISOString(),truncated:rows.length>30,source:"Arquivo manual (D1)",sourceInfo:sourceInfo(row,m)};
+  const report:Report={total:pairRow("Total",results[0].total,results[1].total,m),rows:rows.slice(0,30),plan:p,asOf:new Date().toISOString(),truncated:rows.length>30,source:"Arquivo manual (D1)",sourceInfo:sourceInfo(row,m),comparison:period};
+  const available=(range:{from:string;to:string})=>range.from<=range.to&&range.from>=m.projection.from&&range.to<=m.projection.to;
+  for(const item of [report.total,...report.rows])for(const metric of metricKeys){
+    const bounds=p.group==="month"&&item!==report.total?nativePeriod(m,{...p.filters,from:item.name,to:item.name}):period;
+    if(!available(bounds.current))item.values[metric].current=null;
+    if(!available(bounds.previous))item.values[metric].previous=null;
+  }
+  return report;
 }
 function sourceInfo(row:ImportRow,m:ManualManifest):NonNullable<Report["sourceInfo"]>{return {versionId:row.id,extractedAt:m.extractedAt,sourceUpdatedAt:m.sourceUpdatedAt,referenceDate:m.referenceDate,coverage:{from:m.projection.from,to:m.projection.to},publishedAt:iso(row.published!),model:m.model.name,metrics:Object.fromEntries(metricKeys.map(id=>{const metric=m.metrics.find(x=>x.id===id);return [id,{status:metric?.status??"unavailable",reason:metric?.reason??(!metric?"Métrica não mapeada nesta versão.":undefined)}];})),capabilities:m.formatVersion===2?nativeCapabilities(m):undefined};}
 async function controlValue(e:Env,id:string,m:ManualManifest,metric:ManualMetric,filters:ControlFilters) {

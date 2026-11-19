@@ -2,6 +2,8 @@
 
 **Desenvolvido por Anderson de Araujo**
 
+A evolução 2.0 está documentada em [Entrega e limites de homologação](docs/ENTREGA-2.0.md), [Manual do usuário](docs/MANUAL-USUARIO-2.0.md) e [Administração](docs/ADMINISTRACAO-2.0.md). A publicação de produção exige aprovação; a configuração isolada está em `wrangler.hml.jsonc`.
+
 Aplicativo web instalável para consultar snapshots comerciais no D1 ou um modelo semântico no Power BI Service e interpretar seus resultados em português. O projeto reúne frontend React, API Cloudflare Workers, banco D1 e arquivos privados R2 no mesmo domínio. Login, consultas e conversas precisam do Worker e do banco.
 
 A rotina do operador está no [Manual de atualização semanal](docs/MANUAL-ATUALIZACAO-SEMANAL.md). Instalação do preparador Windows, restauração e limites semânticos estão em [Atualização de dados](docs/ATUALIZACAO-DADOS.md). A tela administrativa usa `/admin/atualizacao-dados`. O modo manual usa o login próprio e só publica depois de validar integralmente o pacote. Os resultados do aceite real devem ser conferidos no relatório de integração da entrega.
