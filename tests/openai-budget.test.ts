@@ -25,13 +25,13 @@ test("orçamento HML reserva atomicamente com concorrência e recusa antes de ex
   for (const result of attempts) if (result.status === "rejected") assert.equal(result.reason.status, 429);
 });
 
-test("ensaio HML permite no máximo oito tentativas e conserva reservas após falhas", async t => {
+test("retomada HML permite onze tentativas cumulativas incluindo diagnóstico e conserva reservas após falhas", async t => {
   const { env, sql } = store(); t.after(() => sql.close());
-  const reservations = await Promise.all(Array.from({ length: 8 }, () => reserveHmlOpenAI(env, "{}", "plano_comercial")));
+  const reservations = await Promise.all(Array.from({ length: 11 }, () => reserveHmlOpenAI(env, "{}", "plano_comercial")));
   for (const reserved of reservations) await finishHmlOpenAI(env, reserved, { status: "transport_error" });
   await assert.rejects(reserveHmlOpenAI(env, "{}", "plano_comercial"), error => error instanceof Problem && error.status === 429);
-  assert.equal(sql.prepare("SELECT COUNT(*) AS n FROM hml_openai_attempts WHERE status='transport_error'").get()!.n, 8);
-  assert.equal(sql.prepare("SELECT SUM(reserved_nano_usd) AS n FROM hml_openai_attempts").get()!.n, estimateHmlOpenAIRequest("{}").nanoUsd * 8);
+  assert.equal(sql.prepare("SELECT COUNT(*) AS n FROM hml_openai_attempts WHERE status='transport_error'").get()!.n, 11);
+  assert.equal(sql.prepare("SELECT SUM(reserved_nano_usd) AS n FROM hml_openai_attempts").get()!.n, estimateHmlOpenAIRequest("{}").nanoUsd * 11);
 });
 
 test("sem flag de orçamento o fluxo de produção não consulta ledger nem exige migração HML", async t => {

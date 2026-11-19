@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { assistantStatus, prepareVisit, reportInsights } from "../worker/commercial";
-import { canonicalState, comment, commentaryGrounded, conversationContext, interpret } from "../worker/assistant";
+import { canonicalState, comment, commentaryGrounded, conversationContext, factualCommentary, interpret } from "../worker/assistant";
 import { resolvePlanEntities } from "../worker/providers";
 import type { DataProvider } from "../worker/providers";
 import { Problem } from "../worker/core";
@@ -129,6 +129,52 @@ test("OpenAI trata rede, recusa, respostas inválidas e limite de corpo com erro
   await assert.rejects(comment(env, "Analise", r), error => error instanceof Problem && error.status === 422);
   answer = async () => new Response("x".repeat(512 * 1024 + 1));
   await assert.rejects(comment(env, "Analise", r), error => error instanceof Problem && error.status === 502 && /limite/.test(error.message));
+});
+
+test("pergunta independente sem data preserva o mês ativo mesmo se o modelo ampliar a janela de visita", async t => {
+  const { env, sql } = makeStore(); t.after(() => sql.close());
+  t.mock.method(globalThis, "fetch", async () => Response.json({ status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify({ supported: true, reason: "", inheritContext: false,
+    ...plan, filters: { ...filters, from: "2025-01", to: "2026-01", client: "0001" } }) }] }] }));
+  const semantic = { allowAI: true, measures: { revenue: "Líquido", margin: null, returns: null, buyers: null } };
+  const active = { ...filters, from: "2026-01", to: "2026-01" };
+  const resolved = await interpret(env, semantic, "Vou visitar o cliente 0001. Prepare minha reunião.", active, []);
+  assert.deepEqual([resolved.filters.from, resolved.filters.to], ["2026-01", "2026-01"]);
+  assert.equal(resolved.filters.client, "0001");
+  const explicit = await interpret(env, semantic, "Compare janeiro de 2025 a janeiro de 2026 para o cliente 0001", active, []);
+  assert.deepEqual([explicit.filters.from, explicit.filters.to], ["2025-01", "2026-01"]);
+});
+
+test("guardas comerciais recusam margem inventada, atribuição de total M:M e extremos de linha parcial", () => {
+  const r = report(plan);
+  assert.equal(commentaryGrounded({ summary: "A margem bruta avançou de 80 para 135.", actions: [] }, r), false);
+  assert.equal(commentaryGrounded({ summary: "Não há dados disponíveis de margem.", actions: [] }, r), true);
+  assert.equal(commentaryGrounded({ summary: "Faturamento de R$ 70,00 ante R$ 130,00; queda de 46,15%.", actions: [] }, r), true);
+  const grouped = report({ ...plan, group: "client" });
+  grouped.total = row("Total", -50, 100); grouped.rows = [row("0001", 70, 100), row("0002", 20, 0)];
+  grouped.warnings = ["Relacionamentos muitos-para-muitos: não some as linhas para reconstruir o total."];
+  assert.equal(commentaryGrounded({ summary: "O total caiu para -50; outros clientes não listados explicam a queda.", actions: [] }, grouped), false);
+  assert.equal(commentaryGrounded(factualCommentary(grouped), grouped), true);
+  assert.equal(commentaryGrounded({ ...factualCommentary(grouped), actions: ["Outros clientes explicam a queda."] }, grouped), false);
+  const timeline = report(plan);
+  timeline.rows = [row("2026-01", 50, 100), row("2026-02", 70, 130)];
+  assert.equal(commentaryGrounded({ summary: "O pico foi de 50.", actions: [] }, timeline), false);
+  assert.equal(commentaryGrounded({ summary: "O pico foi de 70.", actions: [] }, timeline), true);
+  timeline.truncated = true;
+  assert.equal(commentaryGrounded({ summary: "O pico foi de 70.", actions: [] }, timeline), false);
+  assert.equal(commentaryGrounded(factualCommentary(timeline), timeline), true);
+  assert.equal(commentaryGrounded({ summary: "Houve uma única compra registrada.", actions: [] }, r), false);
+});
+
+test("divergência de agrupamento M:M usa fatos calculados sem pagar chamada de narrativa", async t => {
+  const { env, sql } = makeStore(); t.after(() => sql.close());
+  const grouped = report({ ...plan, group: "client" });
+  grouped.total = row("Total", -50, 100); grouped.rows = [row("0001", 70, 100), row("0002", 20, 0)];
+  grouped.warnings = ["Relacionamentos muitos-para-muitos: não some as linhas para reconstruir o total."];
+  const fetch = t.mock.method(globalThis, "fetch", async () => { throw new Error("Não deve enviar narrativa"); });
+  const result = await comment(env, "Quais clientes mais perderam faturamento?", grouped);
+  assert.deepEqual(result, factualCommentary(grouped));
+  assert.equal(commentaryGrounded(result, grouped), true);
+  assert.equal(fetch.mock.callCount(), 0);
 });
 
 test("comentário aceita formatos monetários válidos e rejeita números ou percentuais inventados", async t => {

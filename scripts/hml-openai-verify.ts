@@ -1,14 +1,18 @@
 /** Live-provider acceptance. Never run against production; never receives an OpenAI key.
  * node --import tsx scripts/hml-openai-verify.ts --execute-authorized-live
+ * Add --resume-visit-followup to reuse verified national/client financial evidence without new calls.
  * Only the isolated Worker uses its own secret. All evidence remains under .wrangler/hml.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { constants, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { parse } from "jsonc-parser";
 import type { Commentary, Filters, Plan, Report, Session } from "../shared/domain";
 import type { AssistantStatus, VisitBriefing } from "../shared/commercial";
+import { commentaryGrounded, factualCommentary } from "../worker/assistant";
 
 export const hmlOrigin = "https://commercial-insight-hml.araujo-anderson26.workers.dev";
 const privateRoot = resolve(".wrangler/hml");
@@ -18,6 +22,16 @@ export function privateEvidencePath(value: string) {
   const path = resolve(value), rel = relative(privateRoot, path);
   if (!rel || rel.startsWith("..") || isAbsolute(rel)) throw Error("Evidence must remain inside .wrangler/hml.");
   return path;
+}
+export function archivePreviousEvidence(path: string, runId: string) {
+  const source = privateEvidencePath(path);
+  assert.match(runId, /^[a-f0-9-]{36}$/);
+  if (!existsSync(source)) return null;
+  const timestamp = new Date().toISOString().replaceAll(":", "-");
+  const archive = privateEvidencePath(`.wrangler/hml/archive/openai-api-verification-${timestamp}-${runId}.json`);
+  mkdirSync(dirname(archive), { recursive: true });
+  copyFileSync(source, archive, constants.COPYFILE_EXCL);
+  return relative(resolve(), archive);
 }
 export function validateLiveConfiguration(config: unknown, approved: unknown) {
   const value = config as { name?: string; vars?: Record<string, unknown>; d1_databases?: { database_id?: string }[] };
@@ -40,11 +54,45 @@ type Actor = { email: string; password: string; cookie?: string };
 type DataStatus = { source: string; staleDays: number; allowAI: boolean; active: { id: string; model: string } | null };
 type ChatResponse = { id: string; turn: string; report: Report; commentary: Commentary; visit?: VisitBriefing };
 type Check = { name: string; passed: boolean };
+const nationalCheck = "live commercial question matches the national synthetic financial evidence";
+const clientCheck = "live client-loss question resolves a typed ranking with descriptions";
 const filters: Filters = { from: "2026-01", to: "2026-01", region: "", client: "", product: "" };
 const baselinePlan: Plan = { metric: "revenue", group: "month", order: "current", filters };
 
+export function liveAcceptanceMode(argv: readonly string[]) {
+  const resume = argv.includes("--resume-visit-followup");
+  return { mode: resume ? "visit-followup" : "full", chatAllowance: resume ? 2 : 4, providerAttemptAllowance: resume ? 4 : 8 } as const;
+}
+export function validateResumeEvidence(previous: unknown, expectedVersion: string, configuredModel: string) {
+  const prior = previous as { runId: string; origin: string; synthetic: boolean; model: string; budgetUsd: number; policyRestored: boolean; sessionsClosed: boolean;
+    checks: Check[]; responses: { name: string; value: ChatResponse }[] };
+  assert.match(prior.runId, /^[a-f0-9-]{36}$/);
+  assert.equal(prior.origin, hmlOrigin); assert.equal(prior.synthetic, true); assert.equal(prior.model, configuredModel); assert.equal(prior.budgetUsd, budgetUsd);
+  assert.equal(prior.policyRestored, true); assert.equal(prior.sessionsClosed, true);
+  const checks = [nationalCheck, clientCheck].map(name => {
+    assert.equal(prior.checks.filter(item => item.name === name && item.passed).length, 1);
+    return { name, passed: true };
+  });
+  for (const name of ["national", "declining-clients"]) {
+    const matches = prior.responses.filter(item => item.name === name); assert.equal(matches.length, 1);
+    assert.match(matches[0].value.turn, /^[a-f0-9-]{36}$/);
+    const value = matches[0].value.report;
+    assert.equal(value.sourceInfo?.versionId, expectedVersion); assert.equal(value.sourceInfo?.model, syntheticModel);
+    assert.equal(value.plan.metric, "revenue");
+    assert.equal(value.plan.filters.from, filters.from); assert.equal(value.plan.filters.to, filters.to);
+    for (const dimension of ["client", "product", "region"] as const) assert.equal(value.plan.filters[dimension], "");
+    assert.deepEqual([value.total.values.gross.current, value.total.values.returns.current, value.total.values.revenue.current, value.total.values.revenue.previous, value.total.values.buyers.current], [350, 1034, -684, 90, 2]);
+    if (name === "declining-clients") {
+      assert.equal(value.plan.group, "client"); assert.equal(value.plan.order, "decline"); assert.ok(value.rows.length > 0);
+      assert.ok(value.rows.every(row => row.name.includes("Cliente SINTÉTICO")));
+    }
+  }
+  return { runId: prior.runId, acceptedFinancialChecks: checks, responseNames: ["national", "declining-clients"], priorNarrativeRevalidationRequired: true };
+}
+
 export async function runLiveAcceptance() {
   assert.ok(process.argv.includes("--execute-authorized-live"), "Explicit live acceptance flag is required.");
+  const mode = liveAcceptanceMode(process.argv);
   const configuredModel = validateLiveConfiguration(
     parse(readFileSync(resolve("wrangler.hml.jsonc"), "utf8")),
     JSON.parse(readFileSync(privateEvidencePath(".wrangler/hml/openai-test-budget.json"), "utf8")),
@@ -61,8 +109,18 @@ export async function runLiveAcceptance() {
     assert.ok(typeof actor.password === "string" && actor.password.length >= 16);
   }
   const artifact = privateEvidencePath(".wrangler/hml/openai-api-verification.json");
-  const report = { origin: hmlOrigin, synthetic: true, model: configuredModel, budgetUsd, startedAt: new Date().toISOString(), completedAt: "", apiChecksPassed: false,
+  const previousRunEvidence = mode.mode === "visit-followup"
+    ? JSON.parse(readFileSync(artifact, "utf8")) as { responses: { name: string; value: ChatResponse }[] }
+    : null;
+  const inheritedEvidence = previousRunEvidence ? validateResumeEvidence(previousRunEvidence, expectedVersion, configuredModel) : null;
+  const runId = randomUUID(), previousEvidenceArchive = archivePreviousEvidence(artifact, runId);
+  const report = { runId, previousEvidenceArchive, cumulativeBudgetPreserved: true, budgetLedgerResetRequested: false,
+    runMode: mode.mode, inheritedEvidence: inheritedEvidence ? { ...inheritedEvidence, archivePath: previousEvidenceArchive } : null,
+    newRunChatAllowance: mode.chatAllowance, newRunProviderAttemptAllowance: mode.providerAttemptAllowance,
+    origin: hmlOrigin, synthetic: true, model: configuredModel, budgetUsd, startedAt: new Date().toISOString(), completedAt: "", apiChecksPassed: false,
     externalProviderLedgerVerificationRequired: true, requests: 0, chatRequests: 0, checks: [] as Check[], failures: [] as string[],
+    httpFailures: [] as { method: string; path: string; status: number }[],
+    storedNarrativeReplays: [] as { name: string; turn: string; reportReconciled: boolean; guardAccepted: boolean; factualFallback: boolean; previousNarrativeAccepted: boolean; previousNarrativeChanged: boolean }[],
     responses: [] as { name: string; value: ChatResponse }[], policyRestored: false, sessionsClosed: false };
   const admin = actors.get("admin")!, sales = actors.get("sales")!, other = actors.get("other")!;
   let original: Pick<DataStatus, "source" | "staleDays" | "allowAI"> | undefined;
@@ -76,7 +134,11 @@ export async function runLiveAcceptance() {
     if (actor.cookie) headers.Cookie = actor.cookie;
     report.requests++;
     const response = await fetch(hmlOrigin + "/api/" + path, { method, headers, body: value === undefined ? undefined : JSON.stringify(value), redirect: "error", signal: AbortSignal.timeout(100000) });
-    assert.ok(expected.includes(response.status), `Unexpected status for ${method} ${path}.`);
+    if (!expected.includes(response.status)) {
+      report.httpFailures.push({ method, path, status: response.status }); flush();
+      await response.body?.cancel().catch(() => {});
+      throw Error("Unexpected HTTP status.");
+    }
     const text = await response.text();
     if (response.status === 200 && path !== "auth/login") assert.match(response.headers.get("cache-control") ?? "", /no-store/i);
     return { data: (text ? JSON.parse(text) : null) as T, response };
@@ -88,7 +150,7 @@ export async function runLiveAcceptance() {
     return (await api<Session>("me", "GET", undefined, actor)).data;
   }
   async function chat(name: string, question: string, actor: Actor, conversation: string | null = null) {
-    assert.ok(report.chatRequests < 4, "The four-question allowance is exhausted.");
+    assert.ok(report.chatRequests < mode.chatAllowance, "The new-run question allowance is exhausted.");
     report.chatRequests++; flush(); // Count uncertain/failed requests too; there is no automatic retry.
     const { data } = await api<ChatResponse>("chat", "POST", { question, filters, conversation }, actor);
     assert.equal(data.report.sourceInfo?.versionId, expectedVersion);
@@ -117,17 +179,41 @@ export async function runLiveAcceptance() {
     await api("chat", "POST", { question: "Como está meu resultado comercial?", filters, conversation: null }, actors.get("operator")!, [403]);
     await api("report", "POST", { ...baselinePlan, filters: { ...filters, client: "0002" } }, sales, [403]);
     checked("synthetic version, live credential presence, deterministic baseline and ACL preflight");
+    if (previousRunEvidence && report.inheritedEvidence) {
+      for (const name of ["national", "declining-clients"]) {
+        const previous: ChatResponse = previousRunEvidence.responses.find(item => item.name === name)!.value;
+        const replayResponse: { data: Omit<ChatResponse, "id" | "turn">; response: Response } = await api<Omit<ChatResponse, "id" | "turn">>(`turns/${previous.turn}/reopen`, "POST", {}, admin);
+        const reopened: Omit<ChatResponse, "id" | "turn"> = replayResponse.data;
+        assert.equal(reopened.report.sourceInfo?.versionId, expectedVersion); assert.equal(reopened.report.sourceInfo?.model, syntheticModel);
+        assert.deepEqual(reopened.report.plan, previous.report.plan); assert.deepEqual(reopened.report.total, previous.report.total);
+        const { data: deterministic } = await api<Report>("report", "POST", reopened.report.plan, admin);
+        assert.deepEqual(reopened.report.total, deterministic.total); assert.deepEqual(reopened.report.rows, deterministic.rows);
+        const guardAccepted = commentaryGrounded(reopened.commentary, reopened.report);
+        const factualFallback = isDeepStrictEqual(reopened.commentary, factualCommentary(reopened.report));
+        assert.ok(guardAccepted || factualFallback, "Reopened narrative must pass the current guard or equal computed factual commentary.");
+        const previousNarrativeAccepted = commentaryGrounded(previous.commentary, previous.report);
+        assert.equal(previousNarrativeAccepted, false, "The previously observed unsupported narrative must be rejected by the corrected guard.");
+        const previousNarrativeChanged = !isDeepStrictEqual(previous.commentary, reopened.commentary);
+        assert.equal(previousNarrativeAccepted, false, "The known-invalid original narrative must be rejected by the current guard.");
+        assert.ok(previousNarrativeChanged, "Rejected stored narrative must be replaced when reopened.");
+        report.storedNarrativeReplays.push({ name, turn: previous.turn, reportReconciled: true, guardAccepted, factualFallback, previousNarrativeAccepted, previousNarrativeChanged }); flush();
+      }
+      report.inheritedEvidence.priorNarrativeRevalidationRequired = false;
+      checked("stored national and client-loss narratives are revalidated against current guards without OpenAI calls");
+    }
     policyTouched = true;
     await api("admin/data/settings", "PUT", { ...original, allowAI: true });
     const { data: ready } = await api<AssistantStatus>("assistant/status"); assert.equal(ready.ready, true);
     checked("AI enabled only for the synthetic homologation source during this acceptance");
-    const national = await chat("national", "Como está meu resultado comercial?", admin);
-    assert.equal(national.report.plan.metric, "revenue"); assert.equal(national.report.total.values.revenue.current, -684); assert.equal(national.report.total.values.revenue.previous, 90);
-    checked("live commercial question matches the national synthetic financial evidence");
-    const declining = await chat("declining-clients", "Quais clientes mais perderam faturamento?", admin);
-    assert.equal(declining.report.plan.metric, "revenue"); assert.equal(declining.report.plan.group, "client"); assert.equal(declining.report.plan.order, "decline");
-    assert.ok(declining.report.rows.every(row => row.name.includes("Cliente SINTÉTICO")));
-    checked("live client-loss question resolves a typed ranking with descriptions");
+    if (mode.mode === "full") {
+      const national = await chat("national", "Como está meu resultado comercial?", admin);
+      assert.equal(national.report.plan.metric, "revenue"); assert.equal(national.report.total.values.revenue.current, -684); assert.equal(national.report.total.values.revenue.previous, 90);
+      checked(nationalCheck);
+      const declining = await chat("declining-clients", "Quais clientes mais perderam faturamento?", admin);
+      assert.equal(declining.report.plan.metric, "revenue"); assert.equal(declining.report.plan.group, "client"); assert.equal(declining.report.plan.order, "decline");
+      assert.ok(declining.report.rows.every(row => row.name.includes("Cliente SINTÉTICO")));
+      checked(clientCheck);
+    }
     const visit = await chat("visit", "Vou visitar o cliente 0001. Prepare minha reunião.", sales);
     assert.equal(visit.report.plan.filters.client, "0001"); assert.ok(visit.visit); assert.equal(visit.visit.client.code, "0001");
     assert.equal(visit.visit.timeline.total.values.revenue.current, 135); assert.equal(visit.visit.timeline.total.values.revenue.previous, 90);
@@ -162,7 +248,7 @@ export async function runLiveAcceptance() {
     report.sessionsClosed = [...actors.values()].every(actor => !actor.cookie);
     report.apiChecksPassed &&= report.failures.length === 0 && report.policyRestored && report.sessionsClosed;
     report.completedAt = new Date().toISOString(); flush();
-    process.stdout.write(JSON.stringify({ apiChecksPassed: report.apiChecksPassed, externalProviderLedgerVerificationRequired: true, checks: report.checks.length, chatRequests: report.chatRequests, requests: report.requests, policyRestored: report.policyRestored, sessionsClosed: report.sessionsClosed, privateReport: relative(resolve(), artifact), failures: report.failures }) + "\n");
+    process.stdout.write(JSON.stringify({ runId, runMode: mode.mode, previousEvidenceArchive, inheritedFinancialCases: inheritedEvidence?.responseNames ?? [], apiChecksPassed: report.apiChecksPassed, externalProviderLedgerVerificationRequired: true, checks: report.checks.length, chatRequests: report.chatRequests, requests: report.requests, policyRestored: report.policyRestored, sessionsClosed: report.sessionsClosed, privateReport: relative(resolve(), artifact), failures: report.failures, httpFailures: report.httpFailures }) + "\n");
   }
 }
 

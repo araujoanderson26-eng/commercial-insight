@@ -44,7 +44,7 @@ Também foi produzido um briefing com dados reais locais sem OpenAI e sem escrit
 
 | Verificação | Resultado |
 | --- | --- |
-| Suíte automatizada | **82 testes aprovados, zero falhas e zero skips** após os novos bloqueios de homologação; inclui cálculos, importação, escopo, OpenAI mock, contexto, visitas, histórico, Excel e recusa de pacotes não sintéticos na homologação. |
+| Suíte automatizada | **97 testes aprovados, zero falhas e zero skips**; inclui cálculos, importação, escopo, OpenAI mock, contexto, visitas, histórico, Excel, proteção de orçamento e recusa de pacotes não sintéticos na homologação. |
 | Typecheck, lint e build | Aprovados. Build remove duas anotações não interpretáveis de comentários da dependência Zod; sem falha de compilação. |
 | Interface Edge desktop/celular | Três suítes aprovadas: atualização/restauração, contratos nativos e fluxo executivo com visita, histórico, favorito, YTD, Excel e impressão/PDF. |
 | Conciliação real local | **272/272 controles**, contagens raw/nativas conferidas em SQLite somente leitura. |
@@ -52,13 +52,13 @@ Também foi produzido um briefing com dados reais locais sem OpenAI e sem escrit
 | npm audit | Zero vulnerabilidades reportadas. |
 | NuGet | Nenhuma dependência vulnerável reportada pela consulta de vulnerabilidades. |
 | Gitleaks | Histórico sem secrets encontrados; artefatos privados excluídos do Git. |
-| Homologação remota | Worker isolado publicado com os três vínculos próprios e seis migrações; **12 verificações API e 10 de navegador aprovadas**, apenas dados sintéticos, 36/36 controles. [Ambiente, evidências e limites](HOMOLOGACAO-EXECUCAO.md). |
+| Homologação remota | Worker isolado publicado com os três vínculos próprios e sete migrações; **12 verificações API e 10 de navegador aprovadas**, apenas dados sintéticos, 36/36 controles. OpenAI real validada com quatro cenários e retomada final de seis verificações. [Ambiente, evidências e limites](HOMOLOGACAO-EXECUCAO.md). |
 
 O primeiro ensaio de testes encontrou restrições de leitura do sandbox e depois referências ao cache NuGet com caminho longo após a auditoria. O restore em modo locked no cache original resolveu o ambiente, e a suíte completa foi repetida com todos os testes habilitados. Nenhum teste foi removido ou marcado como ignorado para obter o resultado.
 
 ## Limitações e aceite pendente
 
-1. **OpenAI real:** a chave foi cadastrada pelo titular e o primeiro ensaio real recebeu HTTP 401 `invalid_api_key`. A execução parou, restaurou a política de IA e manteve a reserva conservadora do orçamento de US$ 0,10. Faltam recadastro seguro de uma chave válida e teste bem-sucedido de modelo/uso. [Protocolo e evidência](HOMOLOGACAO-OPENAI.md).
+1. **OpenAI com dados da empresa:** a chave recadastrada e `gpt-4.1-mini-2025-04-14` foram validados em homologação sintética. O ensaio custou US$ 0,0041168 pelo cálculo dos tokens retornados, dentro do teto de US$ 0,10. A fonte voltou a IA desabilitada ao terminar. Dados reais e uma nova rodada continuam sujeitos à autorização e revisão de orçamento. [Protocolo e evidência](HOMOLOGACAO-OPENAI.md).
 2. **Operação de homologação:** [ambiente isolado publicado](https://commercial-insight-hml.araujo-anderson26.workers.dev), após conferência financeira manual e autorização do titular; somente dados sintéticos. Resultados, acesso, limites, consumo observado e execução dos agendamentos estão em [Homologação](HOMOLOGACAO-EXECUCAO.md) e [Custos](HOMOLOGACAO-CUSTOS.md). A observação da limpeza diária e o aceite com dados reais continuam separados desta validação sintética.
 3. **Exemplo financeiro original:** janeiro–outubro de 2026 já foi conferido; ainda requer os demais filtros combinados, usuário/escopo e versão da tela observada. O diagnóstico privado registra exatamente os recortes reproduzidos.
 4. **Narrativa de IA:** guardas rejeitam números não sustentados e percentuais inválidos; não constituem prova formal de todas as associações e causas descritas pelo modelo. Gráficos/tabelas permanecem a evidência verificável; causas comerciais exigem confirmação.

@@ -46,7 +46,7 @@ npx wrangler r2 bucket create commercial-insight-hml-arquivos
 npx wrangler queues create commercial-insight-hml-jobs
 ```
 
-O UUID isolado já foi preenchido e as seis migrações aplicadas. Para uma próxima alteração aprovada, confira conta, nome do Worker e origem e use sempre a configuração explícita de homologação:
+O UUID isolado já foi preenchido e as sete migrações aplicadas, incluindo o registro cumulativo do orçamento de teste OpenAI. A fonte ficou com IA desabilitada ao concluir o ensaio; [resultados, saldo conservador e condições para uma nova rodada](HOMOLOGACAO-OPENAI.md). Para uma próxima alteração aprovada, confira conta, nome do Worker e origem e use sempre a configuração explícita de homologação:
 
 ```powershell
 npm run check:hml

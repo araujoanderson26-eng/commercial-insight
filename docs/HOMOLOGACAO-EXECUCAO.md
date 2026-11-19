@@ -13,7 +13,7 @@ URL: **https://commercial-insight-hml.araujo-anderson26.workers.dev**
 | D1 | `commercial-insight-hml-db`, UUID `9717c220-a4b4-4fad-8183-f2b733787b61`, região ENAM, replicação desativada. |
 | R2 | `commercial-insight-hml-arquivos`, Standard, região ENAM; r2.dev desabilitado e nenhum domínio público. |
 | Queue | `commercial-insight-hml-jobs`, ID `c7b810c2c15d4e91b6eeb8af23e0cda8`; produtor e consumidor exclusivos do Worker de homologação. |
-| Migrações | As seis migrações, até `0006_commercial_workspace.sql`, aplicadas somente no D1 acima. |
+| Migrações | As sete migrações, até `0007_hml_openai_budget.sql`, aplicadas somente no D1 acima. |
 | Credenciais | Administrador e perfis de teste novos e sintéticos; nenhum secret OpenAI/Microsoft/e-mail herdado. |
 
 O rótulo `version: production` retornado pelo serviço D1 identifica a geração do mecanismo; não significa que o banco da aplicação de produção foi usado. Nome e UUID acima são próprios da homologação.
@@ -48,7 +48,7 @@ O aceite HTTPS `scripts/hml-verify.ts` passou **12 verificações**, com **87 re
 - OpenAI desabilitada, ausência de credencial e nenhuma chamada ao modelo.
 - Encerramento das sete sessões automatizadas no término.
 
-Evidência privada: `.wrangler/hml/api-verification.json`. Contas sintéticas e duas importações foram conservadas para revisão. Os testes locais continuam aprovados: **82 testes, zero falhas e zero skips**, build, typecheck e lint; tipos de homologação gerados pelo Wrangler.
+Evidência privada: `.wrangler/hml/api-verification.json`. Contas sintéticas e duas importações foram conservadas para revisão. Após o ensaio real da OpenAI e as correções, os testes locais passaram a **97 testes, zero falhas e zero skips**, com build, typecheck e lint aprovados; tipos de homologação gerados pelo Wrangler.
 
 O aceite no navegador real passou **10 verificações**, sem erros de JavaScript: login, fonte sintética, métricas, código/descrição, Excel, favorito reaberto, preparação de visita, atividade diária, impressão/PDF, apresentação das pendências de IA e logout. Desktop de 1440 pixels e celular de 390 pixels não apresentaram transbordamento horizontal. Os arquivos exportados, capturas e relatório estão em `.wrangler/hml/browser-2026-11-19T10-49-51-741Z/`. Os ajustes necessários foram nos seletores e expectativas do script de teste; não exigiram alteração do Worker publicado.
 
@@ -68,6 +68,8 @@ Os limites operacionais não são um teto financeiro global. Não houve contrata
 ## Próxima etapa: OpenAI
 
 Na implantação inicial, o ambiente usava `OPENAI_MODEL=gpt-4.1-mini`, sem `OPENAI_API_KEY` e com IA desautorizada na fonte. Posteriormente, o titular cadastrou a chave exclusiva da homologação e autorizou um ensaio com orçamento inicial de **US$ 0,10**. O protocolo, a estimativa e os resultados estão em [Ensaio OpenAI](HOMOLOGACAO-OPENAI.md). Os relatórios e as visitas determinísticas funcionam sem o modelo.
+
+O ensaio final confirmou `gpt-4.1-mini-2025-04-14`, quatro cenários comerciais conciliados e custo conhecido calculado de **US$ 0,0041168**. As reservas acumuladas ficaram em **US$ 0,0413548**, mantendo inclusive o 401 inicial. A versão atual do Worker de homologação é `cfa16957-ebcd-425d-8159-8fafee03be15`; o snapshot sintético continua `22d3cefc-fa80-4077-95b8-e332da803ed4`. A IA voltou a desabilitada e as sessões de teste foram encerradas após o aceite; nenhuma nova geração é feita ao reabrir os relatórios salvos.
 
 Na consulta de 19/11/2026, o [catálogo oficial do modelo](https://developers.openai.com/api/docs/models/gpt-4.1-mini) marca GPT-4.1 mini como descontinuado (`Deprecated`). Isso exige conferir a disponibilidade na conta e, se necessário, validar um modelo substituto compatível antes de ativar chamadas. Nenhuma disponibilidade foi presumida ou troca de modelo foi implantada nesta etapa.
 

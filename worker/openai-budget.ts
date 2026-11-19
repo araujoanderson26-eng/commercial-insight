@@ -1,6 +1,8 @@
 import { fail, now, stmt, type Env } from "./core";
 
 // This allowance is deliberately cumulative across deployments and users. No automatic reset.
+// Preserve the credential diagnostic and six calls from the first run; allow four focused rechecks.
+const maximumCumulativeAttempts = 11;
 const hmlOrigin = "https://commercial-insight-hml.araujo-anderson26.workers.dev";
 const models = new Set(["gpt-4.1-mini", "gpt-4.1-mini-2025-04-14"]);
 const inputNanoUsd = 400, outputNanoUsd = 1600;
@@ -64,11 +66,11 @@ export async function reserveHmlOpenAI(e: Env, body: string, purpose: string): P
     inserted = await stmt(e, `INSERT INTO hml_openai_attempts
       (id,model,purpose,reserved_nano_usd,reserved_input_tokens,output_limit,status,created)
       SELECT ?,?,?,?,?,?,'reserved',?
-      WHERE (SELECT COUNT(*) FROM hml_openai_attempts)<8
+      WHERE (SELECT COUNT(*) FROM hml_openai_attempts)<?
         AND (SELECT COALESCE(SUM(reserved_nano_usd),0) FROM hml_openai_attempts)+?<=?
         AND NOT EXISTS(SELECT 1 FROM hml_openai_attempts WHERE status IN ('usage_exceeded_reservation','model_mismatch'))
       RETURNING id`, id, e.OPENAI_MODEL, purpose, estimate.nanoUsd, estimate.inputTokens,
-    hmlOpenAIOutputLimit, now(), estimate.nanoUsd, cap).first<{ id: string }>();
+    hmlOpenAIOutputLimit, now(), maximumCumulativeAttempts, estimate.nanoUsd, cap).first<{ id: string }>();
   } catch {
     fail(503, "Não foi possível reservar o orçamento OpenAI da homologação. Nenhuma nova chamada foi iniciada.");
   }
