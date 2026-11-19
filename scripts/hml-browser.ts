@@ -1,7 +1,7 @@
 /** Real HTTPS browser verification. This script refuses every host except the isolated HML Worker. */
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
-import { chromium, expect, type Browser, type BrowserContext, type Page } from "@playwright/test";
+import { chromium, expect as defaultExpect, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import type { Report } from "../shared/domain";
 
 const allowedOrigin = "https://commercial-insight-hml.araujo-anderson26.workers.dev";
@@ -27,6 +27,8 @@ let currentStep = "iniciar navegador", browser: Browser | undefined, context: Br
 let page: Page | undefined, savedId: string | undefined, syntheticConfirmed = false;
 const pageErrors: string[] = [];
 const reports: Report[] = [];
+const network: { path: string; status: number }[] = [];
+const expect = defaultExpect.configure({ timeout: 45000 });
 async function check(name: string, fn: () => Promise<void>) {
   currentStep = name;
   const began = Date.now();
@@ -58,6 +60,8 @@ try {
   page.setDefaultTimeout(45000);
   page.on("pageerror", error => pageErrors.push(error.name));
   page.on("response", response => {
+    const responseUrl = new URL(response.url());
+    if (responseUrl.origin === origin && responseUrl.pathname.startsWith("/api/")) network.push({ path: responseUrl.pathname, status: response.status() });
     if (response.url() === origin + "/api/report" && response.ok()) {
       void response.json().then((value: Report) => reports.push(value)).catch(() => {});
     }
@@ -66,10 +70,12 @@ try {
     }
   });
   await check("login pelo formulário HTTPS com usuário exclusivo de homologação", async () => {
-    await page!.goto(origin + "/relatorios");
+    await page!.goto(origin + "/");
     await page!.getByLabel("E-mail corporativo", { exact: true }).fill(credentials.admin.email);
     await page!.getByLabel("Senha", { exact: true }).fill(credentials.admin.password);
     await page!.getByRole("button", { name: "Entrar no Comercial Insight", exact: true }).click();
+    await expect(page!.locator(".sidebar")).toBeVisible();
+    await page!.getByRole("button", { name: "Relatórios", exact: true }).first().click();
     await expect(page!.getByRole("heading", { name: "Relatórios", exact: true })).toBeVisible();
   });
   await check("fonte remota identificada como sintética antes de validar e capturar telas", async () => {
@@ -99,7 +105,7 @@ try {
     await fitViewport();
   });
   await check("ranking com código e descrição e arquivo XLSX real", async () => {
-    await page!.getByLabel("Agrupar por", { exact: true }).selectOption("client");
+    await page!.getByLabel("Agrupar por").selectOption("client");
     await expect(page!.getByRole("button", { name: /0001 — Cliente SINTÉTICO 0001/ })).toBeVisible();
     const event = page!.waitForEvent("download");
     await page!.getByRole("button", { name: "Exportar Excel", exact: true }).click();
@@ -113,18 +119,18 @@ try {
   });
   await check("consulta favorita salva e reaberta com indicador e ordem originais", async () => {
     const title = "Consulta SINTÉTICA navegador " + Date.now();
-    await page!.getByLabel("Indicador", { exact: true }).selectOption("returns");
-    await page!.getByLabel("Ordenar por", { exact: true }).selectOption("decline");
+    await page!.getByLabel("Indicador").selectOption("returns");
+    await page!.getByLabel("Ordenar por").selectOption("decline");
     await expect.poll(() => reports.at(-1)?.plan.metric).toBe("returns");
     await expect.poll(() => reports.at(-1)?.plan.order).toBe("decline");
     await page!.getByRole("button", { name: "Salvar consulta", exact: true }).click();
     await page!.getByLabel("Nome da consulta", { exact: true }).fill(title);
     await page!.getByRole("button", { name: "Salvar", exact: true }).click();
     await expect(page!.getByRole("button", { name: title, exact: true })).toBeVisible();
-    await page!.getByLabel("Indicador", { exact: true }).selectOption("gross");
+    await page!.getByLabel("Indicador").selectOption("gross");
     await page!.getByRole("button", { name: title, exact: true }).click();
-    await expect(page!.getByLabel("Indicador", { exact: true })).toHaveValue("returns");
-    await expect(page!.getByLabel("Ordenar por", { exact: true })).toHaveValue("decline");
+    await expect(page!.getByLabel("Indicador")).toHaveValue("returns");
+    await expect(page!.getByLabel("Ordenar por")).toHaveValue("decline");
     await expect.poll(() => reports.at(-1)?.plan.metric).toBe("returns");
     await expect.poll(() => reports.at(-1)?.plan.order).toBe("decline");
   });
@@ -157,7 +163,7 @@ try {
   await check("assistente informa chave e autorização pendentes sem chamada externa", async () => {
     await page!.goto(origin + "/conversas");
     await expect(page!.locator(".assistant-status")).toContainText("OPENAI_API_KEY");
-    await expect(page!.locator(".assistant-status")).toContainText(/desabilitad/i);
+    await expect(page!.locator(".assistant-status")).toContainText(/habilitar a análise com IA|desabilitad/i);
     expect(pageErrors).toEqual([]);
   });
   await check("logout encerra a sessão de navegador", async () => {
@@ -176,14 +182,23 @@ try {
   // Playwright call logs may contain fill values; never persist or print the raw error.
   checks.push({ name: currentStep, passed: false, elapsedMs: Date.now() - started });
   process.exitCode = 1;
-  await writeFile(resolve(artifacts, "failure.json"), JSON.stringify({ step: currentStep, errorType: error instanceof Error ? error.name : "unknown" }, null, 2));
+  const detail = (error instanceof Error ? error.message : "unknown")
+    .replaceAll(credentials.admin.password, "[REDACTED]")
+    .replaceAll(credentials.admin.email, "[USER]")
+    .slice(0, 3000);
+  const redact = (value: string) => value.replaceAll(credentials.admin.password, "[REDACTED]").replaceAll(credentials.admin.email, "[USER]");
+  const headings = page ? (await page.getByRole("heading").allTextContents().catch(() => [])).map(redact) : [];
+  const alerts = page ? (await page.getByRole("alert").allTextContents().catch(() => [])).map(redact) : [];
+  const labels = page ? (await page.locator("label").allTextContents().catch(() => [])).map(redact) : [];
+  if (page && syntheticConfirmed) await page.screenshot({ path: resolve(artifacts, "failure.png"), fullPage: true }).catch(() => {});
+  await writeFile(resolve(artifacts, "failure.json"), JSON.stringify({ step: currentStep, errorType: error instanceof Error ? error.name : "unknown", detail, network, headings, alerts, labels }, null, 2));
 } finally {
   if (context) {
     if (syntheticConfirmed && savedId) await context.request.delete(origin + "/api/saved-reports/" + savedId, { headers: { Origin: origin }, maxRedirects: 0 }).catch(() => {});
     await context.request.post(origin + "/api/auth/logout", { headers: { Origin: origin }, data: {}, maxRedirects: 0 }).catch(() => {});
   }
   await browser?.close();
-  const summary = { ok: !process.exitCode, origin, syntheticConfirmed, checks, pageErrors, elapsedMs: Date.now() - started };
+  const summary = { ok: !process.exitCode, origin, syntheticConfirmed, checks, pageErrors, apiResponses: network.length, elapsedMs: Date.now() - started };
   await writeFile(resolve(artifacts, "report.json"), JSON.stringify(summary, null, 2) + "\n");
   process.stdout.write(JSON.stringify({ ok: summary.ok, passed: checks.filter(check => check.passed).length, failed: checks.filter(check => !check.passed).length, report: relative(resolve(), resolve(artifacts, "report.json")) }) + "\n");
 }

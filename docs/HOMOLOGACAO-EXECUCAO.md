@@ -1,78 +1,86 @@
-# Commercial Insight 2.0 — Estado da homologação
+# Commercial Insight 2.0 — Homologação isolada
 
-Estado em 19/11/2026. O usuário autorizou exclusivamente os três recursos abaixo e a implantação do Worker de homologação, mantendo a PR #2 em draft. A autorização exige conferir conta, plano, franquias e custos **antes de criar os recursos**.
+Estado em 19/11/2026. O titular conferiu manualmente **Workers Paid**, **R2 Paid** e **US$ 0 de consumo faturável adicional no período consultado**, dispensou repetir a checagem por Billing Read e autorizou criar os três recursos e implantar somente o Worker de homologação. Essa é a origem da conferência financeira; não é uma atestação de Billing API nem garantia de franquias ilimitadas.
 
-## Estado efetivamente observado
+## Ambiente efetivamente criado
 
-| Item | Estado |
+URL: **https://commercial-insight-hml.araujo-anderson26.workers.dev**
+
+| Recurso | Identificação e estado |
 | --- | --- |
-| Conta | `433083d760ae0e02f3962044e6f2152f`, identidade do conector e conta do projeto conferidas. |
-| Modelo Workers informado pela API | `default_usage_model=standard`; isso isoladamente não comprova assinatura ativa, preço contratual ou saldo de franquias. |
-| Assinatura/ciclo/franquias | APIs `subscriptions`, `billing/usage` e `billable-usage` retornaram HTTP 403. A conexão OAuth não possui Billing Read para esses endpoints. |
-| Analytics | Consultas GraphQL agregadas somente leitura funcionaram. O retrato em `.wrangler/hml/cost-preflight-graphql.json` usa uma janela de calendário; não equivale ao ciclo ou saldo faturável. |
-| D1 `commercial-insight-hml-db` | Não existia no inventário consultado; não criado. UUID da configuração continua como marcador. |
-| R2 `commercial-insight-hml-arquivos` | Não existia no inventário consultado; não criado. |
-| Queue `commercial-insight-hml-jobs` | Não existia no inventário consultado; não criada. |
-| Worker `commercial-insight-hml` | Não implantado nesta etapa. Nenhuma URL operacional é declarada. |
-| Migrações/usuários/sessões de homologação | Não criados remotamente. |
-| Produção | Nenhuma criação, migração, deploy, cópia de usuário, sessão, credencial ou dado comercial. |
+| Conta Cloudflare | `433083d760ae0e02f3962044e6f2152f`, conferida antes das operações. |
+| Worker | `commercial-insight-hml`, versão inicial `495610c1-76c4-4c76-92ce-3af80a189b13`, implantação em 19/11/2026 às 07:40, horário de Brasília. |
+| D1 | `commercial-insight-hml-db`, UUID `9717c220-a4b4-4fad-8183-f2b733787b61`, região ENAM, replicação desativada. |
+| R2 | `commercial-insight-hml-arquivos`, Standard, região ENAM; r2.dev desabilitado e nenhum domínio público. |
+| Queue | `commercial-insight-hml-jobs`, ID `c7b810c2c15d4e91b6eeb8af23e0cda8`; produtor e consumidor exclusivos do Worker de homologação. |
+| Migrações | As seis migrações, até `0006_commercial_workspace.sql`, aplicadas somente no D1 acima. |
+| Credenciais | Administrador e perfis de teste novos e sintéticos; nenhum secret OpenAI/Microsoft/e-mail herdado. |
 
-O acesso ausente é uma dependência de informação financeira, não uma nova solicitação de autorização para os nomes já aprovados. Pode ser resolvido com uma conexão de leitura adequada ou com os números do painel **Billing → Billable Usage**: plano ativo, ciclo e consumo/saldo de Workers, D1, R2 e Queues. Não enviar tokens, chaves ou dados de pagamento pelo chat. Não se inferiu saldo disponível a partir das tarifas públicas ou de métricas parciais.
+O rótulo `version: production` retornado pelo serviço D1 identifica a geração do mecanismo; não significa que o banco da aplicação de produção foi usado. Nome e UUID acima são próprios da homologação.
 
-## Configuração preparada
+`wrangler.hml.jsonc` fixa a conta e os vínculos separados. A checagem recusa nomes fora da lista e reutilização do UUID D1, bucket ou Queue de produção. A versão de produção permaneceu `79cfb2e8-294a-4778-8b33-f008176449a5`, com deployment `ff760e8f-9cef-42d9-bf76-2b923d990a58`. Não houve merge da PR #2, implantação em produção, cópia de seus usuários/sessões/credenciais ou transferência de informações comerciais reais.
 
-O arquivo `wrangler.hml.jsonc` fixa a conta, Worker e nomes isolados. Não tem rotas ou domínio de produção. O verificador também recusa reutilizar o UUID D1, bucket ou Queue de produção.
+## Acesso e demonstração
 
-- CPU máxima por invocação: 10 segundos; limite operacional, não teto financeiro da conta.
-- Pacote máximo: 16 MiB; orçamento interno estimado D1: 128 MiB.
-- Pacotes sem `synthetic=true` são recusados antes da ingestão. Os testes preparados usam somente fatos gerados, sem extração da base real.
-- Queue: concorrência um, lote um, duas retentativas e atraso de 30 segundos.
-- Cron de recuperação: `*/15 * * * *`; limpeza administrativa: `17 4 * * *` em UTC.
-- Retenção administrativa de sessões/conversas/auditoria: sete dias. Isso não apaga automaticamente snapshots comerciais.
-- Logs sem invocações completas e traces com amostragem de 1%. Sem Logpush, e-mail ou segredo OpenAI.
+Entre com o administrador sintético indicado no arquivo privado **`.wrangler/hml/access.json`**. A senha aleatória não está no Git, no relatório público ou nos logs de teste. Altere-a em Meu perfil ao iniciar o uso humano.
 
-Nenhuma alteração de plano, limite global de gastos ou serviço adicional está autorizada. As tarifas, cenários condicionais e procedimento de limpeza estão em [Custos de homologação](HOMOLOGACAO-CUSTOS.md).
+Para ver a demonstração, escolha **janeiro de 2026 até janeiro de 2026** nos filtros. A fonte é explicitamente sintética e cobre 2025-01-01 a 2026-02-01; o período padrão recente pode aparecer sem cobertura. Isso não representa zeros nem dados reais ausentes da empresa.
 
-## Testes preparados e o que comprovam
+O pacote possui dez tabelas, 32 linhas raw e 36 controles. Exemplos de conferência sintética:
 
-`scripts/hml-fixture.ts` gera dez tabelas, 32 linhas raw e 36 controles sintéticos. O teste local valida a importação integral, as descrições por código e a rejeição de um controle financeiro adulterado, preservando a base válida. Não é conciliação com o Power BI real.
+| Recorte janeiro/2026 | Bruto | Devoluções | Líquido | Compradores |
+| --- | ---: | ---: | ---: | ---: |
+| Nacional sintético | R$ 350,00 | R$ 1.034,00 | −R$ 684,00 | 2 |
+| Cliente sintético `0001` | R$ 150,00 | R$ 15,00 | R$ 135,00 | 1 |
 
-`scripts/hml-verify.ts` prepara o aceite HTTPS de login próprio, importação válida/inválida, oito agrupamentos, valores financeiros esperados, briefing, favoritos, escopos comerciais, operador de atualização, ausência de credenciais herdadas e encerramento das sessões automatizadas.
+Para `0001`, o líquido anterior é R$ 90,00, a última compra no recorte é 02/01/2026 e há dois dias com compra. Esses valores foram gerados para testar a semântica e não pertencem a um cliente real.
 
-`scripts/hml-browser.ts` prepara o aceite no Edge em desktop/celular, com indicadores, nomes, filtros, favoritos, visita, Excel, impressão/PDF e diagnóstico da IA. Ambos os scripts recusam qualquer origem diferente da URL isolada esperada e arquivos de acesso fora de `.wrangler/hml`.
+## Testes e evidência
 
-Esses testes HTTPS e as tarefas agendadas **não foram executados remotamente**, pois o pré-requisito de faturamento ainda não foi resolvido. Os testes locais não são apresentados como prova de uma implantação.
+O aceite HTTPS `scripts/hml-verify.ts` passou **12 verificações**, com **87 requisições**, 39.980 bytes de upload e nenhuma falha. Conferiu:
 
-Verificação local após os novos bloqueios: **82 testes aprovados, zero falhas e zero skips**, build, typecheck e lint aprovados. Tipos da configuração de homologação gerados pelo Wrangler em `.wrangler/hml/bindings.d.ts`. Não houve alteração de dependências ou instalação de plano.
+- API anônima recusada, login próprio, cookie Secure/HttpOnly e respostas privadas no-store.
+- Importação válida e 36/36 controles aprovados; pacote com KPI divergente reprovado, sem substituir a versão ativa.
+- Oito agrupamentos de relatórios, métricas financeiras e identificação por código/descrição.
+- Escopo de vendedor/gerente, diretoria nacional, ausência de carteira e pesquisa autorizada.
+- Briefing de visita com números, mix e atividade diária conferidos.
+- Favoritos por proprietário e restrições do operador de atualização.
+- OpenAI desabilitada, ausência de credencial e nenhuma chamada ao modelo.
+- Encerramento das sete sessões automatizadas no término.
 
-## Continuação após a conferência financeira
+Evidência privada: `.wrangler/hml/api-verification.json`. Contas sintéticas e duas importações foram conservadas para revisão. Os testes locais continuam aprovados: **82 testes, zero falhas e zero skips**, build, typecheck e lint; tipos de homologação gerados pelo Wrangler.
 
-1. Guardar evidência privada do plano/ciclo/saldo e estimativa incremental; confirmar que não haverá contratação de plano.
-2. Criar somente os três nomes autorizados e registrar os IDs retornados. Preencher apenas o UUID D1 isolado na configuração.
-3. Executar `npm run check:hml`, aplicar as migrações com `--config wrangler.hml.jsonc` e conferir o esquema no D1 de homologação.
-4. Implantar apenas `commercial-insight-hml`. Verificar vínculos, ausência de secrets herdados, bucket privado, produtor/consumidor isolados e agendas.
-5. Criar um administrador **sintético novo**, com senha aleatória própria. Guardar o arquivo privado `.wrangler/hml/access.json` no formato `{origin,admin:{email,password}}`; não copiar credenciais da produção nem publicar a senha.
-6. Executar os comandos abaixo, medir armazenamento/consumo e verificar uma execução real da agenda e o esvaziamento da fila.
+O aceite no navegador real passou **10 verificações**, sem erros de JavaScript: login, fonte sintética, métricas, código/descrição, Excel, favorito reaberto, preparação de visita, atividade diária, impressão/PDF, apresentação das pendências de IA e logout. Desktop de 1440 pixels e celular de 390 pixels não apresentaram transbordamento horizontal. Os arquivos exportados, capturas e relatório estão em `.wrangler/hml/browser-2026-11-19T10-49-51-741Z/`. Os ajustes necessários foram nos seletores e expectativas do script de teste; não exigiram alteração do Worker publicado.
 
-```powershell
-node --import tsx scripts/hml-verify.ts .wrangler/hml/access.json
-node --import tsx scripts/hml-browser.ts .wrangler/hml/access.json
-```
+A conferência final do D1 retornou **zero sessões automatizadas e zero favoritos temporários**, mantendo apenas os sete usuários sintéticos e os pacotes de demonstração. A fila e as execuções agendadas são acompanhadas em [Custos e monitoramento](HOMOLOGACAO-CUSTOS.md); um agendamento cadastrado não é tratado como prova de execução.
 
-A URL esperada, ainda não publicada, é `https://commercial-insight-hml.araujo-anderson26.workers.dev`. Somente a implantação bem-sucedida e os testes HTTP permitem entregá-la como operacional. O hostname e os assets serão públicos; os dados exigem login próprio. Não há dados reais autorizados nesse ambiente inicial.
+## Limites e consumo
 
-## Aceite futuro do assistente OpenAI
+- CPU máxima: 10 segundos por invocação; pacote máximo: 16 MiB; orçamento interno estimado D1: 128 MiB.
+- Pacotes sem `synthetic=true` recusados antes da ingestão; os dados enviados foram gerados pelo fixture sintético.
+- Queue: concorrência um, lote um, duas retentativas, atraso de 30 segundos e retenção de mensagens de um dia.
+- Cron de recuperação: `*/15 * * * *`; limpeza administrativa: `17 4 * * *` em UTC, correspondente a 01:17 em Brasília.
+- Retenção administrativa: sete dias. Não é exclusão automática de snapshots.
+- Logs sem eventos completos de invocação, traces com amostragem de 1%, nenhum Logpush, e-mail ou exportador adicional.
 
-O aceite inicial mantém `allowAI=false` e nenhum secret OpenAI. Relatórios e visitas determinísticas poderão ser testados sem chamar o modelo.
+Os limites operacionais não são um teto financeiro global. Não houve contratação de plano ou serviço adicional nem configuração de bloqueios globais. Custos, franquias compartilhadas e limpeza futura estão em [Custos de homologação](HOMOLOGACAO-CUSTOS.md). A evidência financeira de US$ 0 é anterior aos testes; o faturamento final continua no painel da conta.
 
-Em etapa posterior e autorizada, o administrador cadastra uma chave própria da homologação no prompt seguro do terminal:
+## Próxima etapa: OpenAI
+
+O ambiente está preparado com `OPENAI_MODEL=gpt-4.1-mini`, mas **sem `OPENAI_API_KEY` e com IA desautorizada na fonte**. Os relatórios e as visitas determinísticas já funcionam sem o modelo.
+
+Na consulta de 19/11/2026, o [catálogo oficial do modelo](https://developers.openai.com/api/docs/models/gpt-4.1-mini) marca GPT-4.1 mini como descontinuado (`Deprecated`). Isso exige conferir a disponibilidade na conta e, se necessário, validar um modelo substituto compatível antes de ativar chamadas. Nenhuma disponibilidade foi presumida ou troca de modelo foi implantada nesta etapa.
+
+O administrador deve usar uma chave própria da homologação e cadastrá-la no prompt protegido do terminal:
 
 ```powershell
 npx wrangler secret put OPENAI_API_KEY --config wrangler.hml.jsonc
 ```
 
-Esse comando implanta uma versão somente do Worker indicado e deve ser usado depois de existir a homologação. Não colocar a chave no comando, Git ou conversa. Confirmar projeto/modelo e orçamento da OpenAI e então autorizar IA na fonte de homologação.
+Não colocar a chave no comando, no Git ou na conversa. O comando cria uma versão e **a implanta imediatamente**, exclusivamente no Worker de homologação indicado. Nenhuma chave ou projeto OpenAI foi criado automaticamente. Confirmar modelo acessível, orçamento e limites do projeto antes das chamadas reais; depois habilitar IA somente na fonte de homologação. O procedimento financeiro da OpenAI é independente do plano Cloudflare.
 
-Perguntas para o roteiro de aceite: “Como está meu resultado comercial?”, “Quais clientes mais perderam faturamento?”, “Vou visitar o cliente 0001. Prepare minha reunião.” e, em seguida, “Quais produtos explicam a queda?”. Conferir valores, datas, cliente, versão, continuidade e recusa de carteira alheia contra consultas determinísticas.
+No projeto OpenAI exclusivo da homologação, restringir a chave às permissões necessárias à API Responses e configurar modelos, taxas e orçamento em Settings → projeto → Limits. Alertas de gasto apenas notificam; quando disponível e aprovado, `Enforce a hard limit` interrompe o tráfego desse projeto após atingir o gasto acompanhado, com possível atraso de aplicação. Não alterar limites globais ou de projetos usados por outros aplicativos. [Procedimento oficial de projetos, chaves e limites](https://help.openai.com/en/articles/9186755-managing-projects-in-the-api-platform).
 
-Hoje essas perguntas usam somente o pacote sintético. Para perguntas sobre números comerciais reais, obter autorização específica de dados, escopo e envio à OpenAI, além da revisão explícita do bloqueio de pacotes sintéticos. Não reutilizar automaticamente a base ou a chave de produção. Registrar chamadas e consumo sem payloads sensíveis; ao terminar, desautorizar a fonte e encerrar as sessões de teste.
+O roteiro inicial será: “Como está meu resultado comercial?”, “Quais clientes mais perderam faturamento?”, “Vou visitar o cliente 0001. Prepare minha reunião.” e “Quais produtos explicam a queda?”. Conferir valores, datas, cliente, versão, continuidade e recusa de carteira alheia contra as consultas determinísticas. Chamadas reais geram consumo OpenAI; o custo previsto deve ser informado antes de executá-las.
+
+Inicialmente, perguntas comerciais reais serão executadas sobre a base sintética. Para consultar números reais da empresa, obter autorização específica de dados, escopo e envio à OpenAI e revisar explicitamente o bloqueio de pacotes sintéticos. Não reutilizar automaticamente a base ou a chave de produção.

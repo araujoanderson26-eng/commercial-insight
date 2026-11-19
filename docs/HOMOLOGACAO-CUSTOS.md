@@ -6,7 +6,9 @@ Preços oficiais consultados em **19/11/2026**, em dólares americanos. Esta an�
 
 As franquias são compartilhadas na conta; criar um recurso de homologação não cria uma nova franquia isolada.
 
-Na pré-checagem desta sessão, as consultas de Billing/subscriptions/usage retornaram **403 por falta de Billing Read** no conector. `default_usage_model=standard` identifica o modelo de uso, mas não comprova assinatura Paid vigente, ciclo ou saldo. A API GraphQL Analytics permitiu consultar consumo agregado e armazenamento, porém suas configurações não expõem a franquia contratual restante. Enquanto plano, ciclo e saldo não forem confirmados por uma fonte autorizada de Billing ou pelo titular, a condição de custo prévia continua aberta; não tratar este documento como aprovação financeira concluída.
+Na pré-checagem desta sessão, as consultas de Billing/subscriptions/usage retornaram **403 por falta de Billing Read** no conector. `default_usage_model=standard` identifica o modelo de uso, mas não comprova assinatura Paid vigente, ciclo ou saldo. A API GraphQL Analytics permitiu consultar consumo agregado e armazenamento, porém suas configurações não expõem a franquia contratual restante.
+
+O titular confirmou manualmente **Workers Paid**, **R2 Paid** e **consumo adicional de US$ 0 no período consultado**, dispensou a permissão Billing Read e autorizou prosseguir com os três recursos isolados e o Worker de homologação. Essa declaração fornece a confirmação financeira prévia aceita para o provisionamento; não é uma resposta de Billing API, não informa franquia ilimitada e não atesta uma fatura após os testes. Nenhum plano novo, serviço adicional ou aumento de orçamento foi autorizado.
 
 | Produto | Incluído no plano indicado | Excedente publicado |
 | --- | --- | --- |
@@ -35,6 +37,8 @@ Para um mês de 30 dias:
 
 Essas são contagens de agenda, não medições de CPU. O relatório deve registrar a configuração realmente implantada. Alterar somente `wrangler.hml.jsonc`; os agendamentos de produção não fazem parte desta autorização.
 
+A configuração de homologação implantada usa recuperação `*/15 * * * *` e limpeza `17 4 * * *` (01:17 no horário de Brasília), limite de 10.000 CPU-ms por invocação, pacote máximo de 16 MiB e orçamento interno D1 de 128 MiB. O consumidor fica com concorrência/lote unitários, duas retentativas e retenção de mensagem de 24 horas. A retenção de conversas/auditoria em homologação é de sete dias. Esses valores limitam trabalho e armazenamento; não são um spending limit financeiro. A execução efetivamente observada fica no relatório de monitoramento, sem presumir que a limpeza diária já ocorreu.
+
 Recomendações para a homologação sintética:
 
 - Concorrência unitária no consumidor, lote de um trabalho e retentativas finitas. Não usar testes de carga ou polling contínuo para acompanhar o estado.
@@ -47,11 +51,13 @@ Recomendações para a homologação sintética:
 
 Exemplo de orçamento mensal para uso interno sintético, sem tráfego público abusivo: 15.000 invocações dinâmicas totais, 10 milhões de CPU-ms, 50 milhões de linhas D1 lidas, 100.000 escritas (incluindo índices), 20 MB D1, 10 MB R2, 1.000 operações Classe A, 10.000 Classe B e 30.000 operações de fila. Os totais Workers incluem a agenda reduzida, acessos de teste e consumidores; não somar a agenda outra vez.
 
-**Se houver saldo em todas as franquias compartilhadas**, esse cenário cabe nas inclusões e o custo incremental previsto desses quatro produtos é **US$ 0**, sem nova mensalidade contratada. A afirmação é condicional; o saldo efetivo precisa ser verificado na conta antes do provisionamento.
+**Se houver saldo em todas as franquias compartilhadas**, esse cenário cabe nas inclusões e o custo incremental previsto desses quatro produtos é **US$ 0**, sem nova mensalidade contratada. A afirmação é condicional. A confirmação manual prévia do titular não dispensa monitorar o crescimento nem transforma estimativa em garantia de cobrança futura.
 
 **Se todas as franquias de uso já estiverem esgotadas**, a mesma hipótese representa aproximadamente US$ 0,20 de CPU, US$ 0,0045 de requisições, US$ 0,05 de leituras D1, US$ 0,10 de escritas D1, US$ 0,015 de armazenamento D1 e US$ 0,012 de operações da fila. Considerando conservadoramente que R2 abra novos blocos cobráveis de 1 GB, 1 milhão Classe A e 1 milhão Classe B, acrescenta até US$ 4,875 nesse cenário. Soma aproximada: **US$ 5,26**, antes de logs, tributos e câmbio. Se o consumo da conta já estiver dentro de blocos pagos, o acréscimo R2 pode ser menor. Não é um limite de cobrança nem autorização para exceder o orçamento com carga adicional.
 
 Novas importações, retries, índices, loops, varreduras sem índice, consultas repetidas e visitas com várias consultas aumentam consumo. O custo não depende apenas da quantidade de linhas retornadas. OpenAI terá custo e autorização próprios em uma etapa posterior.
+
+Se o consumo medido indicar previsão de cobrança incremental além do orçamento aceito, interromper novos testes e pedir decisão ao titular antes de ampliar a carga. A projeção adversa acima explica o risco; não aprova cobrança adicional.
 
 ## Observabilidade e mudança anunciada
 
@@ -64,6 +70,16 @@ A documentação anuncia que, em **01/12/2026**, logs/traces passam a franquias 
 Guardar as medições antes da criação, após os testes e após a primeira execução agendada. Usar filtros exclusivos do Worker e dos IDs de homologação. As franquias restantes da conta devem ser calculadas no ciclo de cobrança correto; um painel de últimas 24 horas não equivale à fatura mensal.
 
 A evidência agregada obtida antes de provisionar fica somente no arquivo privado `.wrangler/hml/cost-preflight-graphql.json`. Sua janela usa o mês calendário, não um ciclo de cobrança confirmado. Nenhum nome de cliente, produto, usuário, sessão ou credencial de produção integra essa medição.
+
+Após o provisionamento e os primeiros testes sintéticos, a amostra exclusiva da homologação em **19/11/2026, 07:47:48 (Brasília)** registrou 141 invocações Workers, 7.128,109 CPU-ms agregados e zero erros de execução no dataset; D1 com 7.981 linhas lidas e 893 escritas; Queue com 58 operações observadas. O tamanho D1 consultado diretamente foi **417.792 bytes**, ante **344.064 bytes** na leitura após migrações, e a fila estava vazia. R2 registrou sete operações Classe A e 26 Classe B; o dataset de armazenamento R2 ainda não havia retornado uma medição. Os arquivos privados `cost-hml-baseline.json` e `cost-hml-after-tests.json` preservam janelas e respostas.
+
+Essas medições são telemetria acumulada até o horário indicado, não uma fatura ou a medição final de toda a sessão. O armazenamento D1 do GraphQL ainda mostrava uma amostra anterior à migração; por isso o tamanho direto foi usado como estado físico corrente. Backlog médio histórico positivo corresponde ao processamento anterior; o endpoint direto da fila confirmou zero mensagens pendentes.
+
+O agendamento estava configurado, mas o dataset de execuções scheduled ainda estava vazio nessa amostra. Uma nova configuração pode levar até 15 minutos para propagar e perder horários intermediários; a ausência inicial não é prova de falha nem de execução. Verificar a próxima janela após a propagação. A limpeza diária das 01:17 em Brasília não foi observada nessa amostra. [Propagação oficial de Cron](https://developers.cloudflare.com/workers/configuration/cron-triggers/#2-update-configuration)
+
+Na última leitura de **19/11/2026, 08:01:28 (Brasília)**, a homologação acumulava **197 invocações**, **8.221,647 CPU-ms** e **zero erros de execução**; D1 registrava **17.971 linhas lidas** e **1.047 escritas**. O tamanho físico direto era **425.984 bytes**; o snapshot de armazenamento Analytics ainda mostrava 417.792 bytes, reforçando o atraso entre fontes. A fila continuava vazia, com 58 operações acumuladas observadas. R2 permanecia com sete operações A e 26 B, sem medição de armazenamento retornada pelo Analytics. A evidência final está em `.wrangler/hml/cost-hml-final.json`.
+
+Mesmo nessa última leitura, o dataset scheduled ainda não retornou evento: **Cron de recuperação configurado, primeira execução não observada nesta sessão**. A limpeza diária também permanece somente configurada. Isso exige conferência posterior no próximo horário e após ingestão das métricas; não foi usado um disparo artificial ou uma alteração temporária de agenda para produzir evidência. O baixo volume observado é compatível com a estimativa condicional dentro das franquias, mas **não comprova cobrança adicional de US$ 0 após os testes**, pois a Billing API continua indisponível e a declaração do titular refere-se ao momento prévio.
 
 | Alvo | Verificação |
 | --- | --- |

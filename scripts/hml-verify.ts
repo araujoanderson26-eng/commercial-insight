@@ -19,7 +19,7 @@ function privatePath(value: string) {
   return path;
 }
 const accessPath = privatePath(process.argv[2] ?? ".wrangler/hml/access.json");
-const access = JSON.parse(readFileSync(accessPath, "utf8")) as { origin: string; admin: { email: string; password: string }; users?: unknown };
+const access = JSON.parse(readFileSync(accessPath, "utf8")) as { origin: string; admin: { email: string; password: string }; users?: Record<string, Account> };
 if (new URL(access.origin).origin !== origin || access.origin !== origin) throw Error("Only the isolated homologation origin is allowed.");
 if (typeof access.admin?.email !== "string" || typeof access.admin?.password !== "string") throw Error("A new synthetic homologation administrator is required.");
 const reportPath = privatePath(process.argv[3] ?? ".wrangler/hml/api-verification.json");
@@ -55,11 +55,20 @@ async function login(actor: Account) {
   const { data } = await api<Session>("me", "GET", undefined, actor); actor.id = data.user.id; return data;
 }
 async function createAccount(key: string, role: Role, clients: string[], regions: string[] = [], national = false) {
+  const existing = access.users?.[key];
+  if (existing) {
+    assert.ok(existing.email.endsWith("@hml.example.test"),"Only synthetic HML accounts can be reused");
+    assert.equal(existing.user?.role,role); assert.deepEqual(existing.user?.clients,clients); assert.deepEqual(existing.user?.regions,regions); assert.equal(existing.user?.national,national);
+    const actor = {...existing,cookie:undefined};accounts.set(key,actor);await login(actor);return actor;
+  }
   const suffix = runId.slice(0, 8);
   const actor: Account = { email: `${key}-${suffix}@hml.example.test`, password: randomBytes(30).toString("base64url"),
     user: { name: `SINTÉTICO HML ${key} ${suffix}`, email: `${key}-${suffix}@hml.example.test`, role, national, active: true, regions, clients, entraOid: null } };
   const { data } = await api<{ id: string }>("admin/users", "POST", { user: actor.user, password: actor.password });
-  actor.id = data.id; accounts.set(key, actor); await login(actor); return actor;
+  actor.id = data.id; accounts.set(key, actor);
+  access.users ??= {};access.users[key] = {email:actor.email,password:actor.password,id:actor.id,user:actor.user};
+  writeFileSync(accessPath,JSON.stringify(access,null,2)+"\n",{mode:0o600});
+  await login(actor); return actor;
 }
 async function importPackage(pkg: ReturnType<typeof syntheticHmlPackage>, actor: Account, filename: string) {
   assert.equal(pkg.manifest.synthetic, true);
@@ -69,7 +78,8 @@ async function importPackage(pkg: ReturnType<typeof syntheticHmlPackage>, actor:
     await api(`admin/data/imports/${upload.id}/parts/1`, "PUT", pkg.data, actor); report.uploadedBytes += pkg.data.length;
     await api(`admin/data/imports/${upload.id}/complete`, "POST", {}, actor);
   }
-  const began = Date.now(); let last = upload;
+  const began = Date.now(); let last = ["published","failed"].includes(upload.status)
+    ? (await api<ImportState>(`admin/data/imports/${upload.id}`,"GET",undefined,actor)).data : upload;
   while (!['published', 'failed', 'cancelled', 'superseded'].includes(last.status)) {
     if (Date.now() - began > 360000) throw Error("Import did not finish within six minutes.");
     await pause(2500);

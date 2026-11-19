@@ -12,8 +12,8 @@
   "d1_databases": [{
     "binding": "DB",
     "database_name": "commercial-insight-hml-db",
-    // Replace only with the UUID of the separately provisioned homologation D1.
-    "database_id": "00000000-0000-4000-8000-000000000000",
+    // Dedicated homologation D1; never replace with the production UUID.
+    "database_id": "9717c220-a4b4-4fad-8183-f2b733787b61",
     "migrations_dir": "migrations"
   }],
   "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "commercial-insight-hml-arquivos" }],

@@ -52,14 +52,14 @@ Também foi produzido um briefing com dados reais locais sem OpenAI e sem escrit
 | npm audit | Zero vulnerabilidades reportadas. |
 | NuGet | Nenhuma dependência vulnerável reportada pela consulta de vulnerabilidades. |
 | Gitleaks | Histórico sem secrets encontrados; artefatos privados excluídos do Git. |
-| Wrangler homologação | Dry run local aprovado; guarda recusa implantação enquanto o UUID isolado não estiver configurado. |
+| Homologação remota | Worker isolado publicado com os três vínculos próprios e seis migrações; **12 verificações API e 10 de navegador aprovadas**, apenas dados sintéticos, 36/36 controles. [Ambiente, evidências e limites](HOMOLOGACAO-EXECUCAO.md). |
 
 O primeiro ensaio de testes encontrou restrições de leitura do sandbox e depois referências ao cache NuGet com caminho longo após a auditoria. O restore em modo locked no cache original resolveu o ambiente, e a suíte completa foi repetida com todos os testes habilitados. Nenhum teste foi removido ou marcado como ignorado para obter o resultado.
 
 ## Limitações e aceite pendente
 
 1. **OpenAI real:** falta cadastrar a chave, autorizar a fonte e validar uma chamada real com saldo/modelo disponíveis. Os testes de provedor usam mocks; não comprovam conectividade ou cobrança da conta.
-2. **Homologação remota:** configuração isolada pronta, provisionamento recusado pela revisão automática por persistência e possível cobrança. Nenhum recurso foi criado. O UUID marcador e a checagem impedem implantação acidental.
+2. **Operação de homologação:** [ambiente isolado publicado](https://commercial-insight-hml.araujo-anderson26.workers.dev), após conferência financeira manual e autorização do titular; somente dados sintéticos. Resultados, acesso, limites, consumo observado e execução dos agendamentos estão em [Homologação](HOMOLOGACAO-EXECUCAO.md) e [Custos](HOMOLOGACAO-CUSTOS.md). A observação da limpeza diária e o aceite com dados reais continuam separados desta validação sintética.
 3. **Exemplo financeiro original:** janeiro–outubro de 2026 já foi conferido; ainda requer os demais filtros combinados, usuário/escopo e versão da tela observada. O diagnóstico privado registra exatamente os recortes reproduzidos.
 4. **Narrativa de IA:** guardas rejeitam números não sustentados e percentuais inválidos; não constituem prova formal de todas as associações e causas descritas pelo modelo. Gráficos/tabelas permanecem a evidência verificável; causas comerciais exigem confirmação.
 5. **Métricas especiais:** margem, estoque, metas, litros e quantidade continuam indisponíveis sem receita e conciliação específicas. O ticket derivado é por comprador, não por pedido.

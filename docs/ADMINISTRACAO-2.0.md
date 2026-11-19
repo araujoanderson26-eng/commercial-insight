@@ -36,9 +36,9 @@ Depois, o administrador autoriza o envio de perguntas, filtros e resultados agre
 
 ## Homologação isolada
 
-`wrangler.hml.jsonc` aponta a um Worker, D1, R2, fila e origem próprios. O UUID D1 é um marcador que impede implantação por `npm run deploy:hml` até ser preenchido com o banco isolado. `scripts/check-hml.mjs` rejeita conta, nomes e vínculos diferentes dos autorizados. O provisionamento foi autorizado em 19/11/2026, condicionado à conferência prévia do plano, franquias e custos. A conexão atual retorna HTTP 403 nas APIs de faturamento; essa conferência continua pendente e nenhum recurso foi criado. Veja o [estado da execução](HOMOLOGACAO-EXECUCAO.md) e a [análise de custos](HOMOLOGACAO-CUSTOS.md).
+`wrangler.hml.jsonc` aponta a um Worker, D1, R2, fila e origem próprios, efetivamente provisionados após a conferência financeira manual e a autorização do titular em 19/11/2026. `scripts/check-hml.mjs` rejeita conta, nomes e vínculos diferentes dos autorizados. As APIs Billing continuam sem acesso, mas o titular dispensou repetir essa checagem e confirmou Workers Paid/R2 Paid e US$ 0 adicional no período observado. Veja o [estado da execução](HOMOLOGACAO-EXECUCAO.md) e a [análise de custos](HOMOLOGACAO-CUSTOS.md).
 
-Depois de confirmar o plano e o saldo no ciclo de cobrança, criar **somente**:
+Os recursos foram criados pela API da conexão Cloudflare. Estes são comandos CLI equivalentes, apenas como referência; eles já existem e não se deve executá-los novamente para este ambiente:
 
 ```powershell
 npx wrangler d1 create commercial-insight-hml-db
@@ -46,7 +46,7 @@ npx wrangler r2 bucket create commercial-insight-hml-arquivos
 npx wrangler queues create commercial-insight-hml-jobs
 ```
 
-Preencha o UUID retornado em `wrangler.hml.jsonc`. Confira a conta autenticada, o nome do Worker e a origem. Aplique as migrações apenas no banco de homologação:
+O UUID isolado já foi preenchido e as seis migrações aplicadas. Para uma próxima alteração aprovada, confira conta, nome do Worker e origem e use sempre a configuração explícita de homologação:
 
 ```powershell
 npm run check:hml
