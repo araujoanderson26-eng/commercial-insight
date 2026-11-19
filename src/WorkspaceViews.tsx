@@ -1,3 +1,4 @@
+import {printReport} from "./print-report";
 import {
   Activity,
   ArrowRight,
@@ -393,7 +394,7 @@ export function Reports({
       ) : (
         <>
           <ReportContext r={report.data} />
-          <div className="report-actions"><button className="soft compact" onClick={() => exportReport(report.data!)}><Download size={15} />Exportar Excel</button><button className="soft compact" onClick={() => window.print()}><Printer size={15} />Imprimir / PDF</button><button className="soft compact" onClick={() => { ST(title + " · " + filters.to); SO(!saveOpen); }}><Star size={15} />Salvar consulta</button></div>
+          <div className="report-actions"><button className="soft compact" onClick={() => exportReport(report.data!)}><Download size={15} />Exportar Excel</button><button className="soft compact" onClick={() => printReport(report.data!)}><Printer size={15} />Imprimir / PDF</button><button className="soft compact" onClick={() => { ST(title + " · " + filters.to); SO(!saveOpen); }}><Star size={15} />Salvar consulta</button></div>
           {saveOpen && <form className="panel save-report-form" onSubmit={(event) => { event.preventDefault(); void save(); }}><label>Nome da consulta<input required maxLength={120} value={saveTitle} onChange={(event) => ST(event.target.value)} /></label><button className="primary">Salvar</button><button type="button" className="soft" onClick={() => SO(false)}>Cancelar</button></form>}
           <Kpis r={report.data} />
           {page === "alertas" ? <Signals r={report.data} ask={ask} /> : <Graph r={report.data} />}

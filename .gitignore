@@ -11,3 +11,4 @@ dist/
 *.pbix
 *.pbit
 *.partial
+outputs/executive-exports/

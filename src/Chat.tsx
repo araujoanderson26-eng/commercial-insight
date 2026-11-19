@@ -1,3 +1,4 @@
+import {printReport} from "./print-report";
 import {
   ArrowUp,
   ChevronRight,
@@ -77,7 +78,7 @@ function Answer({ turn, onLoad }: { turn: Turn; onLoad: (r: Report, c: Commentar
         {turn.visit ? <VisitResult briefing={turn.visit} /> : turn.report ? (
           <>
             <ReportContext r={turn.report} />
-            <div className="report-actions"><button className="soft compact" onClick={() => exportReport(turn.report!)}><Download size={14} />Excel</button><button className="soft compact" onClick={() => window.print()}><Printer size={14} />Imprimir / PDF</button><button className="soft compact" disabled={saved} onClick={() => void favorite()}><Star size={14} />{saved ? "Consulta salva" : "Salvar consulta"}</button></div>
+            <div className="report-actions"><button className="soft compact" onClick={() => exportReport(turn.report!)}><Download size={14} />Excel</button><button className="soft compact" onClick={() => printReport(turn.report!)}><Printer size={14} />Imprimir / PDF</button><button className="soft compact" disabled={saved} onClick={() => void favorite()}><Star size={14} />{saved ? "Consulta salva" : "Salvar consulta"}</button></div>
             <Kpis r={turn.report} />
             <Graph r={turn.report} />
             {turn.commentary && (
