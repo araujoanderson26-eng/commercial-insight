@@ -365,6 +365,25 @@ export function Kpis({ r }: { r: Report }) {
           </small>
         </div>
       )}
+      {r.summaryStats?.ticketPerInvoice != null && (
+        <div className="kpi kpi-nf">
+          <span>Ticket médio por NF</span>
+          <strong title={pretty(r.summaryStats.ticketPerInvoice, "revenue")}>
+            {pretty(r.summaryStats.ticketPerInvoice, "revenue", Math.abs(r.summaryStats.ticketPerInvoice) >= 10000)}
+          </strong>
+          <small className="kpi-context">
+            {metricLabel("revenue", r.sourceInfo?.capabilities)} ÷{" "}
+            {r.summaryStats.invoiceCount?.toLocaleString("pt-BR") ?? "—"} notas fiscais (Serial).
+          </small>
+        </div>
+      )}
+      {r.summaryStats?.activeReps != null && (
+        <div className="kpi kpi-reps">
+          <span>Representantes ativos</span>
+          <strong>{r.summaryStats.activeReps.toLocaleString("pt-BR")}</strong>
+          <small className="kpi-context">Com faturamento no período e escopo selecionados.</small>
+        </div>
+      )}
     </div>
   );
 }
@@ -425,6 +444,11 @@ export function ReportContext({ r }: { r: Report }) {
       </span>
       {r.sourceInfo && <span>Base até {date(r.sourceInfo.referenceDate)}</span>}
       {r.comparison?.reason && <p>{r.comparison.reason}</p>}
+      {r.filterConflicts?.map((conflict) => (
+        <p className="report-warning" key={conflict}>
+          {conflict}
+        </p>
+      ))}
       {r.warnings?.map((warning) => (
         <p className="report-warning" key={warning}>
           {warning}
@@ -455,6 +479,7 @@ export function Graph({
   const [resetZoomNonce, setResetZoomNonce] = useState(0);
 
   const isMonth = r.plan.group === "month";
+  const effectiveMode: SmartChartMode = isMonth && mode === "share" ? "primary" : mode;
   const data = r.rows.map((row) => ({
     label: isMonth ? monthName(row.name) : row.name,
     atual: row.values[metric].current,
@@ -493,18 +518,27 @@ export function Graph({
             <div className="chart-segmented" role="group" aria-label="Modo de visualização">
               <button
                 type="button"
-                className={mode === "primary" ? "active" : ""}
+                className={effectiveMode === "primary" ? "active" : ""}
                 onClick={() => setMode("primary")}
               >
                 {isMonth ? "Linha" : "Comparativo"}
               </button>
               <button
                 type="button"
-                className={mode === "secondary" ? "active" : ""}
+                className={effectiveMode === "secondary" ? "active" : ""}
                 onClick={() => setMode("secondary")}
               >
                 {isMonth ? "Colunas" : "Variação Δ"}
               </button>
+              {!isMonth && (
+                <button
+                  type="button"
+                  className={effectiveMode === "share" ? "active" : ""}
+                  onClick={() => setMode("share")}
+                >
+                  Participação %
+                </button>
+              )}
             </div>
           )}
           {!table && zoomed && (
@@ -558,11 +592,16 @@ export function Graph({
         </div>
       ) : (
         <>
-          {!isMonth && mode === "secondary" ? (
+          {!isMonth && effectiveMode === "secondary" ? (
             <div className="legend">
               <i className="legend-good" />
               Variação favorável <i className="legend-bad" />
               Variação desfavorável
+            </div>
+          ) : !isMonth && effectiveMode === "share" ? (
+            <div className="legend">
+              <i />
+              Participação % no total do recorte
             </div>
           ) : (
             <div className="legend">
@@ -574,7 +613,7 @@ export function Graph({
           <SmartChart
             r={r}
             metric={metric}
-            mode={mode}
+            mode={effectiveMode}
             activeKey={activeFilterValue}
             resetZoomNonce={resetZoomNonce}
             onZoomChange={setZoomed}

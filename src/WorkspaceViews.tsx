@@ -385,6 +385,35 @@ export function Reports({
       {saved.length > 0 && <section className="panel saved-reports"><div className="mini"><Star size={14} /> Consultas favoritas</div><div className="saved-list">{saved.map((item) => <div key={item.id}><button className="soft compact" onClick={() => { G(item.plan.group); M(item.plan.metric); O(item.plan.order); restore(item.plan); }}><Star size={13} />{item.title}</button><button className="iconbtn" aria-label={"Excluir consulta " + item.title} onClick={() => void removeSaved(item.id)}><Trash2 size={13} /></button></div>)}</div></section>}
       {notice && <div className="notice" role="status">{notice}</div>}
       {savedError && <ErrorBox>{savedError}</ErrorBox>}
+      <div className="quick-views" role="group" aria-label="Visões executivas rápidas">
+        {([
+          { label: "Evolução mensal", g: "month", m: "revenue", o: "current" },
+          { label: "Por Regional", g: "regional", m: "revenue", o: "current" },
+          { label: "Representantes ↑", g: "region", m: "revenue", o: "growth" },
+          { label: "Mix Categorias", g: "category", m: "revenue", o: "current" },
+          { label: "Clientes ↓", g: "client", m: "revenue", o: "decline" },
+          { label: "Produtos ↑", g: "product", m: "revenue", o: "growth" },
+        ] as const)
+          .filter((item) => capabilities.groups.includes(item.g))
+          .map((item) => {
+            const active =
+              effectiveGroup === item.g && effectiveMetric === item.m && order === item.o;
+            return (
+              <button
+                key={item.label}
+                type="button"
+                className={active ? "soft compact active-view" : "soft compact"}
+                onClick={() => {
+                  G(item.g);
+                  M(item.m);
+                  O(item.o);
+                }}
+              >
+                {item.label}
+              </button>
+            );
+          })}
+      </div>
       <div className="panel toolbar">
         <label>
           Agrupar por

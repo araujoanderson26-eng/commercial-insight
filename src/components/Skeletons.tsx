@@ -56,7 +56,7 @@ export function ReportSkeleton({
   withSignals?: boolean;
 }) {
   return (
-    <div className="stack" role="status" aria-label="Carregando indicadores">
+    <div className="stack" role="status" aria-label="Carregando painel">
       <KpiSkeleton />
       {withSignals ? (
         <div className="analytics">

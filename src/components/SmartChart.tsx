@@ -30,7 +30,7 @@ echarts.use([
   SVGRenderer,
 ]);
 
-export type SmartChartMode = "primary" | "secondary";
+export type SmartChartMode = "primary" | "secondary" | "share";
 
 export type SmartChartSelection = {
   key: string;
@@ -428,6 +428,127 @@ export function SmartChart({
             type: "bar",
             data: previousBars,
             barMaxWidth: 11,
+          },
+        ],
+      };
+    } else if (mode === "share") {
+      const totalPositive =
+        r.total.values[metric].current !== null && r.total.values[metric].current! > 0
+          ? r.total.values[metric].current!
+          : rows.reduce((acc, row) => acc + Math.max(0, row.values[metric].current ?? 0), 0);
+
+      const shareBars = rows.map((row, idx) => {
+        const cur = row.values[metric].current ?? 0;
+        const sharePct = totalPositive > 0 && cur > 0 ? Number(((cur / totalPositive) * 100).toFixed(2)) : 0;
+        const selected = activeKey ? keys[idx] === activeKey : false;
+        return {
+          value: sharePct,
+          itemStyle: {
+            color: selected ? "#0d8c80" : "#5942d6",
+            opacity: activeKey && !selected ? 0.42 : 1,
+            borderRadius: [0, 5, 5, 0],
+          },
+        };
+      });
+
+      option = {
+        animation: !reducedMotion,
+        animationDuration: 300,
+        tooltip: {
+          ...(baseTooltip as Record<string, unknown>),
+          formatter: (rawParams: unknown) => {
+            const items = Array.isArray(rawParams) ? rawParams : [rawParams];
+            const first = items[0] as { dataIndex?: number } | undefined;
+            const idx = typeof first?.dataIndex === "number" ? first.dataIndex : -1;
+            const row = rows[idx];
+            if (!row) return "";
+            const val = row.values[metric].current ?? 0;
+            const sharePct = totalPositive > 0 && val > 0 ? (val / totalPositive) * 100 : 0;
+            return [
+              `<div style="min-width:190px;max-width:270px;font-family:Inter,system-ui,sans-serif;font-size:12px;line-height:1.45;color:#111e34;white-space:normal">`,
+              `<div style="font-weight:700;margin-bottom:6px;word-break:break-word">${escapeHtml(row.name)}</div>`,
+              `<div style="display:flex;justify-content:space-between;gap:12px"><span style="color:#5c6980">Valor:</span><strong>${escapeHtml(pretty(val, metric))}</strong></div>`,
+              `<div style="display:flex;justify-content:space-between;gap:12px"><span style="color:#5c6980">Participação %:</span><strong>${sharePct.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%</strong></div>`,
+              row.canDrill !== false
+                ? `<div style="margin-top:5px;font-size:10px;color:#6750d8">Clique para filtrar por este item</div>`
+                : "",
+              `</div>`,
+            ].join("");
+          },
+        },
+        grid: {
+          left: isCompact ? 98 : 154,
+          right: hasRankZoom ? 54 : 46,
+          top: 8,
+          bottom: 24,
+          containLabel: false,
+        },
+        xAxis: {
+          type: "value",
+          min: 0,
+          splitNumber: 4,
+          axisLine: { show: false },
+          axisTick: { show: false },
+          splitLine: { lineStyle: { color: "#e5eaf3", type: "dashed" } },
+          axisLabel: {
+            color: "#627089",
+            fontSize: 10,
+            formatter: (val: number) => `${Number(val).toLocaleString("pt-BR", { maximumFractionDigits: 0 })}%`,
+          },
+        },
+        yAxis: {
+          type: "category",
+          inverse: true,
+          data: labels,
+          axisLine: { show: false },
+          axisTick: { show: false },
+          axisLabel: {
+            color: "#33435a",
+            fontSize: isCompact ? 10 : 11,
+            width: isCompact ? 90 : 144,
+            overflow: "truncate",
+            formatter: (val: string) => truncateLabel(val, isCompact ? 14 : 23),
+          },
+        },
+        dataZoom: hasRankZoom
+          ? [
+              {
+                type: "inside",
+                yAxisIndex: 0,
+                startValue: 0,
+                endValue: visibleLimit - 1,
+                zoomOnMouseWheel: false,
+                moveOnMouseWheel: true,
+                moveOnMouseMove: true,
+              },
+              {
+                type: "slider",
+                yAxisIndex: 0,
+                right: 2,
+                width: 12,
+                startValue: 0,
+                endValue: visibleLimit - 1,
+                showDetail: false,
+                borderColor: "#e2e7f2",
+                fillerColor: "rgba(89, 66, 214, 0.22)",
+                handleSize: "90%",
+              },
+            ]
+          : [],
+        series: [
+          {
+            name: "Participação %",
+            type: "bar",
+            data: shareBars,
+            barMaxWidth: 16,
+            label: {
+              show: true,
+              position: "right",
+              color: "#3c4b64",
+              fontSize: 10,
+              formatter: (params: { value?: unknown }) =>
+                `${Number(params.value ?? 0).toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`,
+            },
           },
         ],
       };
