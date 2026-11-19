@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { assistantStatus, prepareVisit, reportInsights } from "../worker/commercial";
-import { canonicalState, comment, commentaryGrounded, conversationContext, factualCommentary, interpret } from "../worker/assistant";
+import { canonicalState, comment, commentaryGrounded, conversationContext, factualCommentary, interpret, reviewCommentary } from "../worker/assistant";
 import { resolvePlanEntities } from "../worker/providers";
 import type { DataProvider } from "../worker/providers";
 import { Problem } from "../worker/core";
@@ -288,4 +288,51 @@ test("UF por nome ou sigla é preservada mesmo quando o modelo omite o recorte",
   assert.equal(resolved.filters.state, "SP");
   await assert.rejects(interpret(env, { ...semantic, capabilities: undefined }, "Como está São Paulo?", filters, []), /não será ampliada ao resultado nacional/);
   await assert.rejects(interpret(env, semantic, "Como estão SP e RJ?", filters, []), /mais de uma UF/);
+});
+
+
+test("narrativa parcial preserva fato e acao verificavel e remove numeros sem prova",()=>{
+  const r=report(plan);
+  const result=reviewCommentary({summary:"Faturamento liquido de R$ 70,00 ante R$ 130,00. A margem foi de 987,65%.",actions:["Verificar com o cliente se houve mudanca de preco ou disponibilidade.","Oferecer desconto de 999%."]},r);
+  assert.equal(result.validation.status,"partial");assert.equal(result.validation.discardedSentences,1);assert.equal(result.validation.discardedActions,1);
+  assert.match(result.summary,/70,00 ante R\$ 130,00/);assert.doesNotMatch(result.summary,/987|margem foi/);assert.match(result.summary,/omitida/);
+  assert.equal(result.actions.length,1);assert.equal(commentaryGrounded(result,r),true);
+});
+
+test("narrativa remove causa comercial afirmada mas mantem hipotese em pergunta de verificacao",()=>{
+ const r=report(plan);const result=reviewCommentary({summary:"Faturamento de R$ 70,00. O cliente migrou para a concorrencia.",actions:["Verificar com o cliente se a reducao envolve precos ou concorrencia."]},r);
+ assert.equal(result.validation.status,"partial");assert.ok(result.validation.reasons.includes("unproven_business_cause"));assert.doesNotMatch(result.summary,/migrou/);assert.equal(result.actions.length,1);
+});
+
+test("narrativas nacional, visita e produto preservam conteudo valido isolado",()=>{
+ for(const p of [plan,{...plan,filters:{...plan.filters,client:"0001"}},{...plan,group:"product" as const,order:"decline" as const}]){
+  const r=report(p),result=reviewCommentary({summary:"Faturamento de R$ 70,00 ante R$ 130,00. Faturamento de R$ 999.999,00.",actions:[]},r);
+  assert.equal(result.validation.status,"partial");assert.match(result.summary,/70,00/);assert.doesNotMatch(result.summary,/999/);assert.equal(result.validation.discardedSentences,1);
+ }
+});
+
+test("estrutura invalida e narrativa inteiramente sem sustentacao tem fallback com motivo seguro",()=>{
+ const r=report(plan);assert.deepEqual(reviewCommentary(null,r).validation.reasons,["invalid_structure"]);
+ const value=reviewCommentary({summary:"Faturamento de R$ 999.999,00.",actions:[]},r);
+ assert.equal(value.validation.status,"fallback");assert.match(value.summary,/Fato verificado/);assert.doesNotMatch(JSON.stringify(value),/999/);
+});
+
+test("frases com milhares e centavos nao sao fragmentadas e resposta valida e preservada",()=>{
+ const r=report(plan);r.total=row("Total",1234.56,2345.67);r.rows=[];
+ const summary="Faturamento de R$ 1.234,56 ante R$ 2.345,67.";
+ const result=reviewCommentary({summary,actions:[]},r);assert.equal(result.validation.status,"accepted");assert.equal(result.summary,summary);
+});
+
+test("revisao parcial nao libera atribuicao M:M nem percentuais inventados",()=>{
+ const r=report({...plan,group:"product",order:"decline"});r.warnings=["Relacionamentos muitos-para-muitos: nao some as linhas."];r.rows=[row("P",30,100)];
+ const result=reviewCommentary({summary:"Faturamento de R$ 70,00. Crescimento de 987,65%.",actions:[]},r);
+ assert.equal(result.validation.status,"fallback");assert.ok(result.validation.reasons.includes("non_additive_breakdown"));assert.equal(commentaryGrounded(result,r),true);
+});
+
+test("comment mantem partes validas da resposta estruturada sem segunda chamada ao provedor",async t=>{
+ const {env,sql}=makeStore();t.after(()=>sql.close());
+ const mocked=t.mock.method(globalThis,"fetch",async()=>Response.json({status:"completed",output:[{type:"message",content:[{type:"output_text",text:JSON.stringify({summary:"Faturamento de R$ 70,00. Faturamento de R$ 999.999,00.",actions:[]})}]}]}));
+ const result=await comment(env,"Como esta nosso faturamento?",report(plan));assert.match(result.summary,/70,00/);assert.doesNotMatch(result.summary,/999/);assert.equal(mocked.mock.callCount(),1);
+ const sent=JSON.parse(mocked.mock.calls[0].arguments[1]!.body as string);
+ assert.match(sent.instructions,/180 palavras/);assert.doesNotMatch(sent.instructions,/\?\?/);
 });

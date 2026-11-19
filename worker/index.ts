@@ -3,7 +3,7 @@ import { configSchema, filtersSchema, planSchema, type Report } from "../shared/
 import { passwordHash } from "../shared/password.mjs";
 import { assertAssistantAccess, dataProvider, resolvePlanEntities } from "./providers";
 import { dataStatus, manualRoute, processManualJobs, processManualQueue, type ManualJob } from "./manual";
-import { comment, commentaryGrounded, factualCommentary, interpret } from "./assistant";
+import { comment, factualCommentary, interpret, reviewCommentary } from "./assistant";
 import { assistantStatus, isVisitRequest, prepareVisit } from "./commercial";
 import { authenticate, authRoute, origin } from "./auth";
 import { assertControlledHmlUser } from "./real-hml-policy";
@@ -316,8 +316,8 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
           };
     const hadVisit = Boolean(commentary.visit);
     // Computed fallback text is rebuilt with current presentation rules; saved evidence stays immutable.
-    if ((typeof commentary.summary === "string" && commentary.summary.startsWith("Fato verificado:"))
-      || !commentaryGrounded(commentary, report)) commentary = factualCommentary(report);
+    if (typeof commentary.summary === "string" && commentary.summary.startsWith("Fato verificado:")) commentary = factualCommentary(report);
+    else commentary = reviewCommentary(commentary, report);
     // Recompute saved briefings against the pinned source and current ACL; never return cached customer details directly.
     const visit = same && hadVisit ? await prepareVisit(provider, report.plan.filters) : undefined;
     delete commentary.visit;

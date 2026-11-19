@@ -69,6 +69,16 @@ test("chat prepara visita com dados D1 autorizados, reabre briefing no snapshot 
   assert.match(reopened.commentary.summary, /bruto/iu);
   assert.equal(JSON.parse(sql.prepare("SELECT answer FROM turns WHERE id=?").get(chat.turn)!.answer as string).summary, legacy.summary, "a resposta gravada permanece imutável");
   assert.equal(aiCalls, 2, "reabrir visita é reconsulta tipada, sem OpenAI");
+  const partial = { ...legacy, summary: "Faturamento de R$ 135,00. Faturamento de R$ 999.999,00." };
+  sql.prepare("UPDATE turns SET answer=? WHERE id=?").run(JSON.stringify(partial), chat.turn);
+  const reviewedResponse = await request(`turns/${chat.turn}/reopen`, {}, cookie);
+  assert.equal(reviewedResponse.status, 200);
+  const reviewed = await reviewedResponse.json() as { commentary: { summary: string; validation: { status: string } }; visit: VisitBriefing };
+  assert.equal(reviewed.commentary.validation.status, "partial");
+  assert.match(reviewed.commentary.summary, /135,00/); assert.doesNotMatch(reviewed.commentary.summary, /999/);
+  assert.equal(reviewed.visit.timeline.sourceInfo?.versionId, version);
+  assert.equal(JSON.parse(sql.prepare("SELECT answer FROM turns WHERE id=?").get(chat.turn)!.answer as string).summary, partial.summary);
+  assert.equal(aiCalls, 2, "revisar narrativa salva não gera chamadas adicionais");
   const forbidden = await request("visit", { ...filters, client: "0002" }, cookie);
   assert.equal(forbidden.status, 403);
   const noClient = await request("visit", { ...filters, client: "" }, cookie);

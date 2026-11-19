@@ -52,6 +52,8 @@ function stateMention(question: string) {
   return matches[0]?.[0];
 }
 export function buildStructuredOpenAIRequest(e: Env,name: string,schema: unknown,instructions: string,input: unknown,actorId?: string) {
+  if (name === "leitura_comercial") instructions = instructions.replace("90 palavras", "180 palavras")
+    + " Escreva frases independentes e use valores completos com duas casas decimais, sem converter para milhares ou milhões. Para líquido, detalhe bruto, devoluções e diferença absoluta. Para produtos, cite códigos e reduções observadas. Diferencie fatos e interpretações sustentadas de hipóteses. Hipóteses devem ser perguntas de verificação, como verificar com o cliente se houve mudança de preço ou disponibilidade; nunca afirme causas sem evidência nem proponha descontos ou compromissos sem sustentação.";
   return JSON.stringify({
     model: e.OPENAI_MODEL,
     store: false,
@@ -276,10 +278,51 @@ export function buildCommentOpenAIRequest(e:Env,question:string,r:Report,actorId
 export async function comment(e: Env, question: string, r: Report, actorId?:string): Promise<Commentary> {
   if (nonAdditiveBreakdownDiff(r)) return factualCommentary(r);
   const v = await structuredBody(e,"leitura_comercial",buildCommentOpenAIRequest(e,question,r,actorId),actorId);
-  const validated = z
-    .object({ summary: z.string().max(2500), actions: z.array(z.string().max(700)).max(8) })
-    .parse(v);
-  return commentaryGrounded(validated, r) ? validated : factualCommentary(r);
+  return reviewCommentary(v, r);
+}
+
+/** Review independent sentences/actions; one unsupported claim must not erase verified prose.
+ * Diagnostics contain fixed codes and counts, never discarded commercial text.
+ */
+export function reviewCommentary(input: unknown, report: Report): Commentary & {
+  validation: { status: "accepted" | "partial" | "fallback"; reasons: string[]; discardedSentences: number; discardedActions: number };
+} {
+  const factual = factualCommentary(report);
+  const parsed = z.object({ summary: z.string().max(2500), actions: z.array(z.string().max(700)).max(8) }).safeParse(input);
+  if (!parsed.success) return { ...factual, validation: { status: "fallback", reasons: ["invalid_structure"], discardedSentences: 0, discardedActions: 0 } };
+  const value = parsed.data;
+  if (value.summary === factual.summary && JSON.stringify(value.actions) === JSON.stringify(factual.actions))
+    return { ...factual, validation: { status: "fallback", reasons: [], discardedSentences: 0, discardedActions: 0 } };
+  // Split only at sentence boundaries, preserving decimal/thousands separators in amounts.
+  const sentences = value.summary.match(/[^]*?(?:[.!?](?=\s|$)|$)/gu)?.map(s => s.trim()).filter(Boolean) ?? [];
+  const accepted = sentences.filter(summary => commentaryGrounded({ summary, actions: [] }, report));
+  const actions = value.actions.filter(action => commentaryGrounded({ summary: "", actions: [action] }, report));
+  const discardedSentences = sentences.length - accepted.length, discardedActions = value.actions.length - actions.length;
+  const reasons = [...new Set([
+    ...sentences.filter(s => !accepted.includes(s)).map(s => narrativeReason(s, report)),
+    ...value.actions.filter(s => !actions.includes(s)).map(s => narrativeReason(s, report)),
+  ])];
+  const candidate = { summary: accepted.join(" "), actions };
+  // Preserve the original whole-response guard as a second gate (including M:M and direction).
+  if (!candidate.summary || !commentaryGrounded(candidate, report)) {
+    const fallback = actions.length && commentaryGrounded({ ...factual, actions }, report) ? { ...factual, actions } : factual;
+    return { ...fallback, validation: { status: "fallback", reasons: reasons.length ? reasons : ["response_not_grounded"], discardedSentences, discardedActions } };
+  }
+  const partial = discardedSentences > 0 || discardedActions > 0;
+  if (partial) candidate.summary += " Parte da análise foi omitida por falta de comprovação nos indicadores deste recorte.";
+  return { ...candidate, validation: { status: partial ? "partial" : "accepted", reasons, discardedSentences, discardedActions } };
+}
+
+function unsupportedBusinessCause(text: string) {
+  return folded(text).split(/(?<=[.!?])\s+/u).some(value => {
+    const verification = /\b(?:verificar|investigar|perguntar|confirmar|avaliar)\b[^.!?]*\b(?:se|hipotese|possibilidade)\b/u.test(value);
+    return !verification && /\b(?:devido a|por causa|causad[oa]|decorrente|em razao|migrou|migraram|trocou de fornecedor|perdeu para a concorrencia)\b|\bporque\b[^.!?]{0,80}\b(?:concorrencia|preco|estoque|ruptura|fornecedor|atendimento)\b/u.test(value);
+  });
+}
+function narrativeReason(text: string, report: Report) {
+  if (unsupportedBusinessCause(text)) return "unproven_business_cause";
+  if (nonAdditiveBreakdownDiff(report)) return "non_additive_breakdown";
+  return "unsupported_numeric_or_semantic_claim";
 }
 
 function numericFragments(value: string) {
@@ -312,6 +355,7 @@ export function commentaryGrounded(commentary: Commentary, report: Report) {
   if (commentary.summary === factual.summary && commentary.actions.length === factual.actions.length
     && commentary.actions.every((action, index) => action === factual.actions[index])) return true;
   const text = [commentary.summary, ...commentary.actions].join(" ");
+  if (unsupportedBusinessCause(text)) return false;
   const clauses = folded(text).split(/(?<=[.!?;])\s+|\n/u);
   const entries = [report.total, ...report.rows.slice(0, 12)];
   if (entries.every(entry => entry.values.margin.current === null && entry.values.margin.previous === null)) {
