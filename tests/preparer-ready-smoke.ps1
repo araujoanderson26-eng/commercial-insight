@@ -1,5 +1,5 @@
 ﻿[CmdletBinding()]
-param([string]$Package = '.wrangler/releases/preparador-comercial-insight-1.0.2-win-x64.zip')
+param([string]$Package = '.wrangler/releases/preparador-comercial-insight-1.0.3-win-x64.zip')
 $ErrorActionPreference = 'Stop'
 $taskWorkspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $taskZipPath = if ([IO.Path]::IsPathRooted($Package)) { [IO.Path]::GetFullPath($Package) } else { [IO.Path]::GetFullPath((Join-Path $taskWorkspace $Package)) }
@@ -47,7 +47,7 @@ $taskBackups = @(Get-ChildItem -LiteralPath (Join-Path $taskLocalData 'Comercial
 if ($taskBackups.Count -ne 1 -or (Get-FileHash -LiteralPath (Join-Path $taskBackups[0].FullName 'ComercialInsight.Preparador.exe') -Algorithm SHA256).Hash -ne $taskOldHash) { throw 'A instalação sintética anterior não foi preservada.' }
 $taskRegistration = Get-Content -LiteralPath (Join-Path $taskSource 'ComercialInsight.pbitool.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $taskRegistrationSuffix = '\' + [IO.Path]::GetFileName($taskRoot) + '\appdata\ComercialInsight\Preparador\ComercialInsight.Preparador.exe'
-if (-not $taskRegistration.path.EndsWith($taskRegistrationSuffix, [StringComparison]::OrdinalIgnoreCase) -or (Get-FileHash -LiteralPath $taskRegistration.path -Algorithm SHA256).Hash -ne $taskExpectedExeHash -or $taskRegistration.version -ne '1.0.2' -or $taskRegistration.name -cne 'Preparar atualização Comercial Insight') { throw 'Definição isolada do botão inválida.' }
+if (-not $taskRegistration.path.EndsWith($taskRegistrationSuffix, [StringComparison]::OrdinalIgnoreCase) -or (Get-FileHash -LiteralPath $taskRegistration.path -Algorithm SHA256).Hash -ne $taskExpectedExeHash -or $taskRegistration.version -ne '1.0.3' -or $taskRegistration.name -cne 'Preparar atualização Comercial Insight') { throw 'Definição isolada do botão inválida.' }
 $taskRuntimeManifest = Get-Content -LiteralPath (Join-Path $taskSource 'runtime\ci-runtime-manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 foreach ($taskFile in $taskRuntimeManifest.files) {
     $taskInstalledFile = Join-Path $taskInstall $taskFile.path

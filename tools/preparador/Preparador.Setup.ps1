@@ -28,7 +28,7 @@ function New-CiRegistration {
     $taskExecutable = [IO.Path]::GetFullPath($ExecutablePath)
     if ([IO.Path]::GetFileName($taskExecutable) -ne 'ComercialInsight.Preparador.exe') { throw 'Executável inesperado.' }
     $taskDefinition = @{
-        version = '1.0.2'
+        version = '1.0.3'
         name = 'Preparar atualização Comercial Insight'
         description = 'Extrai dados e metadados do modelo aberto, em modo de leitura, para uma atualização manual completa.'
         path = $taskExecutable
@@ -59,7 +59,7 @@ function Copy-CiRuntimePayload {
     $taskManifestNative = ConvertTo-CiNativePath $taskManifestPath
     if (-not [IO.File]::Exists($taskManifestNative)) { throw 'Pacote Windows incompleto: manifesto do executável ausente. Extraia todo o ZIP novamente.' }
     $taskManifest = [IO.File]::ReadAllText($taskManifestNative, [Text.Encoding]::UTF8) | ConvertFrom-Json
-    if ($taskManifest.version -ne '1.0.2' -or $taskManifest.runtime -ne 'win-x64' -or $taskManifest.selfContained -ne $true) { throw 'O pacote não contém a versão Windows x64 esperada.' }
+    if ($taskManifest.version -ne '1.0.3' -or $taskManifest.runtime -ne 'win-x64' -or $taskManifest.selfContained -ne $true) { throw 'O pacote não contém a versão Windows x64 esperada.' }
     $taskRequired = @('ComercialInsight.Preparador.exe', 'ComercialInsight.Preparador.dll', 'ComercialInsight.Preparador.deps.json', 'ComercialInsight.Preparador.runtimeconfig.json', 'coreclr.dll', 'System.Windows.Forms.dll', 'Microsoft.AnalysisServices.Core.dll', 'Microsoft.AnalysisServices.Tabular.dll', 'Microsoft.AnalysisServices.AdomdClient.dll')
     $taskNames = @($taskManifest.files | ForEach-Object { [string]$_.path })
     foreach ($taskRequiredName in $taskRequired) {

@@ -7,7 +7,8 @@ import {resolve,relative,isAbsolute,dirname} from "node:path";
 import {performance} from "node:perf_hooks";
 import {manifestSchema,decimalInteger,type ManualManifest} from "../shared/manual";
 import type {Env} from "../worker/core";
-import {compileNativeGroups,compileNativeOptions,nativeControlResult,nativeValues,nativePartStatements,validateNativeModel,validateNativeStorage,type NativeContext,type NativeResult} from "../worker/native-model";
+import {compileNativeGroups,compileNativeOptions,nativeControlResult,nativeValues,nativePartStatements,validateNativeStorage,type NativeContext,type NativeResult} from "../worker/native-model";
+import {validateManualManifest} from "../worker/manual";
 
 const root=resolve(".wrangler"),input=resolve(process.argv[2]??".wrangler/native/Panizzon.ci.ndjson");
 const dbPath=resolve(process.argv[3]??".wrangler/native-validation-"+Date.now()+".sqlite"),reportPath=resolve(process.argv[4]??".wrangler/native-validation-report.json");
@@ -26,7 +27,7 @@ class Statement {
   async all(){return {results:prepare(this.text).all(...this.args)};}
   async run(){return {meta:prepare(this.text).run(...this.args)};}
 }
-const env={DB:{prepare:(text:string)=>new Statement(text),async batch(statements:Statement[]){sql.exec("BEGIN");try{const results=[];for(const s of statements)results.push(await s.run());sql.exec("COMMIT");return results;}catch(error){sql.exec("ROLLBACK");throw error;}}}} as unknown as Env;
+const env={MANUAL_ALLOW_SYNTHETIC:"true",MANUAL_MAX_BYTES:String(512*1024**2),DB:{prepare:(text:string)=>new Statement(text),async batch(statements:Statement[]){sql.exec("BEGIN");try{const results=[];for(const s of statements)results.push(await s.run());sql.exec("COMMIT");return results;}catch(error){sql.exec("ROLLBACK");throw error;}}}} as unknown as Env;
 const started=performance.now(),packageHash=createHash("sha256");
 const report:{stage?:string;formatVersion?:number;packageBytes:number;sha256?:string;rows:number;parts:number;tables?:number;ingestMs?:number;sqliteBytes?:number;conservativeD1Bytes?:number;minimumCronMinutes?:number;controls:{metric:string;context:string;passed:boolean;ms:number;overBudget:boolean}[];groups:{group:string;groups:number;ms:number;overBudget:boolean;contexts:number}[];options?:{ms:number;overBudget:boolean};ok?:boolean;error?:{stage:string;name:string};totalMs?:number}={packageBytes:statSync(input).size,rows:0,parts:0,controls:[],groups:[]};
 const progress=(stage:string,detail:Record<string,string|number|boolean>={})=>{report.stage=stage;report.totalMs=Math.round(performance.now()-started);writeFileSync(reportPath,JSON.stringify(report,null,2)+"\n");process.stdout.write(JSON.stringify({event:stage,...detail})+"\n");};
@@ -37,7 +38,7 @@ try {
   let lineNo=0;const counts=new Map<string,number>(),partCounts=new Map<string,number>();
   for await(const line of lines) {
     lineNo++;
-    if(lineNo===1){manifest=manifestSchema.parse(JSON.parse(line.replace(/^\uFEFF/,"")));if(manifest.formatVersion!==2)throw Error("Requer pacote v2.");validateNativeModel(manifest);report.formatVersion=2;report.tables=manifest.inventory.tables.length;stage="ingestion";continue;}
+    if(lineNo===1){manifest=manifestSchema.parse(JSON.parse(line.replace(/^\uFEFF/,"")));if(manifest.formatVersion!==2)throw Error("Requer pacote v2.");validateManualManifest(manifest,env);report.formatVersion=2;report.tables=manifest.inventory.tables.length;stage="ingestion";continue;}
     if(!manifest)throw Error("Manifesto ausente.");
     const part=JSON.parse(line) as {kind:string;table:string;part:number;rows:{row:number;values:(string|boolean|null)[]}[]};
     const table=manifest.inventory.tables.find(t=>t.id===part.table),meta=table?.parts.find(p=>p.index===part.part),data=Buffer.from(line+"\n");

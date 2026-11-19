@@ -354,7 +354,7 @@ internal sealed class ModelSource : IDisposable
     private static string? Property(object value, string name)
     {
         var v = value.GetType().GetProperty(name)?.GetValue(value);
-        return v is DateTime date ? date.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture) : Convert.ToString(v, CultureInfo.InvariantCulture);
+        return v is DateTime date ? TimestampPolicy.FormatTom(date) : v is DateTimeOffset offset ? offset.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture) : Convert.ToString(v, CultureInfo.InvariantCulture);
     }
     public void Dispose()
     {
@@ -607,6 +607,7 @@ internal sealed class PackageWriter(ModelSource source, Mapping mapping, Action<
     }
     internal static void SelfTest()
     {
+        TimestampPolicy.SelfTest();
         NativeDataSet.SelfTest();
         ConsistencyGuard.SelfTest();
         SemanticPreflight.SelfTest();

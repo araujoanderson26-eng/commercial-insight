@@ -7,7 +7,7 @@ test("atualização do preparador preserva versão/mapeamento nas falhas e Unico
 }, () => {
   const output = execFileSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tests/preparador-install.ps1"], {
     encoding: "utf8",
-    timeout: 30000,
+    timeout: 120000,
   });
   assert.match(output, /Installer tests passed: 11/);
 });

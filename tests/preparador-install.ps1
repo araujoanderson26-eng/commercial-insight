@@ -54,7 +54,7 @@ foreach ($taskRuntimeName in $taskRuntimeNames) {
     $taskRuntimeFiles += @{ path = $taskRuntimeName; bytes = (Get-Item -LiteralPath $taskRuntimeFile).Length; sha256 = (Get-FileHash -LiteralPath $taskRuntimeFile -Algorithm SHA256).Hash }
 }
 $taskRuntimeManifest = Join-Path $taskRuntime 'ci-runtime-manifest.json'
-@{ version = '1.0.2'; runtime = 'win-x64'; selfContained = $true; files = $taskRuntimeFiles } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $taskRuntimeManifest -Encoding UTF8
+@{ version = '1.0.3'; runtime = 'win-x64'; selfContained = $true; files = $taskRuntimeFiles } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $taskRuntimeManifest -Encoding UTF8
 $taskRuntimeStage = Join-Path $taskParent ('Preparador.staging-' + [guid]::NewGuid().ToString('N'))
 Copy-CiRuntimePayload -RuntimePath $taskRuntime -StagePath $taskRuntimeStage
 foreach ($taskRuntimeName in $taskRuntimeNames) { Assert-CiTest ([IO.File]::Exists((ConvertTo-CiNativePath (Join-Path $taskRuntimeStage $taskRuntimeName)))) 'O pacote pronto perdeu uma dependência.' }
@@ -65,7 +65,7 @@ $taskPassed++
 
 # A manifest cannot copy files outside the extracted payload or selected staging directory.
 $taskRuntimeFiles += @{ path = '..\outside.dll'; bytes = 0; sha256 = ('0' * 64) }
-@{ version = '1.0.2'; runtime = 'win-x64'; selfContained = $true; files = $taskRuntimeFiles } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $taskRuntimeManifest -Encoding UTF8
+@{ version = '1.0.3'; runtime = 'win-x64'; selfContained = $true; files = $taskRuntimeFiles } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $taskRuntimeManifest -Encoding UTF8
 [IO.File]::WriteAllText((Join-Path $taskRuntime 'coreclr.dll'), 'INERT TEST coreclr.dll', [Text.Encoding]::ASCII)
 Assert-CiThrows { Copy-CiRuntimePayload -RuntimePath $taskRuntime -StagePath (Join-Path $taskParent ('Preparador.staging-' + [guid]::NewGuid().ToString('N'))) } 'O pacote pronto aceitou um caminho externo.'
 $taskPassed++

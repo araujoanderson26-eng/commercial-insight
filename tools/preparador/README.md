@@ -2,7 +2,9 @@
 
 Ferramenta externa do Power BI Desktop para Windows x64. Usa Microsoft TOM e ADOMD.NET, em modo de leitura, para consultar o modelo local realmente carregado pelo Desktop. Não interpreta PBIX como ZIP, não modifica o modelo e não executa atualização de fontes.
 
-## Versão 1.0.2
+## Versão 1.0.3
+
+A versão 1.0.3 preserva UTC nos horários de metadados do Analysis Services, inclusive quando o provedor omite o fuso. Antes de concluir o arquivo, valida a ordem entre atualização da origem e extração, o horário atual e a data de referência. A guarda temporal do servidor permanece aplicada.
 
 O detector agora distingue comandos antigos concluídos, consultas `Batch/Discover` do próprio TOM e alterações reais. A correção foi verificada em leitura no Desktop aberto, com 27 tabelas e 101 medidas. Logs privados explicam os bloqueios sem guardar corpos de comandos ou credenciais. A gravação usa temporários exclusivos e só publica o arquivo após validar todas as partes.
 

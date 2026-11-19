@@ -564,7 +564,7 @@ export function DataUpdates({ changed }: { changed: () => void }) {
         <section className="panel">
           <div className="sectionhead"><div><div className="mini"><UploadCloud size={14} /> Atualização completa</div><h2>Enviar nova base</h2></div></div>
           <ol className="du-steps"><li>Abra o PBIX atualizado no Power BI Desktop.</li><li>Em Ferramentas externas, clique em <b>Preparar atualização Comercial Insight</b> e aguarde a preparação.</li><li>Salve e envie o pacote <b>.ci.ndjson</b>. Aguarde a confirmação <b>Base atualizada com sucesso</b>.</li></ol>
-          <div className="du-links"><a href="/preparador-comercial-insight.zip" download><Download size={14} />Baixar preparador</a><a href="/atualizacao-dados.md" target="_blank" rel="noreferrer">Instalação e instruções</a></div>
+          <div className="du-links"><a href="https://github.com/araujoanderson26-eng/commercial-insight/releases/download/preparador-v1.0.3/preparador-comercial-insight-1.0.3-win-x64.zip" rel="noreferrer"><Download size={14} />Baixar preparador Windows</a><a href="/atualizacao-dados.md" target="_blank" rel="noreferrer">Instalação e instruções</a></div>
           {unfinished && !sending && <div className="du-callout"><Clock3 size={17} /><span>Há um envio incompleto de <b>{unfinished.filename}</b>. Selecione o mesmo pacote para retomar as partes já recebidas.</span></div>}
           <div className={`du-drop ${dragging ? "du-dragging" : ""}`} onDragOver={(ev) => { ev.preventDefault(); if (!sending) setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={drop}>
             <FileUp size={29} />

@@ -13,7 +13,7 @@ internal sealed class DiagnosticLog
     {
         Directory.CreateDirectory(directory);
         Path = System.IO.Path.Combine(directory, $"preparador-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}.log");
-        Write("run.start version=1.0.2");
+        Write("run.start version=1.0.3");
     }
     internal void Write(string message)
     {

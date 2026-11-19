@@ -235,6 +235,8 @@ function validateManifest(m:ManualManifest,e:Env) {
   const revenue=m.metrics.find(x=>x.id==="revenue");
   if(!revenue || revenue.status!=="validated" || revenue.kind==="unavailable") throw new Error("Faturamento essencial não possui implementação e controles DAX reconciliáveis.");
 }
+export { validateManifest as validateManualManifest };
+
 function validateParts(parts:ManualManifest["projection"]["parts"],count:number,label:string) {
   if(parts.some((p,i)=>p.index!==i+1) || parts.reduce((n,p)=>n+p.rows,0)!==count) throw new Error("Partes ou contagem incompletas: "+label);
 }

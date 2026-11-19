@@ -1,6 +1,6 @@
 # Atualização semanal — Comercial Insight
 
-Preparador Windows x64 1.0.2 · Desenvolvido por Anderson de Araujo.
+Preparador Windows x64 1.0.3 · Desenvolvido por Anderson de Araujo.
 
 ## Toda semana
 

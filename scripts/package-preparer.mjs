@@ -40,7 +40,7 @@ if (runtimePath) {
   visit(runtimeRoot);
   const required = ["ComercialInsight.Preparador.exe", "ComercialInsight.Preparador.dll", "ComercialInsight.Preparador.deps.json", "ComercialInsight.Preparador.runtimeconfig.json", "coreclr.dll", "System.Windows.Forms.dll", "Microsoft.AnalysisServices.Core.dll", "Microsoft.AnalysisServices.Tabular.dll", "Microsoft.AnalysisServices.AdomdClient.dll"];
   for (const name of required) if (!runtimeFiles.some((file) => file.path === name)) throw Error("Publish Windows selfcontained incompleto: " + name);
-  entries.push({ name: "runtime/ci-runtime-manifest.json", data: Buffer.from(JSON.stringify({ version: "1.0.2", runtime: "win-x64", selfContained: true, files: runtimeFiles }, null, 2) + "\n") });
+  entries.push({ name: "runtime/ci-runtime-manifest.json", data: Buffer.from(JSON.stringify({ version: "1.0.3", runtime: "win-x64", selfContained: true, files: runtimeFiles }, null, 2) + "\n") });
 }
 const chunks = [], central = [];
 let offset = 0;

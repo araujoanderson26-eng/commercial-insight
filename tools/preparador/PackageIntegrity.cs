@@ -42,6 +42,7 @@ internal static class PackageIntegrity
         Timestamp(Text(m, "extractedAt", 100));
         if (m.GetProperty("sourceUpdatedAt").ValueKind != JsonValueKind.Null) Timestamp(Text(m, "sourceUpdatedAt", 100));
         Day(Text(m, "referenceDate", 10));
+        TimestampPolicy.ValidatePackage(Text(m, "extractedAt", 100), m.GetProperty("sourceUpdatedAt").ValueKind == JsonValueKind.Null ? null : Text(m, "sourceUpdatedAt", 100), Text(m, "referenceDate", 10), DateTimeOffset.UtcNow);
         var model = m.GetProperty("model"); RequireObject(model, ["name", "id"]); string modelName = Text(model, "name"); _ = Text(model, "id");
         var inventory = m.GetProperty("inventory"); RequireObject(inventory, ["tables", "measures", "relationships", "dependencies", "excluded"]);
         foreach (string key in new[] { "measures", "relationships", "dependencies", "excluded" }) Array(inventory, key, 0, int.MaxValue);
@@ -157,6 +158,7 @@ internal static class PackageIntegrity
             string from = Text(filters, "from", 10), to = Text(filters, "to", 10); Day(from); Day(to); if (string.CompareOrdinal(from, to) > 0) throw Invalid("Período do controle DAX inválido.");
             foreach (var filter in filters.EnumerateObject()) if (filter.Name is not ("from" or "to")) _ = Text(filters, filter.Name, 200, true);
             _ = Text(control, "dax", 32000); Day(Text(control, "referenceDate", 10));
+            if (Text(control, "referenceDate", 10) != Text(manifest, "referenceDate", 10)) throw Invalid("Data de referência do controle divergente.");
             if (control.GetProperty("expected").ValueKind != JsonValueKind.Null && !DecimalText.IsMatch(Text(control, "expected", 100))) throw Invalid("Resultado esperado inválido.");
             string tolerance = Text(control, "tolerance", 30); if (!decimal.TryParse(tolerance, NumberStyles.AllowDecimalPoint | NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out decimal n) || n is < 0m or > 0.01m) throw Invalid("Tolerância do controle inválida.");
         }
@@ -221,7 +223,7 @@ internal static class PackageIntegrity
     private static long Number(JsonElement owner, string key) { if (!owner.GetProperty(key).TryGetInt64(out long value) || Math.Abs((decimal)value) > 9007199254740991m) throw Invalid("Inteiro inválido: " + key); return value; }
     private static void Equal(string value, string expected) { if (value != expected) throw Invalid("Identificação do pacote incompatível: " + expected); }
     private static void Day(string text) { if (!DateOnly.TryParseExact(text, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _)) throw Invalid("Data inválida no pacote."); }
-    private static void Timestamp(string text) { if (!Regex.IsMatch(text, @"(?:Z|[+-]\d{2}:\d{2})$") || !DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out _)) throw Invalid("Horário da origem/extração inválido."); }
+    private static void Timestamp(string text) => _ = TimestampPolicy.ParseTimestamp(text);
     private static InvalidDataException Invalid(string message) => new(message);
 
     internal static byte[] TestFixture(string name = "SINTÉTICO DE TESTE")
@@ -260,6 +262,17 @@ internal static class PackageIntegrity
             Reject(valid[..^1]); Reject(valid[..^50]);
             byte[] changed = valid.ToArray(); changed[^10] ^= 1; Reject(changed);
             Reject(valid.Concat(Encoding.UTF8.GetBytes("{}\n")).ToArray());
+            byte[] TemporalFixture(Action<System.Text.Json.Nodes.JsonObject> change)
+            {
+                int newline = System.Array.IndexOf(valid,(byte)10);
+                var node = System.Text.Json.Nodes.JsonNode.Parse(Encoding.UTF8.GetString(valid,0,newline))!.AsObject();
+                change(node);
+                return Encoding.UTF8.GetBytes(node.ToJsonString(PackageWriter.Json)+"\n").Concat(valid[(newline+1)..]).ToArray();
+            }
+            Reject(TemporalFixture(node => node["sourceUpdatedAt"] = "2026-11-18T12:06:00Z"));
+            Reject(TemporalFixture(node => node["extractedAt"] = DateTimeOffset.UtcNow.AddMinutes(6).ToString("O",CultureInfo.InvariantCulture)));
+            Reject(TemporalFixture(node => node["referenceDate"] = "2026-11-19"));
+            Reject(TemporalFixture(node => node["controls"]![0]!["referenceDate"] = "2026-11-17"));
         }
         finally { if (File.Exists(path)) File.Delete(path); }
     }
