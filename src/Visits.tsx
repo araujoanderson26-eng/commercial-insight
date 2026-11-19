@@ -1,3 +1,4 @@
+import {printReport} from "./print-report";
 import { CalendarDays, Download, Printer, Search, Target } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { Filters, Session } from "../shared/domain";
@@ -46,7 +47,7 @@ export default function Visits({ filters, s }: { filters: Filters; s: Session })
 export function VisitResult({ briefing }: { briefing: VisitBriefing }) {
   const losses = { ...briefing.productLosses, rows: briefing.productLosses.rows.filter((row) => row.values.revenue.current != null && row.values.revenue.previous != null && row.values.revenue.current < row.values.revenue.previous) };
   return <div className="stack visit-result">
-      <section className="panel visit-overview"><div className="sectionhead"><div><div className="mini">Briefing de visita</div><h2>{briefing.client.name}</h2><p className="sub">Código {briefing.client.code} · {briefing.client.municipality ?? "Município indisponível"}{briefing.client.states.length > 0 ? " · " + briefing.client.states.join(", ") : ""}</p></div><div className="report-actions"><button className="soft compact" onClick={() => window.print()}><Printer size={15} />Imprimir / PDF</button><button className="soft compact" onClick={() => downloadWorkbook([
+      <section className="panel visit-overview"><div className="sectionhead"><div><div className="mini">Briefing de visita</div><h2>{briefing.client.name}</h2><p className="sub">Código {briefing.client.code} · {briefing.client.municipality ?? "Município indisponível"}{briefing.client.states.length > 0 ? " · " + briefing.client.states.join(", ") : ""}</p></div><div className="report-actions"><button className="soft compact" onClick={() => printReport(briefing.timeline,briefing)}><Printer size={15} />Imprimir / PDF</button><button className="soft compact" onClick={() => downloadWorkbook([
         reportSheet(briefing.timeline, "Histórico"), reportSheet(briefing.products, "Mix"), reportSheet(briefing.productLosses, "Perdas de mix"),
         { name: "Pauta", rows: [["Cliente", briefing.client.name], ["Período", period(briefing.filters)], ["Categorias",JSON.stringify({incluir:briefing.filters.categoriesInclude??[],excluir:briefing.filters.categoriesExclude??[]})], ["Resumo", briefing.summary], ...briefing.objectives.map((text) => ["Objetivo", text]), ...briefing.questions.map((text) => ["Pergunta", text]), ...briefing.recommendations.map((text) => ["Recomendação", text]), ...briefing.limitations.map((text) => ["Limitação", text])] },
       ], "visita-" + briefing.client.code)}><Download size={15} />Excel</button></div></div>
