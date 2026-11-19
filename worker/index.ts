@@ -8,7 +8,7 @@ import { assistantStatus, isVisitRequest, prepareVisit } from "./commercial";
 import { authenticate, authRoute, origin } from "./auth";
 import { assertControlledHmlUser } from "./real-hml-policy";
 import { controlledHmlModelPreflight } from "./openai-budget";
-import { productionAIStatus } from './production-ai-budget';
+import { productionAIStatus, productionAIModelPreflight } from './production-ai-budget';
 import { classifyWorkerError, classifyWorkerErrorDetail } from "./error-diagnostics";
 import {
   audit,
@@ -110,6 +110,13 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
   }
   if (p.startsWith("/admin/")) {
     if (u.role !== "admin") fail(403, "Acesso exclusivo do administrador.");
+    if (p === '/admin/ai/preflight' && method === 'GET') {
+      await limit(e,'ai-preflight:'+owner,3,600);
+      await checkAccess(e,u,revision,hash);
+      const result=await productionAIModelPreflight(e,owner);
+      await checkAccess(e,u,revision,hash);
+      return json(result);
+    }
     if (p === "/admin/config") {
       if (method === "GET")
         return json({
