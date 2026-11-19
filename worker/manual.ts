@@ -410,12 +410,14 @@ function security(u:DbUser,p:Plan) {
   const national=u.role==="admin"||(u.role==="diretoria"&&!!u.national);
   if(!national && ((u.role==="gerente"&&!regions.length)||(!regions.length&&!clients.length))) fail(403,"Nenhuma carteira ou regional autorizada.");
   const clauses:string[]=[],args:(string|number|null)[]=[];
+  if([...(p.filters.categoriesInclude??[]),...(p.filters.categoriesExclude??[])].some(v=>v.startsWith("Macro Categoria: ")))fail(422,"Macro Categoria exige a fonte relacional com cadastro oficial de produtos.");
   for(const [key,allowed] of [["region",regions],["client",clients],["product",[]],["category",[]]] as const) {
     const requested=p.filters[key],scoped=!national&&allowed.length>0;
     if(requested&&scoped&&!(allowed as readonly string[]).includes(requested)) fail(403,"Seleção fora do seu escopo.");
     const values=requested?[requested]:scoped?allowed:[];
     if(values.length) {clauses.push(key+" IN (SELECT value FROM json_each(?))");args.push(JSON.stringify(values));}
   }
+  for(const [field,operator]of [["categoriesInclude","IN"],["categoriesExclude","NOT IN"]]as const){const values=p.filters[field];if(values?.length){clauses.push("category "+operator+" (SELECT value FROM json_each(?))");args.push(JSON.stringify(values));}}
   return {clauses,args};
 }
 async function aggregate(e:Env,version:string,m:ManualManifest,where:string[],whereArgs:(string|number|null)[],group?:string) {

@@ -51,6 +51,20 @@ export class ManualD1Provider implements DataProvider {
 export async function resolvePlanEntities(provider: DataProvider, plan: Plan, activeFilters?: Plan["filters"]) {
   if (!provider.search) return plan;
   const resolved = { ...plan, filters: { ...plan.filters } };
+  for(const field of ["categoriesInclude","categoriesExclude"]as const){
+    if(!resolved.filters[field]?.length)continue;
+    const values:string[]=[];
+    for(const requested of resolved.filters[field]!){
+      const word=requested.trim().toLocaleUpperCase('pt-BR');
+      const macro=({SUCOS:'SUCO',SUCO:'SUCO',VINHOS:'VINHO',VINHO:'VINHO',ESPUMANTES:'ESPUMANTE',ESPUMANTE:'ESPUMANTE'}as Record<string,string>)[word];
+      const target=macro?'Macro Categoria: '+macro:word==='GRANEL'?'GRANEL':requested;
+      const found=await provider.search({...resolved.filters,category:"",categoriesInclude:[],categoriesExclude:[]},"category",target);
+      if(word==='GRANEL'&&!found.truncated){const groups=found.items.filter(v=>!v.key.startsWith('Macro Categoria: ')&&/\bGRANEL\b/iu.test(v.key));if(groups.length){values.push(...groups.map(v=>v.key));continue;}}
+      const exact=found.items.filter(v=>v.key.trim().toLocaleLowerCase("pt-BR")===target.trim().toLocaleLowerCase("pt-BR")||v.name.trim().toLocaleLowerCase("pt-BR")===target.trim().toLocaleLowerCase("pt-BR"));
+      if(exact.length!==1)fail(422,"Selecione o grupo oficial exato nos filtros de categorias. Famílias genéricas precisam de classificação comercial validada.");
+      values.push(exact[0].key);
+    }resolved.filters[field]=[...new Set(values)];
+  }
   for (const dimension of ["client", "product", "category"] as const) {
     const requested = resolved.filters[dimension];
     if (!requested) continue;
