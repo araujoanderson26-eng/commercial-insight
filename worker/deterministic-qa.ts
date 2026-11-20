@@ -13,7 +13,9 @@ import type { VisitBriefing } from "../shared/commercial";
 import type { ManualManifest } from "../shared/manual";
 import { prepareVisit } from "./commercial";
 import { activeCsvBatch } from "./csv-importer";
+import { queryCsvChurnedClients, queryCsvCustomerRegistryCounts } from "./csv-query";
 import { stmt, type DbUser, type Env } from "./core";
+import { controlledHmlPolicy } from "./real-hml-policy";
 import type { DeterministicIntent } from "./intent-router";
 import { manualContext } from "./manual";
 import {
@@ -229,11 +231,17 @@ export async function executeDeterministicQA(
   visit?: VisitBriefing;
 }> {
   const plan = await resolvePlanEntities(provider, intent.plan, activeFilters);
-  const { versionId } = await manualContext(e, provider.versionId ?? undefined);
-  const manifestRow = await stmt(e, "SELECT manifest FROM ci_imports WHERE id=?", versionId).first<{
-    manifest: string;
-  }>();
-  const manifest = JSON.parse(manifestRow!.manifest) as ManualManifest;
+  const csvActive = !controlledHmlPolicy(e) ? await activeCsvBatch(e) : null;
+  let nativeMeta: { versionId: string; manifest: ManualManifest } | null = null;
+  const ensureNativeMeta = async () => {
+    if (nativeMeta) return nativeMeta;
+    const { versionId } = await manualContext(e, provider.versionId ?? undefined);
+    const manifestRow = await stmt(e, "SELECT manifest FROM ci_imports WHERE id=?", versionId).first<{
+      manifest: string;
+    }>();
+    nativeMeta = { versionId, manifest: JSON.parse(manifestRow!.manifest) as ManualManifest };
+    return nativeMeta;
+  };
 
   const [report, visit] = await Promise.all([
     provider.query(plan),
@@ -263,7 +271,21 @@ export async function executeDeterministicQA(
     intent.kind === "rep_registered_count" ||
     intent.kind === "rep_active_count"
   ) {
-    const counts = await queryEntityCounts(e, u, manifest, versionId, plan.filters, netCurrent);
+    let counts: EntityCounts;
+    if (csvActive) {
+      const regCounts = await queryCsvCustomerRegistryCounts(e, u, csvActive.batchId, plan.filters);
+      counts = {
+        registeredClients: regCounts.registeredClients,
+        buyingClients: report.total.values.buyers.current ?? 0,
+        registeredReps: regCounts.registeredReps,
+        activeReps: report.summaryStats?.activeReps ?? 0,
+        invoiceCount: report.summaryStats?.invoiceCount ?? null,
+        ticketPerInvoice: report.summaryStats?.ticketPerInvoice ?? null,
+      };
+    } else {
+      const nm = await ensureNativeMeta();
+      counts = await queryEntityCounts(e, u, nm.manifest, nm.versionId, plan.filters, netCurrent);
+    }
     report.summaryStats = {
       ...report.summaryStats,
       registeredClients: counts.registeredClients,
@@ -326,7 +348,12 @@ export async function executeDeterministicQA(
   }
 
   if (intent.kind === "churned_clients") {
-    const churn = await queryChurnedClients(e, u, manifest, versionId, plan.filters);
+    const churn = csvActive
+      ? await queryCsvChurnedClients(e, u, csvActive.batchId, plan.filters, report.comparison!)
+      : await (async () => {
+          const nm = await ensureNativeMeta();
+          return queryChurnedClients(e, u, nm.manifest, nm.versionId, plan.filters);
+        })();
     const preview = churn.top
       .slice(0, 5)
       .map((item) => `${item.name} (${pretty(item.prevGross, "gross")} antes)`)

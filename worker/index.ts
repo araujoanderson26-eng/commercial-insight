@@ -3,7 +3,7 @@ import { configSchema, filtersSchema, planSchema, type Commentary, type Plan, ty
 import type { VisitBriefing } from "../shared/commercial";
 import { passwordHash } from "../shared/password.mjs";
 import { assertAssistantAccess, dataProvider, resolvePlanEntities } from "./providers";
-import { csvAdminRoute } from "./csv-importer";
+import { activeCsvBatch, csvAdminRoute } from "./csv-importer";
 import { executeDeterministicQA } from "./deterministic-qa";
 import { routeCommercialIntent } from "./intent-router";
 import { controlledHmlPolicy } from "./real-hml-policy";
@@ -131,7 +131,8 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
       await checkAccess(e, u, revision, hash);
       const statusInfo = await dataStatus(e);
       if (statusInfo.source === "manual" && statusInfo.active?.id) {
-        const cacheKey = await edgeCacheKey("options", [owner, u.scope_version, revision, statusInfo.active.id], reqFilters);
+        const csvScope = (await activeCsvBatch(e))?.batchId ?? "shadow";
+        const cacheKey = await edgeCacheKey("options", [owner, u.scope_version, revision, statusInfo.active.id, csvScope], reqFilters);
         const cached = await cache.match(cacheKey);
         if (cached) {
           const payload = await cached.json();
@@ -413,8 +414,9 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
     const cache = edgeCache();
     if (provider.sourceType === "manual" && provider.versionId) {
       await checkAccess(e, u, revision, hash);
+      const csvScope = (await activeCsvBatch(e))?.batchId ?? "shadow";
       const cacheKey = cache
-        ? await edgeCacheKey("report", [owner, u.scope_version, revision, provider.versionId], plan)
+        ? await edgeCacheKey("report", [owner, u.scope_version, revision, provider.versionId, csvScope], plan)
         : null;
       if (cache && cacheKey) {
         const cached = await cache.match(cacheKey);

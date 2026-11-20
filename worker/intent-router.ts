@@ -399,7 +399,11 @@ export function routeCommercialIntent(
       plan: { group: "month", metric: "gross", order: "current", filters },
     };
   }
-  if (/(?:\bqual\b|\bquanto\b|\btotal\b|\bvalor\b).*\bfaturamento\s+liquid/u.test(f) || /\bfaturamento\s+em\s+20\d{2}\b/u.test(f)) {
+  if (
+    /(?:\bqual\b|\bquanto\b|\btotal\b|\bvalor\b).*\bfaturamento\s+liquid/u.test(f) ||
+    /\bfaturamento\s+em\s+20\d{2}\b/u.test(f) ||
+    /\b(?:quanto|qual)\s+(?:foi\s+o\s+|o\s+)?(?:nosso\s+)?(?:fatur(?:amos|ou|ado|amento)|vend(?:emos|eu|as))\b/u.test(f)
+  ) {
     return {
       kind: "metric_summary",
       plan: { group: "month", metric: "revenue", order: "current", filters },

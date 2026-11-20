@@ -7,6 +7,8 @@ import {
   type ManualManifest, type ManualMetric, type ControlFilters,
 } from "../shared/manual";
 import { audit, body, fail, json, now, stmt, type DbUser, type Env } from "./core";
+import { activeCsvBatch } from "./csv-importer";
+import { csvCustomerDetails, queryCsvOptions, queryCsvReport, searchCsvDimension } from "./csv-query";
 import { assertControlledHmlManifest, assertControlledHmlPackage, assertControlledHmlUser, controlledHmlFilters, controlledHmlPolicy } from "./real-hml-policy";
 import { nativeCapabilities, nativeControl, nativeControlResult, nativeCustomerDetails, nativeOptions, nativePeriod, nativeSearch, nativePartStatements, nativeStorageTables, nativeValues, queryNative, validateNativeModel,validateNativeStorage,type NativeResult } from "./native-model";
 
@@ -78,6 +80,8 @@ export async function dataStatus(e: Env) {
 export async function manualSearch(e: Env, u: DbUser, filters: Filters, dimension: "client" | "product" | "category", query: string, versionId?: string) {
   filters = controlledHmlFilters(e, u, filters);
   if (u.role === "operador" || u.update_only) fail(403,"O operador de atualização não possui acesso às análises comerciais.");
+  const csvActive = !controlledHmlPolicy(e) ? await activeCsvBatch(e) : null;
+  if (csvActive) return searchCsvDimension(e, u, csvActive.batchId, filters, dimension, query);
   const {row,manifest} = await publishedVersion(e,versionId);
   if (manifest.formatVersion !== 2) fail(422,"A pesquisa por descrição requer um pacote nativo v2.");
   return nativeSearch(e,u,filters,manifest,row.id,dimension,query);
@@ -85,6 +89,8 @@ export async function manualSearch(e: Env, u: DbUser, filters: Filters, dimensio
 export async function manualCustomerDetails(e: Env, u: DbUser, filters: Filters, versionId?: string) {
   filters = controlledHmlFilters(e, u, filters);
   if (u.role === "operador" || u.update_only) fail(403,"O operador de atualização não possui acesso às análises comerciais.");
+  const csvActive = !controlledHmlPolicy(e) ? await activeCsvBatch(e) : null;
+  if (csvActive) return csvCustomerDetails(e, u, csvActive.batchId, filters);
   const {row,manifest} = await publishedVersion(e,versionId);
   if (manifest.formatVersion !== 2) fail(422,"Os detalhes diários exigem um pacote nativo v2.");
   return nativeCustomerDetails(e,u,filters,manifest,row.id);
@@ -447,6 +453,9 @@ function dateBounds(from:string,to:string,offset:number) {
 }
 export async function queryManual(e:Env,u:DbUser,p:Plan,versionId?:string):Promise<Report> {
   p={...p,filters:controlledHmlFilters(e,u,p.filters)};
+  if(u.role==="operador"||u.update_only)fail(403,"O operador de atualização não possui acesso às análises comerciais.");
+  const csvActive=!controlledHmlPolicy(e)?await activeCsvBatch(e):null;
+  if(csvActive)return queryCsvReport(e,u,csvActive.batchId,p);
   const {row,manifest:m}=await publishedVersion(e,versionId);
   if(m.formatVersion===2){const report=await queryNative(e,u,p,m,row.id);report.sourceInfo=sourceInfo(row,m);
     if(controlledHmlPolicy(e))report.warnings=[...(report.warnings??[]),"Validação autorizada limitada a janeiro–outubro de 2026 e ao período homólogo de 2025; nenhum período posterior foi incluído."];
@@ -675,6 +684,9 @@ function nativeCompatibility(m:ManualManifest){
 
 export async function manualOptions(e:Env,u:DbUser,filters:Filters) {
   filters=controlledHmlFilters(e,u,filters);
+  if(u.role==="operador"||u.update_only)fail(403,"O operador de atualização não possui acesso às análises comerciais.");
+  const csvActive=!controlledHmlPolicy(e)?await activeCsvBatch(e):null;
+  if(csvActive){const opts=await queryCsvOptions(e,u,csvActive.batchId,filters);return {values:opts.values,labels:{},sourceVersion:csvActive.batchId,truncated:opts.truncated};}
   const {row,manifest}=await publishedVersion(e);
   if(manifest.formatVersion===2)return nativeOptions(e,u,filters,manifest,row.id);
   if(filters.state||filters.regional||filters.manager)fail(422,"Filtro indisponível neste pacote legado.");

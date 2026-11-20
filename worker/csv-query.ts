@@ -14,6 +14,7 @@ import {
   type Report,
   type Row,
 } from "../shared/domain";
+import type { CustomerDetails } from "../shared/commercial";
 import { normalizeCsvKey } from "../shared/csv";
 import { fail, stmt, type DbUser, type Env } from "./core";
 import { routeCommercialIntent } from "./intent-router";
@@ -513,6 +514,125 @@ export async function searchCsvCategory(
       item.name.normalize("NFC").toLocaleLowerCase("pt-BR").includes(q),
   );
   return { items: filtered.slice(0, 60), truncated: filtered.length > 60 };
+}
+
+export async function searchCsvDimension(
+  e: Env,
+  u: DbUser,
+  batchId: string,
+  filters: Filters,
+  dimension: "client" | "product" | "category",
+  query: string,
+): Promise<{ items: { key: string; name: string }[]; truncated: boolean }> {
+  if (!["client", "product", "category"].includes(dimension) || !query.trim() || query.length > 100) {
+    fail(422, "Informe de 1 a 100 caracteres para a pesquisa.");
+  }
+  if (dimension === "category") return searchCsvCategory(e, batchId, query);
+  const acl = scopeForUser(u, { ...filters, client: "", product: "", category: "", categoriesInclude: [], categoriesExclude: [] });
+  const pattern = "%" + query.trim().replace(/[\\%_]/g, "\\$&") + "%";
+  const budget = { rem: 60 };
+
+  if (dimension === "client") {
+    const clauses = ["c.batch_id=?"];
+    const args: (string | number | null)[] = [batchId];
+    if (acl.allowedRegions.length) {
+      clauses.push(inlineInExpr("c.representative_key", acl.allowedRegions, budget, args));
+    }
+    if (acl.allowedClients.length) {
+      clauses.push(inlineInExpr("c.client_key", acl.allowedClients, budget, args));
+    }
+    clauses.push("(c.client_key LIKE ? ESCAPE '\\' OR c.client_raw LIKE ? ESCAPE '\\' OR COALESCE(c.name,'') LIKE ? ESCAPE '\\')");
+    args.push(pattern, pattern, pattern);
+    const rows = (
+      await stmt(
+        e,
+        `SELECT client_key, client_raw, name FROM ci_dim_customers c WHERE ${clauses.join(" AND ")} ORDER BY c.client_key LIMIT 21`,
+        ...args,
+      ).all<{ client_key: string; client_raw: string; name: string | null }>()
+    ).results;
+    return {
+      items: rows.slice(0, 20).map((r) => {
+        const code = r.client_raw || r.client_key;
+        return { key: r.client_key, name: r.name ? `${code} — ${r.name}` : code };
+      }),
+      truncated: rows.length > 20,
+    };
+  }
+
+  const rows = (
+    await stmt(
+      e,
+      "SELECT product_key, product_raw, description FROM ci_dim_products p WHERE p.batch_id=? AND (p.product_key LIKE ? ESCAPE '\\' OR p.product_raw LIKE ? ESCAPE '\\' OR COALESCE(p.description,'') LIKE ? ESCAPE '\\') ORDER BY p.product_key LIMIT 21",
+      batchId,
+      pattern,
+      pattern,
+      pattern,
+    ).all<{ product_key: string; product_raw: string; description: string | null }>()
+  ).results;
+  return {
+    items: rows.slice(0, 20).map((r) => {
+      const code = r.product_raw || r.product_key;
+      return { key: r.product_key, name: r.description ? `${code} — ${r.description}` : code };
+    }),
+    truncated: rows.length > 20,
+  };
+}
+
+export async function csvCustomerDetails(
+  e: Env,
+  u: DbUser,
+  batchId: string,
+  filters: Filters,
+): Promise<CustomerDetails> {
+  if (!filters.client) fail(422, "Selecione um único cliente para consultar sua atividade diária.");
+  const acl = scopeForUser(u, filters);
+  const { batch, hasCalendar, hasDenormMacro } = await loadBatchMeta(e, batchId);
+  const comp = csvComparisonPeriod(filters, batch.coverage_from, batch.coverage_to, batch.reference_date);
+  const clientKey = normalizeCsvKey(filters.client);
+  if (!clientKey) fail(422, "Código de cliente inválido.");
+
+  const w = buildFactWhere(
+    "s",
+    batchId,
+    { ...filters, client: clientKey },
+    acl,
+    hasCalendar,
+    hasDenormMacro,
+    undefined,
+    "single_range",
+    comp.current.from,
+    comp.current.to,
+  );
+  const custScopeArgs: (string | number | null)[] = [batchId, clientKey];
+  const custScopeClauses = ["batch_id=?", "client_key=?"];
+  if (acl.allowedRegions.length) {
+    custScopeClauses.push(inlineInExpr("representative_key", acl.allowedRegions, { rem: 60 }, custScopeArgs));
+  }
+
+  const [activity, muniRows] = await Promise.all([
+    w.emptyIntersection
+      ? Promise.resolve(null)
+      : stmt(
+          e,
+          `WITH purchase_days AS (SELECT s.date FROM ci_fact_sales s ${w.joins} WHERE ${w.clause} GROUP BY s.date HAVING SUM(s.gross_amount)>0) SELECT MAX(date) AS lastPurchase, COUNT(*) AS purchaseDays FROM purchase_days`,
+          ...w.args,
+        ).first<{ lastPurchase: string | null; purchaseDays: number }>(),
+    stmt(
+      e,
+      `SELECT DISTINCT s.municipality FROM ci_fact_sales s WHERE s.batch_id=? AND s.client_key=? AND s.municipality IS NOT NULL AND s.municipality<>'' AND EXISTS(SELECT 1 FROM ci_dim_customers c WHERE c.${custScopeClauses.join(" AND c.")}) LIMIT 3`,
+      ...custScopeArgs,
+    ).all<{ municipality: string }>(),
+  ]);
+  const municipality = muniRows.results.length === 1 ? muniRows.results[0].municipality : null;
+  return {
+    lastPurchase: activity?.lastPurchase ?? null,
+    purchaseDays: activity?.purchaseDays ?? 0,
+    municipality,
+    limitations: [
+      "A última compra observada e a frequência usam dias com soma de faturamento bruto positiva no período selecionado. Dias distintos não equivalem a pedidos, notas ou visitas.",
+    ],
+    period: comp.current,
+  };
 }
 
 export async function queryCsvOptions(
@@ -1435,6 +1555,12 @@ export async function queryCsvReport(
         to: batch.coverage_to ?? comp.current.to,
       },
       model: batch.source_label,
+      capabilities: {
+        metrics: ["gross", "revenue", "returns", "buyers"],
+        groups: ["month", "client", "region", "product", "category", "state", "regional", "manager"],
+        filters: ["region", "client", "product", "category", "state", "regional", "manager"],
+        labels: { region: "Representante", regional: "Regional", state: "UF", manager: "Gerente", revenue: "Faturamento líquido" },
+      },
     },
   };
 }
@@ -1628,6 +1754,106 @@ export async function reconcileCsvBatch(e: Env, batchId: string) {
   };
 }
 
+export async function queryCsvCustomerRegistryCounts(
+  e: Env,
+  u: DbUser,
+  batchId: string,
+  filters?: Filters,
+): Promise<{ registeredClients: number; registeredReps: number }> {
+  const acl = scopeForUser(u, filters);
+  const clauses = ["batch_id=?"];
+  const args: (string | number | null)[] = [batchId];
+  const budget = { rem: 60 };
+  if (acl.allowedRegions.length) {
+    clauses.push(inlineInExpr("representative_key", acl.allowedRegions, budget, args));
+  }
+  if (acl.allowedClients.length) {
+    clauses.push(inlineInExpr("client_key", acl.allowedClients, budget, args));
+  }
+  const reqReps = filters ? mergeNormalizedKeys(filters.region, filters.regions) : [];
+  const reqClients = filters ? mergeNormalizedKeys(filters.client, filters.clients) : [];
+  const reqStates = filters ? mergeNormalizedKeys(filters.state, filters.states) : [];
+  if (reqReps.length) clauses.push(inlineInExpr("representative_key", reqReps, budget, args));
+  if (reqClients.length) clauses.push(inlineInExpr("client_key", reqClients, budget, args));
+  if (reqStates.length) clauses.push(inlineInExpr("state_key", reqStates, budget, args));
+
+  const regCounts = await stmt(
+    e,
+    `SELECT COUNT(DISTINCT client_key) AS clients, COUNT(DISTINCT representative_key) AS reps FROM ci_dim_customers WHERE ${clauses.join(" AND ")}`,
+    ...args,
+  ).first<{ clients: number; reps: number }>();
+  return {
+    registeredClients: regCounts?.clients ?? 0,
+    registeredReps: regCounts?.reps ?? 0,
+  };
+}
+
+export async function queryCsvChurnedClients(
+  e: Env,
+  u: DbUser,
+  batchId: string,
+  filters: Filters,
+  comp: NonNullable<Report["comparison"]>,
+  preloadedMeta?: Awaited<ReturnType<typeof loadBatchMeta>>,
+): Promise<{ totalChurned: number; top: { clientKey: string; name: string; prevGross: number }[] }> {
+  const acl = scopeForUser(u, filters);
+  const { hasCalendar, hasDenormMacro } = preloadedMeta ?? (await loadBatchMeta(e, batchId));
+  const curW = buildFactWhere("s", batchId, filters, acl, hasCalendar, hasDenormMacro, undefined, "single_range", comp.current.from, comp.current.to);
+  const prevW = buildFactWhere("s", batchId, filters, acl, hasCalendar, hasDenormMacro, undefined, "single_range", comp.previous.from, comp.previous.to);
+  if (curW.emptyIntersection) return { totalChurned: 0, top: [] };
+
+  const spanFrom = comp.previous.from < comp.current.from ? comp.previous.from : comp.current.from;
+  const spanTo = comp.previous.to > comp.current.to ? comp.previous.to : comp.current.to;
+  const churnRows = (
+    await stmt(
+      e,
+      `WITH by_c AS (
+         SELECT COALESCE(s.client_key, NULL) AS client_key,
+           SUM(CASE WHEN ${curW.clause} AND s.gross_amount>0 THEN s.gross_amount ELSE 0 END) AS cur_g,
+           SUM(CASE WHEN ${prevW.clause} THEN s.gross_amount ELSE 0 END) AS prev_g
+         FROM ci_fact_sales s ${curW.joins}
+         WHERE s.batch_id=? AND s.client_key IS NOT NULL AND s.date BETWEEN ? AND ? AND ((s.date BETWEEN ? AND ?) OR (s.date BETWEEN ? AND ?))
+         GROUP BY COALESCE(s.client_key, NULL)
+       )
+       SELECT client_key, prev_g, (SELECT COUNT(*) FROM by_c WHERE prev_g>0 AND cur_g=0) AS total_churned
+       FROM by_c WHERE prev_g>0 AND cur_g=0 ORDER BY prev_g DESC, client_key ASC LIMIT 10`,
+      ...curW.args,
+      ...prevW.args,
+      batchId,
+      spanFrom,
+      spanTo,
+      comp.current.from,
+      comp.current.to,
+      comp.previous.from,
+      comp.previous.to,
+    ).all<{ client_key: string; prev_g: number; total_churned: number }>()
+  ).results;
+
+  if (!churnRows.length) return { totalChurned: 0, top: [] };
+  const keys = churnRows.map((r) => r.client_key);
+  const nameArgs: (string | number | null)[] = [batchId];
+  const inKeys = inlineInExpr("client_key", keys, { rem: 60 }, nameArgs);
+  const nameRows = (
+    await stmt(
+      e,
+      `SELECT client_key, client_raw, name FROM ci_dim_customers WHERE batch_id=? AND ${inKeys}`,
+      ...nameArgs,
+    ).all<{ client_key: string; client_raw: string; name: string | null }>()
+  ).results;
+  const nameMap = new Map(
+    nameRows.map((d) => [d.client_key, d.name ? `${d.client_raw || d.client_key} — ${d.name}` : d.client_raw || d.client_key]),
+  );
+
+  return {
+    totalChurned: churnRows[0].total_churned,
+    top: churnRows.map((r) => ({
+      clientKey: r.client_key,
+      name: nameMap.get(r.client_key) ?? r.client_key,
+      prevGross: r.prev_g / MONEY_DIV,
+    })),
+  };
+}
+
 export async function askCsvDeterministic(
   e: Env,
   u: DbUser,
@@ -1641,9 +1867,9 @@ export async function askCsvDeterministic(
   meta: { engine: "deterministic"; latencyMs: number; openaiCalls: 0; mode: "shadow" };
 }> {
   const t0 = Date.now();
-  const acl = scopeForUser(u, activeFilters);
+  scopeForUser(u, activeFilters);
   const meta = await loadBatchMeta(e, batchId);
-  const { batch, hasCalendar, hasDenormMacro } = meta;
+  const { batch } = meta;
 
   const capabilities: NonNullable<Report["sourceInfo"]>["capabilities"] = {
     metrics: ["gross", "revenue", "returns", "buyers"],
@@ -1697,26 +1923,11 @@ export async function askCsvDeterministic(
     intent.kind === "rep_registered_count" ||
     intent.kind === "rep_active_count"
   ) {
-    const custWhere = acl.allowedRegions.length
-      ? "representative_key IN (SELECT value FROM json_each(?))"
-      : acl.allowedClients.length
-        ? "client_key IN (SELECT value FROM json_each(?))"
-        : "1=1";
-    const custArgs = acl.allowedRegions.length
-      ? [JSON.stringify(acl.allowedRegions)]
-      : acl.allowedClients.length
-        ? [JSON.stringify(acl.allowedClients)]
-        : [];
-    const regCounts = await stmt(
-      e,
-      `SELECT COUNT(DISTINCT client_key) AS clients, COUNT(DISTINCT representative_key) AS reps FROM ci_dim_customers WHERE batch_id=? AND ${custWhere}`,
-      batchId,
-      ...custArgs,
-    ).first<{ clients: number; reps: number }>();
+    const regCounts = await queryCsvCustomerRegistryCounts(e, u, batchId);
 
-    const registeredClients = regCounts?.clients ?? 0;
+    const registeredClients = regCounts.registeredClients;
     const buyingClients = report.total.values.buyers.current ?? 0;
-    const registeredReps = regCounts?.reps ?? 0;
+    const registeredReps = regCounts.registeredReps;
     const activeReps = report.summaryStats?.activeReps ?? 0;
 
     if (intent.kind === "customer_counts") {
@@ -1741,39 +1952,9 @@ export async function askCsvDeterministic(
       };
     }
   } else if (intent.kind === "churned_clients") {
-    const curW = buildFactWhere("s", batchId, plan.filters, acl, hasCalendar, hasDenormMacro, undefined, "single_range", comp.current.from, comp.current.to);
-    const prevW = buildFactWhere("s", batchId, plan.filters, acl, hasCalendar, hasDenormMacro, undefined, "single_range", comp.previous.from, comp.previous.to);
-    const spanFrom = comp.previous.from < comp.current.from ? comp.previous.from : comp.current.from;
-    const spanTo = comp.previous.to > comp.current.to ? comp.previous.to : comp.current.to;
-    const churnRows = curW.emptyIntersection
-      ? []
-      : (
-          await stmt(
-            e,
-            `WITH by_c AS (
-               SELECT COALESCE(s.client_key, NULL) AS client_key,
-                 SUM(CASE WHEN ${curW.clause} AND s.gross_amount>0 THEN s.gross_amount ELSE 0 END) AS cur_g,
-                 SUM(CASE WHEN ${prevW.clause} THEN s.gross_amount ELSE 0 END) AS prev_g
-               FROM ci_fact_sales s ${curW.joins}
-               WHERE s.batch_id=? AND s.client_key IS NOT NULL AND s.date BETWEEN ? AND ? AND ((s.date BETWEEN ? AND ?) OR (s.date BETWEEN ? AND ?))
-               GROUP BY COALESCE(s.client_key, NULL)
-             )
-             SELECT client_key, prev_g, (SELECT COUNT(*) FROM by_c WHERE prev_g>0 AND cur_g=0) AS total_churned
-             FROM by_c WHERE prev_g>0 AND cur_g=0 ORDER BY prev_g DESC LIMIT 10`,
-            ...curW.args,
-            ...prevW.args,
-            batchId,
-            spanFrom,
-            spanTo,
-            comp.current.from,
-            comp.current.to,
-            comp.previous.from,
-            comp.previous.to,
-          ).all<{ client_key: string; prev_g: number; total_churned: number }>()
-        ).results;
-    const n = churnRows[0]?.total_churned ?? 0;
+    const churn = await queryCsvChurnedClients(e, u, batchId, plan.filters, comp, meta);
     commentary = {
-      summary: `${n.toLocaleString("pt-BR")} clientes compraram no período homólogo anterior (${comp.previous.from} a ${comp.previous.to}) e zeraram no período atual (${comp.current.from} a ${comp.current.to}). ${srcNote}`,
+      summary: `${churn.totalChurned.toLocaleString("pt-BR")} clientes compraram no período homólogo anterior (${comp.previous.from} a ${comp.previous.to}) e zeraram no período atual (${comp.current.from} a ${comp.current.to}). ${srcNote}`,
       actions: ["Priorizar contato com clientes inativados de maior volume histórico."],
     };
   } else if (intent.kind === "category_mix_share") {
