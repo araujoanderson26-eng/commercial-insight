@@ -35,12 +35,16 @@ type BatchMetaRow = {
   customer_rows: number;
   product_rows: number;
   summary_json: string | null;
+  validation_json: string | null;
+  has_cal: number;
+  has_macro: number;
 };
 
 type WhereSpec = {
   joins: string;
   clause: string;
   args: (string | number | null)[];
+  emptyIntersection: boolean;
 };
 
 function scopeForUser(u: DbUser, filters?: Filters): {
@@ -147,24 +151,62 @@ function buildFactWhere(
   batchId: string,
   filters: Filters,
   acl: { allowedRegions: string[]; allowedClients: string[] },
-  dateFrom: string,
-  dateTo: string,
-  hasCalendar: boolean,
+  needsCalendarSubquery: boolean,
+  hasDenormMacro: boolean,
+  group?: Group,
+  periodJoinBounds?: boolean,
+  dateFrom?: string,
+  dateTo?: string,
 ): WhereSpec {
-  const clauses: string[] = [`${alias}.batch_id = ?`, `${alias}.date >= ?`, `${alias}.date <= ?`];
-  const args: (string | number | null)[] = [batchId, dateFrom, dateTo];
+  const clauses: string[] = periodJoinBounds
+    ? [`${alias}.batch_id = ?`, `${alias}.date >= pd.pf`, `${alias}.date <= pd.pt`]
+    : [`${alias}.batch_id = ?`, `${alias}.date >= ?`, `${alias}.date <= ?`];
+  const args: (string | number | null)[] = periodJoinBounds ? [batchId] : [batchId, dateFrom!, dateTo!];
 
-  if (hasCalendar) {
+  if (needsCalendarSubquery) {
     clauses.push(
       `EXISTS(SELECT 1 FROM ci_dim_calendar cal WHERE cal.batch_id = ${alias}.batch_id AND cal.date = ${alias}.date)`,
     );
   }
 
+  const reqRegions = mergeNormalizedKeys(filters.region, filters.regions);
+  const reqClients = mergeNormalizedKeys(filters.client, filters.clients);
+  const reqProducts = mergeNormalizedKeys(filters.product, filters.products);
+  const reqStates = mergeNormalizedKeys(filters.state, filters.states);
+  const reqRegionals = mergeNormalizedKeys(filters.regional, filters.regionals);
+  const reqManagers = mergeNormalizedKeys(filters.manager, filters.managers);
+  const reqSegments = mergeNormalizedKeys(undefined, filters.segments);
+  const reqBrands = mergeNormalizedKeys(undefined, filters.brands);
+  const reqChannels = mergeNormalizedKeys(undefined, filters.channels);
+  const inc = splitCategories(filters.category, filters.categoriesInclude);
+  const exc = splitCategories(undefined, filters.categoriesExclude);
+
+  const emptyIntersection = Boolean(
+    (inc.macros.length > 0 || inc.groups.length > 0) &&
+      inc.macros.every((m) => exc.macros.includes(m)) &&
+      inc.groups.every((g) => exc.groups.includes(g)),
+  );
+
+  const needCustomers = Boolean(
+    acl.allowedRegions.length || reqRegions.length || reqSegments.length || group === "client" || group === "region",
+  );
+  const needProducts = Boolean(
+    reqBrands.length ||
+      (!hasDenormMacro && (inc.macros.length || exc.macros.length)) ||
+      group === "product" ||
+      group === "category",
+  );
+  const needRegions = Boolean(
+    reqRegionals.length || reqManagers.length || group === "regional" || group === "manager",
+  );
+
   const joins = [
-    `LEFT JOIN ci_dim_customers c ON c.batch_id = ${alias}.batch_id AND c.client_key = ${alias}.client_key`,
-    `LEFT JOIN ci_dim_products p ON p.batch_id = ${alias}.batch_id AND p.product_key = ${alias}.product_key`,
-    `LEFT JOIN ci_dim_regions rg ON rg.batch_id = ${alias}.batch_id AND rg.state_key = ${alias}.state_key`,
-  ].join(" ");
+    needCustomers ? `LEFT JOIN ci_dim_customers c ON c.batch_id = ${alias}.batch_id AND c.client_key = ${alias}.client_key` : "",
+    needProducts ? `LEFT JOIN ci_dim_products p ON p.batch_id = ${alias}.batch_id AND p.product_key = ${alias}.product_key` : "",
+    needRegions ? `LEFT JOIN ci_dim_regions rg ON rg.batch_id = ${alias}.batch_id AND rg.state_key = ${alias}.state_key` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   if (acl.allowedRegions.length) {
     clauses.push("c.representative_key IN (SELECT value FROM json_each(?))");
@@ -174,65 +216,56 @@ function buildFactWhere(
     clauses.push(`${alias}.client_key IN (SELECT value FROM json_each(?))`);
     args.push(JSON.stringify(acl.allowedClients));
   }
-
-  const reqRegions = mergeNormalizedKeys(filters.region, filters.regions);
   if (reqRegions.length) {
     clauses.push("c.representative_key IN (SELECT value FROM json_each(?))");
     args.push(JSON.stringify(reqRegions));
   }
-  const reqClients = mergeNormalizedKeys(filters.client, filters.clients);
   if (reqClients.length) {
     clauses.push(`${alias}.client_key IN (SELECT value FROM json_each(?))`);
     args.push(JSON.stringify(reqClients));
   }
-  const reqProducts = mergeNormalizedKeys(filters.product, filters.products);
   if (reqProducts.length) {
     clauses.push(`${alias}.product_key IN (SELECT value FROM json_each(?))`);
     args.push(JSON.stringify(reqProducts));
   }
-  const reqStates = mergeNormalizedKeys(filters.state, filters.states);
   if (reqStates.length) {
     clauses.push(`${alias}.state_key IN (SELECT value FROM json_each(?))`);
     args.push(JSON.stringify(reqStates));
   }
-  const reqRegionals = mergeNormalizedKeys(filters.regional, filters.regionals);
   if (reqRegionals.length) {
     clauses.push("rg.regional_key IN (SELECT value FROM json_each(?))");
     args.push(JSON.stringify(reqRegionals));
   }
-  const reqManagers = mergeNormalizedKeys(filters.manager, filters.managers);
   if (reqManagers.length) {
     clauses.push("rg.manager_key IN (SELECT value FROM json_each(?))");
     args.push(JSON.stringify(reqManagers));
   }
-  const reqSegments = mergeNormalizedKeys(undefined, filters.segments);
   if (reqSegments.length) {
     clauses.push("UPPER(TRIM(c.segment)) IN (SELECT value FROM json_each(?))");
     args.push(JSON.stringify(reqSegments));
   }
-  const reqBrands = mergeNormalizedKeys(undefined, filters.brands);
   if (reqBrands.length) {
     clauses.push("UPPER(TRIM(p.brand)) IN (SELECT value FROM json_each(?))");
     args.push(JSON.stringify(reqBrands));
   }
-  const reqChannels = mergeNormalizedKeys(undefined, filters.channels);
   if (reqChannels.length) {
     if (alias === "s") {
       clauses.push("UPPER(TRIM(s.channel)) IN (SELECT value FROM json_each(?))");
       args.push(JSON.stringify(reqChannels));
     } else {
       clauses.push(
-        `EXISTS(SELECT 1 FROM ci_fact_sales fs WHERE fs.batch_id = r.batch_id AND fs.date BETWEEN ? AND ? AND fs.client_key = r.client_key AND UPPER(TRIM(fs.channel)) IN (SELECT value FROM json_each(?)))`,
+        periodJoinBounds
+          ? `EXISTS(SELECT 1 FROM ci_fact_sales fs WHERE fs.batch_id = r.batch_id AND fs.date BETWEEN pd.pf AND pd.pt AND fs.client_key = r.client_key AND UPPER(TRIM(fs.channel)) IN (SELECT value FROM json_each(?)))`
+          : `EXISTS(SELECT 1 FROM ci_fact_sales fs WHERE fs.batch_id = r.batch_id AND fs.date BETWEEN ? AND ? AND fs.client_key = r.client_key AND UPPER(TRIM(fs.channel)) IN (SELECT value FROM json_each(?)))`,
       );
-      args.push(dateFrom, dateTo, JSON.stringify(reqChannels));
+      if (periodJoinBounds) args.push(JSON.stringify(reqChannels));
+      else args.push(dateFrom!, dateTo!, JSON.stringify(reqChannels));
     }
   }
 
   // Strictly independent commercial categories: NEVER auto-group SUCO with SUCO CONCENTRADO*
   // or VINHO with VINHO IMPORTADO / VINHO GRANEL or VINAGRE with VINAGRE GRANEL.
-  const inc = splitCategories(filters.category, filters.categoriesInclude);
-  const exc = splitCategories(undefined, filters.categoriesExclude);
-  const macroExpr = `COALESCE(p.macro_category_key, ${alias}.macro_key)`;
+  const macroExpr = hasDenormMacro ? `${alias}.macro_key` : `COALESCE(p.macro_category_key, ${alias}.macro_key)`;
 
   if (inc.macros.length && inc.groups.length) {
     clauses.push(
@@ -256,7 +289,7 @@ function buildFactWhere(
     args.push(JSON.stringify(exc.groups));
   }
 
-  return { joins, clause: clauses.join(" AND "), args };
+  return { joins, clause: clauses.join(" AND "), args, emptyIntersection };
 }
 
 function groupExpressions(alias: "s" | "r", group: Exclude<Group, "month">): { keyExpr: string; labelExpr: string } {
@@ -299,15 +332,36 @@ function groupExpressions(alias: "s" | "r", group: Exclude<Group, "month">): { k
   }
 }
 
-async function loadBatchMeta(e: Env, batchId: string): Promise<{ batch: BatchMetaRow; hasCalendar: boolean }> {
+async function loadBatchMeta(
+  e: Env,
+  batchId: string,
+): Promise<{ batch: BatchMetaRow; hasCalendar: boolean; hasDenormMacro: boolean }> {
   const batch = await stmt(
     e,
-    "SELECT id,status,source_label,reference_date,coverage_from,coverage_to,file_count,sales_rows,return_rows,customer_rows,product_rows,summary_json FROM ci_csv_batches WHERE id=?",
+    `SELECT id,status,source_label,reference_date,coverage_from,coverage_to,file_count,
+       sales_rows,return_rows,customer_rows,product_rows,summary_json,validation_json,
+       EXISTS(SELECT 1 FROM ci_dim_calendar WHERE batch_id=? LIMIT 1) AS has_cal,
+       EXISTS(SELECT 1 FROM ci_fact_sales WHERE batch_id=? AND macro_key IS NOT NULL LIMIT 1) AS has_macro
+     FROM ci_csv_batches WHERE id=?`,
+    batchId,
+    batchId,
     batchId,
   ).first<BatchMetaRow>();
   if (!batch) fail(404, "Lote CSV não encontrado.");
-  const cal = await stmt(e, "SELECT 1 AS yes FROM ci_dim_calendar WHERE batch_id=? LIMIT 1", batchId).first<{ yes: number }>();
-  return { batch, hasCalendar: !!cal?.yes };
+  let calVerified = false;
+  if (batch.validation_json) {
+    try {
+      const val = JSON.parse(batch.validation_json) as { checks?: { name: string; status: string }[] };
+      calVerified = val.checks?.some((c) => c.name === "cobertura_calendario" && c.status === "passed") ?? false;
+    } catch {
+      calVerified = false;
+    }
+  }
+  return {
+    batch,
+    hasCalendar: !calVerified && !!batch.has_cal,
+    hasDenormMacro: !!batch.has_macro,
+  };
 }
 
 export async function searchCsvCategory(
@@ -405,48 +459,141 @@ export async function queryCsvReport(
   plan: Plan,
 ): Promise<Report> {
   const acl = scopeForUser(u, plan.filters);
-  const { batch, hasCalendar } = await loadBatchMeta(e, batchId);
+  const { batch, hasCalendar, hasDenormMacro } = await loadBatchMeta(e, batchId);
   const comp = csvComparisonPeriod(plan.filters, batch.coverage_from, batch.coverage_to, batch.reference_date);
   const f = plan.filters;
-
-  const curSalesW = buildFactWhere("s", batchId, f, acl, comp.current.from, comp.current.to, hasCalendar);
-  const curRetW = buildFactWhere("r", batchId, f, acl, comp.current.from, comp.current.to, hasCalendar);
-  const prevSalesW = buildFactWhere("s", batchId, f, acl, comp.previous.from, comp.previous.to, hasCalendar);
-  const prevRetW = buildFactWhere("r", batchId, f, acl, comp.previous.from, comp.previous.to, hasCalendar);
-
-  const [curTotS, curTotR, prevTotS, prevTotR, activeRepsRow] = await Promise.all([
-    stmt(
-      e,
-      `SELECT SUM(s.gross_amount) AS gross, COUNT(*) AS rows_n, COUNT(DISTINCT s.client_key) AS buyers, COUNT(DISTINCT CASE WHEN s.doc_no IS NOT NULL AND s.doc_no<>'' THEN s.doc_no END) AS docs FROM ci_fact_sales s ${curSalesW.joins} WHERE ${curSalesW.clause}`,
-      ...curSalesW.args,
-    ).first<{ gross: number | null; rows_n: number; buyers: number; docs: number }>(),
-    stmt(
-      e,
-      `SELECT COALESCE(SUM(r.return_amount),0) AS returns FROM ci_fact_returns r ${curRetW.joins} WHERE ${curRetW.clause}`,
-      ...curRetW.args,
-    ).first<{ returns: number }>(),
-    stmt(
-      e,
-      `SELECT SUM(s.gross_amount) AS gross, COUNT(*) AS rows_n, COUNT(DISTINCT s.client_key) AS buyers FROM ci_fact_sales s ${prevSalesW.joins} WHERE ${prevSalesW.clause}`,
-      ...prevSalesW.args,
-    ).first<{ gross: number | null; rows_n: number; buyers: number }>(),
-    stmt(
-      e,
-      `SELECT COALESCE(SUM(r.return_amount),0) AS returns FROM ci_fact_returns r ${prevRetW.joins} WHERE ${prevRetW.clause}`,
-      ...prevRetW.args,
-    ).first<{ returns: number }>(),
-    stmt(
-      e,
-      `SELECT COUNT(DISTINCT c.representative_key) AS n FROM ci_fact_sales s ${curSalesW.joins} WHERE ${curSalesW.clause} AND c.representative_key IS NOT NULL`,
-      ...curSalesW.args,
-    ).first<{ n: number }>(),
-  ]);
-
+  const conflicts = detectFilterConflicts(f);
   const toPair = (cVal: number | null, pVal: number | null) => ({ current: cVal, previous: pVal });
+
+  const salesW = buildFactWhere("s", batchId, f, acl, hasCalendar, hasDenormMacro, plan.group, true);
+  const retW = buildFactWhere("r", batchId, f, acl, hasCalendar, hasDenormMacro, plan.group, true);
+
+  if (salesW.emptyIntersection) {
+    return {
+      total: {
+        name: "Total",
+        values: {
+          gross: toPair(null, null),
+          returns: toPair(0, 0),
+          revenue: toPair(null, null),
+          buyers: toPair(null, null),
+          margin: toPair(null, null),
+        },
+      },
+      rows: [],
+      plan,
+      asOf: new Date().toISOString(),
+      truncated: false,
+      source: "Arquivo manual (D1)",
+      comparison: comp,
+      ...(conflicts.length ? { filterConflicts: conflicts } : {}),
+      summaryStats: { activeReps: 0, ticketPerBuyer: null, invoiceCount: 0, ticketPerInvoice: null },
+      sourceInfo: {
+        versionId: batch.id,
+        extractedAt: new Date().toISOString(),
+        sourceUpdatedAt: null,
+        referenceDate: batch.reference_date ?? comp.current.to,
+        coverage: { from: batch.coverage_from ?? comp.current.from, to: batch.coverage_to ?? comp.current.to },
+        model: batch.source_label,
+      },
+    };
+  }
+
+  const periodArgs = [comp.current.from, comp.current.to, comp.previous.from, comp.previous.to];
+  const periodsCte = "WITH periods(pk, pf, pt) AS (SELECT 0, ?, ? UNION ALL SELECT 1, ?, ?)";
+  const repsSalesW =
+    plan.group === "region"
+      ? null
+      : buildFactWhere("s", batchId, f, acl, hasCalendar, hasDenormMacro, "region", false, comp.current.from, comp.current.to);
+
+  let totalsSalesRes: { pk: number; gross: number; rows_n: number; buyers: number; docs: number }[] = [];
+  let groupedSalesRes: { pk: number; g: string | null; name?: string | null; gross: number; buyers: number }[] = [];
+  let groupedRetRes: { pk: number; g: string | null; name?: string | null; returns: number }[] = [];
+  let activeRepsCount = 0;
+
+  if (plan.group === "month") {
+    const monthExpr =
+      "CASE WHEN pd.pk=0 THEN s.month_key ELSE (CAST(SUBSTR(s.month_key,1,4) AS INTEGER)+1) || SUBSTR(s.month_key,5,3) END";
+    const retMonthExpr =
+      "CASE WHEN pd.pk=0 THEN r.month_key ELSE (CAST(SUBSTR(r.month_key,1,4) AS INTEGER)+1) || SUBSTR(r.month_key,5,3) END";
+
+    const [tots, gs, gr, repsRow] = await Promise.all([
+      stmt(
+        e,
+        `${periodsCte} SELECT pd.pk AS pk, SUM(s.gross_amount) AS gross, COUNT(*) AS rows_n, COUNT(DISTINCT s.client_key) AS buyers, COUNT(DISTINCT CASE WHEN pd.pk=0 AND s.doc_no IS NOT NULL AND s.doc_no<>'' THEN s.doc_no END) AS docs FROM periods pd JOIN ci_fact_sales s ${salesW.joins} WHERE ${salesW.clause} GROUP BY pd.pk`,
+        ...periodArgs,
+        ...salesW.args,
+      ).all<{ pk: number; gross: number; rows_n: number; buyers: number; docs: number }>(),
+      stmt(
+        e,
+        `${periodsCte} SELECT pd.pk AS pk, ${monthExpr} AS g, SUM(s.gross_amount) AS gross, COUNT(DISTINCT s.client_key) AS buyers FROM periods pd JOIN ci_fact_sales s ${salesW.joins} WHERE ${salesW.clause} GROUP BY pd.pk, g`,
+        ...periodArgs,
+        ...salesW.args,
+      ).all<{ pk: number; g: string; gross: number; buyers: number }>(),
+      stmt(
+        e,
+        `${periodsCte} SELECT pd.pk AS pk, ${retMonthExpr} AS g, SUM(r.return_amount) AS returns FROM periods pd JOIN ci_fact_returns r ${retW.joins} WHERE ${retW.clause} GROUP BY pd.pk, g`,
+        ...periodArgs,
+        ...retW.args,
+      ).all<{ pk: number; g: string; returns: number }>(),
+      stmt(
+        e,
+        `SELECT COUNT(DISTINCT c.representative_key) AS n FROM ci_fact_sales s ${repsSalesW!.joins} WHERE ${repsSalesW!.clause} AND c.representative_key IS NOT NULL`,
+        ...repsSalesW!.args,
+      ).first<{ n: number }>(),
+    ]);
+    totalsSalesRes = tots.results;
+    groupedSalesRes = gs.results;
+    groupedRetRes = gr.results;
+    activeRepsCount = repsRow?.n ?? 0;
+  } else {
+    const sg = groupExpressions("s", plan.group);
+    const rg = groupExpressions("r", plan.group);
+    const [tots, gs, gr, repsRow] = await Promise.all([
+      stmt(
+        e,
+        `${periodsCte} SELECT pd.pk AS pk, SUM(s.gross_amount) AS gross, COUNT(*) AS rows_n, COUNT(DISTINCT s.client_key) AS buyers, COUNT(DISTINCT CASE WHEN pd.pk=0 AND s.doc_no IS NOT NULL AND s.doc_no<>'' THEN s.doc_no END) AS docs FROM periods pd JOIN ci_fact_sales s ${salesW.joins} WHERE ${salesW.clause} GROUP BY pd.pk`,
+        ...periodArgs,
+        ...salesW.args,
+      ).all<{ pk: number; gross: number; rows_n: number; buyers: number; docs: number }>(),
+      stmt(
+        e,
+        `${periodsCte} SELECT pd.pk AS pk, ${sg.keyExpr} AS g, ${sg.labelExpr} AS name, SUM(s.gross_amount) AS gross, COUNT(DISTINCT s.client_key) AS buyers FROM periods pd JOIN ci_fact_sales s ${salesW.joins} WHERE ${salesW.clause} GROUP BY pd.pk, ${sg.keyExpr}`,
+        ...periodArgs,
+        ...salesW.args,
+      ).all<{ pk: number; g: string | null; name: string | null; gross: number; buyers: number }>(),
+      stmt(
+        e,
+        `${periodsCte} SELECT pd.pk AS pk, ${rg.keyExpr} AS g, ${rg.labelExpr} AS name, SUM(r.return_amount) AS returns FROM periods pd JOIN ci_fact_returns r ${retW.joins} WHERE ${retW.clause} GROUP BY pd.pk, ${rg.keyExpr}`,
+        ...periodArgs,
+        ...retW.args,
+      ).all<{ pk: number; g: string | null; name: string | null; returns: number }>(),
+      repsSalesW
+        ? stmt(
+            e,
+            `SELECT COUNT(DISTINCT c.representative_key) AS n FROM ci_fact_sales s ${repsSalesW.joins} WHERE ${repsSalesW.clause} AND c.representative_key IS NOT NULL`,
+            ...repsSalesW.args,
+          ).first<{ n: number }>()
+        : Promise.resolve(null),
+    ]);
+    totalsSalesRes = tots.results;
+    groupedSalesRes = gs.results;
+    groupedRetRes = gr.results;
+    activeRepsCount =
+      plan.group === "region"
+        ? groupedSalesRes.filter((r) => r.pk === 0 && r.g !== null).length
+        : (repsRow?.n ?? 0);
+  }
+
+  const curTotS = totalsSalesRes.find((r) => r.pk === 0);
+  const prevTotS = totalsSalesRes.find((r) => r.pk === 1);
+  const curRetScaled = groupedRetRes.filter((r) => r.pk === 0).reduce((acc, r) => acc + Number(r.returns ?? 0), 0);
+  const prevRetScaled = groupedRetRes.filter((r) => r.pk === 1).reduce((acc, r) => acc + Number(r.returns ?? 0), 0);
+
   const curGross = curTotS?.rows_n ? Number(curTotS.gross ?? 0) / MONEY_DIV : null;
   const prevGross = prevTotS?.rows_n ? Number(prevTotS.gross ?? 0) / MONEY_DIV : null;
-  const curRet = curTotR ? Number(curTotR.returns ?? 0) / MONEY_DIV : 0;
-  const prevRet = prevTotR ? Number(prevTotR.returns ?? 0) / MONEY_DIV : 0;
+  const curRet = curRetScaled / MONEY_DIV;
+  const prevRet = prevRetScaled / MONEY_DIV;
   const curRev = curGross !== null || curRet > 0 ? (curGross ?? 0) - curRet : null;
   const prevRev = prevGross !== null || prevRet > 0 ? (prevGross ?? 0) - prevRet : null;
   const curBuyers = curTotS?.rows_n ? curTotS.buyers : null;
@@ -465,30 +612,6 @@ export async function queryCsvReport(
 
   let rows: Row[] = [];
   if (plan.group === "month") {
-    const prevMonthExpr = "(CAST(SUBSTR(month_key,1,4) AS INTEGER)+1) || SUBSTR(month_key,5,3)";
-    const [cs, cr, ps, pr] = await Promise.all([
-      stmt(
-        e,
-        `SELECT s.month_key AS g, SUM(s.gross_amount) AS gross, COUNT(DISTINCT s.client_key) AS buyers FROM ci_fact_sales s ${curSalesW.joins} WHERE ${curSalesW.clause} GROUP BY s.month_key`,
-        ...curSalesW.args,
-      ).all<{ g: string; gross: number; buyers: number }>(),
-      stmt(
-        e,
-        `SELECT r.month_key AS g, SUM(r.return_amount) AS returns FROM ci_fact_returns r ${curRetW.joins} WHERE ${curRetW.clause} GROUP BY r.month_key`,
-        ...curRetW.args,
-      ).all<{ g: string; returns: number }>(),
-      stmt(
-        e,
-        `SELECT ${prevMonthExpr} AS g, SUM(s.gross_amount) AS gross, COUNT(DISTINCT s.client_key) AS buyers FROM ci_fact_sales s ${prevSalesW.joins} WHERE ${prevSalesW.clause} GROUP BY s.month_key`,
-        ...prevSalesW.args,
-      ).all<{ g: string; gross: number; buyers: number }>(),
-      stmt(
-        e,
-        `SELECT ${prevMonthExpr} AS g, SUM(r.return_amount) AS returns FROM ci_fact_returns r ${prevRetW.joins} WHERE ${prevRetW.clause} GROUP BY r.month_key`,
-        ...prevRetW.args,
-      ).all<{ g: string; returns: number }>(),
-    ]);
-
     const mMap = new Map<string, { cg: number | null; cr: number; cb: number | null; pg: number | null; pr: number; pb: number | null }>();
     const touch = (m: string) => {
       let entry = mMap.get(m);
@@ -498,18 +621,23 @@ export async function queryCsvReport(
       }
       return entry;
     };
-    for (const r of cs.results) {
+    for (const r of groupedSalesRes) {
+      if (!r.g) continue;
       const e0 = touch(r.g);
-      e0.cg = r.gross / MONEY_DIV;
-      e0.cb = r.buyers;
+      if (r.pk === 0) {
+        e0.cg = r.gross / MONEY_DIV;
+        e0.cb = r.buyers;
+      } else {
+        e0.pg = r.gross / MONEY_DIV;
+        e0.pb = r.buyers;
+      }
     }
-    for (const r of cr.results) touch(r.g).cr = r.returns / MONEY_DIV;
-    for (const r of ps.results) {
+    for (const r of groupedRetRes) {
+      if (!r.g) continue;
       const e0 = touch(r.g);
-      e0.pg = r.gross / MONEY_DIV;
-      e0.pb = r.buyers;
+      if (r.pk === 0) e0.cr = r.returns / MONEY_DIV;
+      else e0.pr = r.returns / MONEY_DIV;
     }
-    for (const r of pr.results) touch(r.g).pr = r.returns / MONEY_DIV;
 
     rows = [...mMap.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
@@ -524,36 +652,11 @@ export async function queryCsvReport(
         },
       }));
   } else {
-    const sg = groupExpressions("s", plan.group);
-    const rg = groupExpressions("r", plan.group);
-    const [cs, cr, ps, pr] = await Promise.all([
-      stmt(
-        e,
-        `SELECT ${sg.keyExpr} AS g, ${sg.labelExpr} AS name, SUM(s.gross_amount) AS gross, COUNT(DISTINCT s.client_key) AS buyers FROM ci_fact_sales s ${curSalesW.joins} WHERE ${curSalesW.clause} GROUP BY ${sg.keyExpr}`,
-        ...curSalesW.args,
-      ).all<{ g: string | null; name: string | null; gross: number; buyers: number }>(),
-      stmt(
-        e,
-        `SELECT ${rg.keyExpr} AS g, ${rg.labelExpr} AS name, SUM(r.return_amount) AS returns FROM ci_fact_returns r ${curRetW.joins} WHERE ${curRetW.clause} GROUP BY ${rg.keyExpr}`,
-        ...curRetW.args,
-      ).all<{ g: string | null; name: string | null; returns: number }>(),
-      stmt(
-        e,
-        `SELECT ${sg.keyExpr} AS g, ${sg.labelExpr} AS name, SUM(s.gross_amount) AS gross, COUNT(DISTINCT s.client_key) AS buyers FROM ci_fact_sales s ${prevSalesW.joins} WHERE ${prevSalesW.clause} GROUP BY ${sg.keyExpr}`,
-        ...prevSalesW.args,
-      ).all<{ g: string | null; name: string | null; gross: number; buyers: number }>(),
-      stmt(
-        e,
-        `SELECT ${rg.keyExpr} AS g, ${rg.labelExpr} AS name, SUM(r.return_amount) AS returns FROM ci_fact_returns r ${prevRetW.joins} WHERE ${prevRetW.clause} GROUP BY ${rg.keyExpr}`,
-        ...prevRetW.args,
-      ).all<{ g: string | null; name: string | null; returns: number }>(),
-    ]);
-
     const gMap = new Map<
       string,
       { key: string | null; name: string; cg: number | null; cr: number; cb: number | null; pg: number | null; pr: number; pb: number | null }
     >();
-    const touch = (k: string | null, name: string | null) => {
+    const touch = (k: string | null, name: string | null | undefined) => {
       const id = k ?? "__NULL__";
       let entry = gMap.get(id);
       if (!entry) {
@@ -562,18 +665,21 @@ export async function queryCsvReport(
       }
       return entry;
     };
-    for (const r of cs.results) {
+    for (const r of groupedSalesRes) {
       const e0 = touch(r.g, r.name);
-      e0.cg = r.gross / MONEY_DIV;
-      e0.cb = r.buyers;
+      if (r.pk === 0) {
+        e0.cg = r.gross / MONEY_DIV;
+        e0.cb = r.buyers;
+      } else {
+        e0.pg = r.gross / MONEY_DIV;
+        e0.pb = r.buyers;
+      }
     }
-    for (const r of cr.results) touch(r.g, r.name).cr = r.returns / MONEY_DIV;
-    for (const r of ps.results) {
+    for (const r of groupedRetRes) {
       const e0 = touch(r.g, r.name);
-      e0.pg = r.gross / MONEY_DIV;
-      e0.pb = r.buyers;
+      if (r.pk === 0) e0.cr = r.returns / MONEY_DIV;
+      else e0.pr = r.returns / MONEY_DIV;
     }
-    for (const r of pr.results) touch(r.g, r.name).pr = r.returns / MONEY_DIV;
 
     rows = [...gMap.values()].map((v) => ({
       name: v.name,
@@ -619,7 +725,6 @@ export async function queryCsvReport(
     rows.sort((a, b) => (plan.order === "decline" ? 1 : -1) * (score(a) - score(b)) || a.name.localeCompare(b.name, "pt-BR"));
   }
 
-  const conflicts = detectFilterConflicts(f);
   const docs = curTotS?.docs ?? 0;
   const ticketPerBuyer = curRev !== null && curBuyers && curBuyers > 0 ? curRev / curBuyers : null;
   const ticketPerInvoice = curRev !== null && docs > 0 ? curRev / docs : null;
@@ -634,7 +739,7 @@ export async function queryCsvReport(
     comparison: comp,
     ...(conflicts.length ? { filterConflicts: conflicts } : {}),
     summaryStats: {
-      activeReps: activeRepsRow?.n ?? 0,
+      activeReps: activeRepsCount,
       ticketPerBuyer,
       invoiceCount: docs,
       ticketPerInvoice,
@@ -664,23 +769,7 @@ export async function reconcileCsvBatch(e: Env, batchId: string) {
     return `${year}-${String(month).padStart(2, "0")}-${String(clamped).padStart(2, "0")}`;
   })();
 
-  const [
-    activeRow,
-    filesRows,
-    sales26,
-    ret26,
-    sales25,
-    ret25,
-    repsStats,
-    ordersCount,
-    exARow,
-    exBRow,
-    exCRow,
-    macros26,
-    churnFull,
-    churnYtd,
-    aggCheck,
-  ] = await Promise.all([
+  const [activeRow, filesRows, salesBoth, retBoth, repsStats, ordersCount] = await Promise.all([
     stmt(e, "SELECT active_batch_id,mode FROM ci_csv_active WHERE id=1").first<{ active_batch_id: string | null; mode: string }>(),
     stmt(e, "SELECT role,filename,sha256,bytes,row_count,duplicate_count,rejected_count,status FROM ci_csv_files WHERE batch_id=? ORDER BY role,filename", batchId).all<{
       role: string;
@@ -694,28 +783,26 @@ export async function reconcileCsvBatch(e: Env, batchId: string) {
     }>(),
     stmt(
       e,
-      "SELECT COUNT(*) AS rows_n, COALESCE(SUM(gross_amount),0) AS gross, COUNT(DISTINCT client_key) AS buyers, COUNT(DISTINCT CASE WHEN doc_no IS NOT NULL AND doc_no<>'' THEN doc_no END) AS docs FROM ci_fact_sales WHERE batch_id=? AND date BETWEEN '2026-01-01' AND ?",
+      `SELECT
+         COALESCE(SUM(CASE WHEN date>='2026-01-01' THEN gross_amount ELSE 0 END),0) AS gross26,
+         COUNT(DISTINCT CASE WHEN date>='2026-01-01' THEN client_key END) AS buyers26,
+         COUNT(DISTINCT CASE WHEN date>='2026-01-01' AND doc_no IS NOT NULL AND doc_no<>'' THEN doc_no END) AS docs26,
+         COALESCE(SUM(CASE WHEN date<=? THEN gross_amount ELSE 0 END),0) AS gross25
+       FROM ci_fact_sales WHERE batch_id=? AND date BETWEEN '2025-01-01' AND ?`,
+      prevEnd,
       batchId,
       refDate,
-    ).first<{ rows_n: number; gross: number; buyers: number; docs: number }>(),
+    ).first<{ gross26: number; buyers26: number; docs26: number; gross25: number }>(),
     stmt(
       e,
-      "SELECT COUNT(*) AS rows_n, COALESCE(SUM(return_amount),0) AS returns FROM ci_fact_returns WHERE batch_id=? AND date BETWEEN '2026-01-01' AND ?",
+      `SELECT
+         COALESCE(SUM(CASE WHEN date>='2026-01-01' THEN return_amount ELSE 0 END),0) AS ret26,
+         COALESCE(SUM(CASE WHEN date<=? THEN return_amount ELSE 0 END),0) AS ret25
+       FROM ci_fact_returns WHERE batch_id=? AND date BETWEEN '2025-01-01' AND ?`,
+      prevEnd,
       batchId,
       refDate,
-    ).first<{ rows_n: number; returns: number }>(),
-    stmt(
-      e,
-      "SELECT COALESCE(SUM(gross_amount),0) AS gross FROM ci_fact_sales WHERE batch_id=? AND date BETWEEN '2025-01-01' AND ?",
-      batchId,
-      prevEnd,
-    ).first<{ gross: number }>(),
-    stmt(
-      e,
-      "SELECT COALESCE(SUM(return_amount),0) AS returns FROM ci_fact_returns WHERE batch_id=? AND date BETWEEN '2025-01-01' AND ?",
-      batchId,
-      prevEnd,
-    ).first<{ returns: number }>(),
+    ).first<{ ret26: number; ret25: number }>(),
     stmt(
       e,
       `SELECT
@@ -726,6 +813,9 @@ export async function reconcileCsvBatch(e: Env, batchId: string) {
       refDate,
     ).first<{ registered: number; active: number }>(),
     stmt(e, "SELECT COUNT(*) AS n FROM ci_fact_orders_open WHERE batch_id=?", batchId).first<{ n: number }>(),
+  ]);
+
+  const [exARow, exBRow, exCRow, macros26, churnBoth, aggCheck] = await Promise.all([
     stmt(
       e,
       "SELECT SUM(gross_amount) AS g, SUM(return_amount) AS r, SUM(net_amount) AS n FROM ci_agg_monthly WHERE batch_id=? AND month_key BETWEEN '2026-01' AND '2026-12' AND macro_key IN ('SUCO','VINHO') AND group_key NOT LIKE '%GRANEL%'",
@@ -748,16 +838,22 @@ export async function reconcileCsvBatch(e: Env, batchId: string) {
     ).all<{ macro_key: string; g: number; r: number; n: number }>(),
     stmt(
       e,
-      "SELECT COUNT(*) AS n FROM (SELECT client_key, SUM(CASE WHEN month_key BETWEEN '2025-01' AND '2025-12' THEN gross_amount ELSE 0 END) AS y25, SUM(CASE WHEN month_key BETWEEN '2026-01' AND '2026-12' THEN gross_amount ELSE 0 END) AS y26 FROM ci_fact_sales WHERE batch_id=? GROUP BY client_key HAVING y25>0 AND y26=0)",
-      batchId,
-    ).first<{ n: number }>(),
-    stmt(
-      e,
-      "SELECT COUNT(*) AS n FROM (SELECT client_key, SUM(CASE WHEN date BETWEEN '2025-01-01' AND ? THEN gross_amount ELSE 0 END) AS p, SUM(CASE WHEN date BETWEEN '2026-01-01' AND ? THEN gross_amount ELSE 0 END) AS c FROM ci_fact_sales WHERE batch_id=? GROUP BY client_key HAVING p>0 AND c=0)",
+      `WITH by_c AS (
+         SELECT client_key,
+           SUM(CASE WHEN month_key BETWEEN '2025-01' AND '2025-12' THEN gross_amount ELSE 0 END) AS y25,
+           SUM(CASE WHEN month_key BETWEEN '2026-01' AND '2026-12' THEN gross_amount ELSE 0 END) AS y26,
+           SUM(CASE WHEN date BETWEEN '2025-01-01' AND ? THEN gross_amount ELSE 0 END) AS p_ytd,
+           SUM(CASE WHEN date BETWEEN '2026-01-01' AND ? THEN gross_amount ELSE 0 END) AS c_ytd
+         FROM ci_fact_sales WHERE batch_id=? AND date>='2025-01-01' GROUP BY client_key
+       )
+       SELECT
+         SUM(CASE WHEN y25>0 AND y26=0 THEN 1 ELSE 0 END) AS full_churn,
+         SUM(CASE WHEN p_ytd>0 AND c_ytd=0 THEN 1 ELSE 0 END) AS ytd_churn
+       FROM by_c`,
       prevEnd,
       refDate,
       batchId,
-    ).first<{ n: number }>(),
+    ).first<{ full_churn: number; ytd_churn: number }>(),
     stmt(
       e,
       `SELECT
@@ -772,13 +868,13 @@ export async function reconcileCsvBatch(e: Env, batchId: string) {
     ).first<{ fact_gross: number; fact_ret: number; agg_gross: number; agg_ret: number }>(),
   ]);
 
-  const gross26 = (sales26?.gross ?? 0) / MONEY_DIV;
-  const returns26 = (ret26?.returns ?? 0) / MONEY_DIV;
+  const gross26 = (salesBoth?.gross26 ?? 0) / MONEY_DIV;
+  const returns26 = (retBoth?.ret26 ?? 0) / MONEY_DIV;
   const net26 = Number((gross26 - returns26).toFixed(2));
-  const net25 = Number((((sales25?.gross ?? 0) - (ret25?.returns ?? 0)) / MONEY_DIV).toFixed(2));
+  const net25 = Number((((salesBoth?.gross25 ?? 0) - (retBoth?.ret25 ?? 0)) / MONEY_DIV).toFixed(2));
   const yoyPct = net25 > 0 ? Number((((net26 - net25) / net25) * 100).toFixed(2)) : null;
-  const buyers26 = sales26?.buyers ?? 0;
-  const docs26 = sales26?.docs ?? 0;
+  const buyers26 = salesBoth?.buyers26 ?? 0;
+  const docs26 = salesBoth?.docs26 ?? 0;
   const summaryMeta = batch.summary_json ? (JSON.parse(batch.summary_json) as { customerDuplicates?: number; customerConflicts?: string[] }) : {};
 
   return {
@@ -810,8 +906,8 @@ export async function reconcileCsvBatch(e: Env, batchId: string) {
       activeReps2026: repsStats?.active ?? 0,
       buyers2026: buyers26,
       distinctInvoices2026: docs26,
-      churnedClientsFullYear2025vs2026: churnFull?.n ?? 0,
-      churnedClientsYtd: churnYtd?.n ?? 0,
+      churnedClientsFullYear2025vs2026: churnBoth?.full_churn ?? 0,
+      churnedClientsYtd: churnBoth?.ytd_churn ?? 0,
     },
     ytd2026: {
       gross: Number(gross26.toFixed(2)),
@@ -863,7 +959,7 @@ export async function askCsvDeterministic(
 }> {
   const t0 = Date.now();
   const acl = scopeForUser(u, activeFilters);
-  const { batch, hasCalendar } = await loadBatchMeta(e, batchId);
+  const { batch, hasCalendar, hasDenormMacro } = await loadBatchMeta(e, batchId);
 
   const capabilities: NonNullable<Report["sourceInfo"]>["capabilities"] = {
     metrics: ["gross", "revenue", "returns", "buyers"],
@@ -948,30 +1044,32 @@ export async function askCsvDeterministic(
       };
     }
   } else if (intent.kind === "churned_clients") {
-    const curW = buildFactWhere("s", batchId, plan.filters, acl, comp.current.from, comp.current.to, hasCalendar);
-    const prevW = buildFactWhere("s", batchId, plan.filters, acl, comp.previous.from, comp.previous.to, hasCalendar);
-    const churnRows = (
-      await stmt(
-        e,
-        `WITH by_c AS (
-           SELECT s.client_key,
-             SUM(CASE WHEN ${curW.clause} AND s.gross_amount>0 THEN s.gross_amount ELSE 0 END) AS cur_g,
-             SUM(CASE WHEN ${prevW.clause} THEN s.gross_amount ELSE 0 END) AS prev_g
-           FROM ci_fact_sales s ${curW.joins}
-           WHERE s.batch_id=? AND s.client_key IS NOT NULL AND ((s.date BETWEEN ? AND ?) OR (s.date BETWEEN ? AND ?))
-           GROUP BY s.client_key
-         )
-         SELECT client_key, prev_g, (SELECT COUNT(*) FROM by_c WHERE prev_g>0 AND cur_g=0) AS total_churned
-         FROM by_c WHERE prev_g>0 AND cur_g=0 ORDER BY prev_g DESC LIMIT 10`,
-        ...curW.args,
-        ...prevW.args,
-        batchId,
-        comp.current.from,
-        comp.current.to,
-        comp.previous.from,
-        comp.previous.to,
-      ).all<{ client_key: string; prev_g: number; total_churned: number }>()
-    ).results;
+    const curW = buildFactWhere("s", batchId, plan.filters, acl, hasCalendar, hasDenormMacro, undefined, false, comp.current.from, comp.current.to);
+    const prevW = buildFactWhere("s", batchId, plan.filters, acl, hasCalendar, hasDenormMacro, undefined, false, comp.previous.from, comp.previous.to);
+    const churnRows = curW.emptyIntersection
+      ? []
+      : (
+          await stmt(
+            e,
+            `WITH by_c AS (
+               SELECT s.client_key,
+                 SUM(CASE WHEN ${curW.clause} AND s.gross_amount>0 THEN s.gross_amount ELSE 0 END) AS cur_g,
+                 SUM(CASE WHEN ${prevW.clause} THEN s.gross_amount ELSE 0 END) AS prev_g
+               FROM ci_fact_sales s ${curW.joins}
+               WHERE s.batch_id=? AND s.client_key IS NOT NULL AND ((s.date BETWEEN ? AND ?) OR (s.date BETWEEN ? AND ?))
+               GROUP BY s.client_key
+             )
+             SELECT client_key, prev_g, (SELECT COUNT(*) FROM by_c WHERE prev_g>0 AND cur_g=0) AS total_churned
+             FROM by_c WHERE prev_g>0 AND cur_g=0 ORDER BY prev_g DESC LIMIT 10`,
+            ...curW.args,
+            ...prevW.args,
+            batchId,
+            comp.current.from,
+            comp.current.to,
+            comp.previous.from,
+            comp.previous.to,
+          ).all<{ client_key: string; prev_g: number; total_churned: number }>()
+        ).results;
     const n = churnRows[0]?.total_churned ?? 0;
     commentary = {
       summary: `${n.toLocaleString("pt-BR")} clientes compraram no período homólogo anterior (${comp.previous.from} a ${comp.previous.to}) e zeraram no período atual (${comp.current.from} a ${comp.current.to}). ${srcNote}`,
