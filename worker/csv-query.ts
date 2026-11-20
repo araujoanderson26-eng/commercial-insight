@@ -40,12 +40,110 @@ type BatchMetaRow = {
   has_macro: number;
 };
 
+type PeriodMode = "periods_join" | "disjoint_dual" | "single_range";
+
+type ReportQueryOptions = {
+  preloadedMeta?: Awaited<ReturnType<typeof loadBatchMeta>>;
+  includeDocs?: boolean;
+  includeActiveReps?: boolean;
+  skipMonthlySeries?: boolean;
+};
+
+type TotPair = { gross: number; rows_n: number; buyers: number };
+
+type CachedSummary = {
+  curTotS?: TotPair;
+  prevTotS?: TotPair;
+  curRetScaled: number;
+  prevRetScaled: number;
+  docsCount?: number;
+  activeRepsCount?: number;
+};
+
+const SUMMARY_CACHE_MAX = 64;
+const summaryCache = new Map<string, CachedSummary>();
+
+function cacheGetSummary(key: string): CachedSummary | undefined {
+  const hit = summaryCache.get(key);
+  if (!hit) return undefined;
+  summaryCache.delete(key);
+  summaryCache.set(key, hit);
+  return hit;
+}
+
+function cacheSetSummary(key: string, entry: CachedSummary) {
+  if (summaryCache.has(key)) summaryCache.delete(key);
+  else if (summaryCache.size >= SUMMARY_CACHE_MAX) {
+    const oldest = summaryCache.keys().next().value;
+    if (oldest !== undefined) summaryCache.delete(oldest);
+  }
+  summaryCache.set(key, entry);
+}
+
 type WhereSpec = {
   joins: string;
   clause: string;
   args: (string | number | null)[];
   emptyIntersection: boolean;
 };
+
+function needsCustomerFilter(filters: Filters, acl: { allowedRegions: string[] }): boolean {
+  return Boolean(
+    acl.allowedRegions.length ||
+      mergeNormalizedKeys(filters.region, filters.regions).length ||
+      mergeNormalizedKeys(undefined, filters.segments).length,
+  );
+}
+
+function needsProductFilter(filters: Filters, hasDenormMacro: boolean): boolean {
+  if (mergeNormalizedKeys(undefined, filters.brands).length) return true;
+  if (hasDenormMacro) return false;
+  const inc = splitCategories(filters.category, filters.categoriesInclude);
+  const exc = splitCategories(undefined, filters.categoriesExclude);
+  return inc.macros.length > 0 || exc.macros.length > 0;
+}
+
+function buildSummaryCacheKey(
+  batch: BatchMetaRow,
+  hasCalendar: boolean,
+  hasDenormMacro: boolean,
+  acl: { allowedRegions: string[]; allowedClients: string[] },
+  comp: NonNullable<Report["comparison"]>,
+  f: Filters,
+): string {
+  const sortList = (single?: string, list?: string[]) => mergeNormalizedKeys(single, list).sort();
+  const inc = splitCategories(f.category, f.categoriesInclude);
+  const exc = splitCategories(undefined, f.categoriesExclude);
+  return JSON.stringify([
+    batch.id,
+    batch.sales_rows,
+    batch.return_rows,
+    batch.customer_rows,
+    batch.product_rows,
+    batch.reference_date ?? "",
+    hasCalendar ? 1 : 0,
+    hasDenormMacro ? 1 : 0,
+    [...acl.allowedRegions].sort(),
+    [...acl.allowedClients].sort(),
+    comp.current.from,
+    comp.current.to,
+    comp.previous.from,
+    comp.previous.to,
+    sortList(f.region, f.regions),
+    sortList(f.client, f.clients),
+    sortList(f.product, f.products),
+    sortList(f.state, f.states),
+    sortList(f.regional, f.regionals),
+    sortList(f.manager, f.managers),
+    sortList(undefined, f.segments),
+    sortList(undefined, f.brands),
+    sortList(undefined, f.channels),
+    [...inc.macros].sort(),
+    [...inc.groups].sort(),
+    [...exc.macros].sort(),
+    [...exc.groups].sort(),
+  ]);
+}
 
 function scopeForUser(u: DbUser, filters?: Filters): {
   allowedRegions: string[];
@@ -146,6 +244,31 @@ export function csvComparisonPeriod(
   };
 }
 
+function inlineInExpr(
+  col: string,
+  values: string[],
+  budget: { rem: number },
+  args: (string | number | null)[],
+  negate = false,
+): string {
+  if (values.length === 1) {
+    args.push(values[0]);
+    budget.rem--;
+    return negate ? `(${col} IS NULL OR ${col} <> ?)` : `${col} = ?`;
+  }
+  if (values.length <= 20 && budget.rem >= values.length) {
+    const ph = values.map(() => "?").join(",");
+    args.push(...values);
+    budget.rem -= values.length;
+    return negate ? `(${col} IS NULL OR ${col} NOT IN (${ph}))` : `${col} IN (${ph})`;
+  }
+  args.push(JSON.stringify(values));
+  budget.rem--;
+  return negate
+    ? `(${col} IS NULL OR ${col} NOT IN (SELECT value FROM json_each(?)))`
+    : `${col} IN (SELECT value FROM json_each(?))`;
+}
+
 function buildFactWhere(
   alias: "s" | "r",
   batchId: string,
@@ -154,14 +277,26 @@ function buildFactWhere(
   needsCalendarSubquery: boolean,
   hasDenormMacro: boolean,
   group?: Group,
-  periodJoinBounds?: boolean,
+  periodMode: PeriodMode = "periods_join",
   dateFrom?: string,
   dateTo?: string,
+  disjointCurFrom?: string,
+  disjointPrevTo?: string,
+  omitClientDimJoin = false,
+  omitProductDimJoin = false,
 ): WhereSpec {
-  const clauses: string[] = periodJoinBounds
-    ? [`${alias}.batch_id = ?`, `${alias}.date >= pd.pf`, `${alias}.date <= pd.pt`]
-    : [`${alias}.batch_id = ?`, `${alias}.date >= ?`, `${alias}.date <= ?`];
-  const args: (string | number | null)[] = periodJoinBounds ? [batchId] : [batchId, dateFrom!, dateTo!];
+  const clauses: string[] =
+    periodMode === "periods_join"
+      ? [`${alias}.batch_id = ?`, `${alias}.date >= pd.pf`, `${alias}.date <= pd.pt`]
+      : periodMode === "disjoint_dual"
+        ? [`${alias}.batch_id = ?`, `${alias}.date >= ?`, `${alias}.date <= ?`, `(${alias}.date >= ? OR ${alias}.date <= ?)`]
+        : [`${alias}.batch_id = ?`, `${alias}.date >= ?`, `${alias}.date <= ?`];
+  const args: (string | number | null)[] =
+    periodMode === "periods_join"
+      ? [batchId]
+      : periodMode === "disjoint_dual"
+        ? [batchId, dateFrom!, dateTo!, disjointCurFrom!, disjointPrevTo!]
+        : [batchId, dateFrom!, dateTo!];
 
   if (needsCalendarSubquery) {
     clauses.push(
@@ -188,13 +323,12 @@ function buildFactWhere(
   );
 
   const needCustomers = Boolean(
-    acl.allowedRegions.length || reqRegions.length || reqSegments.length || group === "client" || group === "region",
+    needsCustomerFilter(filters, acl) ||
+      (!omitClientDimJoin && (group === "client" || group === "region")),
   );
   const needProducts = Boolean(
-    reqBrands.length ||
-      (!hasDenormMacro && (inc.macros.length || exc.macros.length)) ||
-      group === "product" ||
-      group === "category",
+    needsProductFilter(filters, hasDenormMacro) ||
+      (!omitProductDimJoin && (group === "product" || group === "category")),
   );
   const needRegions = Boolean(
     reqRegionals.length || reqManagers.length || group === "regional" || group === "manager",
@@ -208,58 +342,53 @@ function buildFactWhere(
     .filter(Boolean)
     .join(" ");
 
+  const budget = { rem: 60 };
   if (acl.allowedRegions.length) {
-    clauses.push("c.representative_key IN (SELECT value FROM json_each(?))");
-    args.push(JSON.stringify(acl.allowedRegions));
+    clauses.push(inlineInExpr("c.representative_key", acl.allowedRegions, budget, args));
   }
   if (acl.allowedClients.length) {
-    clauses.push(`${alias}.client_key IN (SELECT value FROM json_each(?))`);
-    args.push(JSON.stringify(acl.allowedClients));
+    clauses.push(inlineInExpr(`${alias}.client_key`, acl.allowedClients, budget, args));
   }
   if (reqRegions.length) {
-    clauses.push("c.representative_key IN (SELECT value FROM json_each(?))");
-    args.push(JSON.stringify(reqRegions));
+    clauses.push(inlineInExpr("c.representative_key", reqRegions, budget, args));
   }
   if (reqClients.length) {
-    clauses.push(`${alias}.client_key IN (SELECT value FROM json_each(?))`);
-    args.push(JSON.stringify(reqClients));
+    clauses.push(inlineInExpr(`${alias}.client_key`, reqClients, budget, args));
   }
   if (reqProducts.length) {
-    clauses.push(`${alias}.product_key IN (SELECT value FROM json_each(?))`);
-    args.push(JSON.stringify(reqProducts));
+    clauses.push(inlineInExpr(`${alias}.product_key`, reqProducts, budget, args));
   }
   if (reqStates.length) {
-    clauses.push(`${alias}.state_key IN (SELECT value FROM json_each(?))`);
-    args.push(JSON.stringify(reqStates));
+    clauses.push(inlineInExpr(`${alias}.state_key`, reqStates, budget, args));
   }
   if (reqRegionals.length) {
-    clauses.push("rg.regional_key IN (SELECT value FROM json_each(?))");
-    args.push(JSON.stringify(reqRegionals));
+    clauses.push(inlineInExpr("rg.regional_key", reqRegionals, budget, args));
   }
   if (reqManagers.length) {
-    clauses.push("rg.manager_key IN (SELECT value FROM json_each(?))");
-    args.push(JSON.stringify(reqManagers));
+    clauses.push(inlineInExpr("rg.manager_key", reqManagers, budget, args));
   }
   if (reqSegments.length) {
-    clauses.push("UPPER(TRIM(c.segment)) IN (SELECT value FROM json_each(?))");
-    args.push(JSON.stringify(reqSegments));
+    clauses.push(inlineInExpr("UPPER(TRIM(c.segment))", reqSegments, budget, args));
   }
   if (reqBrands.length) {
-    clauses.push("UPPER(TRIM(p.brand)) IN (SELECT value FROM json_each(?))");
-    args.push(JSON.stringify(reqBrands));
+    clauses.push(inlineInExpr("UPPER(TRIM(p.brand))", reqBrands, budget, args));
   }
   if (reqChannels.length) {
     if (alias === "s") {
-      clauses.push("UPPER(TRIM(s.channel)) IN (SELECT value FROM json_each(?))");
-      args.push(JSON.stringify(reqChannels));
+      clauses.push(inlineInExpr("UPPER(TRIM(s.channel))", reqChannels, budget, args));
     } else {
+      const chDate =
+        periodMode === "periods_join"
+          ? "fs.date BETWEEN pd.pf AND pd.pt"
+          : periodMode === "disjoint_dual"
+            ? "fs.date BETWEEN ? AND ? AND (fs.date >= ? OR fs.date <= ?)"
+            : "fs.date BETWEEN ? AND ?";
+      if (periodMode === "disjoint_dual") args.push(dateFrom!, dateTo!, disjointCurFrom!, disjointPrevTo!);
+      else if (periodMode === "single_range") args.push(dateFrom!, dateTo!);
+      const chCond = inlineInExpr("UPPER(TRIM(fs.channel))", reqChannels, budget, args);
       clauses.push(
-        periodJoinBounds
-          ? `EXISTS(SELECT 1 FROM ci_fact_sales fs WHERE fs.batch_id = r.batch_id AND fs.date BETWEEN pd.pf AND pd.pt AND fs.client_key = r.client_key AND UPPER(TRIM(fs.channel)) IN (SELECT value FROM json_each(?)))`
-          : `EXISTS(SELECT 1 FROM ci_fact_sales fs WHERE fs.batch_id = r.batch_id AND fs.date BETWEEN ? AND ? AND fs.client_key = r.client_key AND UPPER(TRIM(fs.channel)) IN (SELECT value FROM json_each(?)))`,
+        `EXISTS(SELECT 1 FROM ci_fact_sales fs WHERE fs.batch_id = r.batch_id AND ${chDate} AND fs.client_key = r.client_key AND ${chCond})`,
       );
-      if (periodJoinBounds) args.push(JSON.stringify(reqChannels));
-      else args.push(dateFrom!, dateTo!, JSON.stringify(reqChannels));
     }
   }
 
@@ -268,25 +397,20 @@ function buildFactWhere(
   const macroExpr = hasDenormMacro ? `${alias}.macro_key` : `COALESCE(p.macro_category_key, ${alias}.macro_key)`;
 
   if (inc.macros.length && inc.groups.length) {
-    clauses.push(
-      `(${macroExpr} IN (SELECT value FROM json_each(?)) OR ${alias}.group_key IN (SELECT value FROM json_each(?)))`,
-    );
-    args.push(JSON.stringify(inc.macros), JSON.stringify(inc.groups));
+    const mCond = inlineInExpr(macroExpr, inc.macros, budget, args);
+    const gCond = inlineInExpr(`${alias}.group_key`, inc.groups, budget, args);
+    clauses.push(`(${mCond} OR ${gCond})`);
   } else if (inc.macros.length) {
-    clauses.push(`${macroExpr} IN (SELECT value FROM json_each(?))`);
-    args.push(JSON.stringify(inc.macros));
+    clauses.push(inlineInExpr(macroExpr, inc.macros, budget, args));
   } else if (inc.groups.length) {
-    clauses.push(`${alias}.group_key IN (SELECT value FROM json_each(?))`);
-    args.push(JSON.stringify(inc.groups));
+    clauses.push(inlineInExpr(`${alias}.group_key`, inc.groups, budget, args));
   }
 
   if (exc.macros.length) {
-    clauses.push(`(${macroExpr} IS NULL OR ${macroExpr} NOT IN (SELECT value FROM json_each(?)))`);
-    args.push(JSON.stringify(exc.macros));
+    clauses.push(inlineInExpr(macroExpr, exc.macros, budget, args, true));
   }
   if (exc.groups.length) {
-    clauses.push(`(${alias}.group_key IS NULL OR ${alias}.group_key NOT IN (SELECT value FROM json_each(?)))`);
-    args.push(JSON.stringify(exc.groups));
+    clauses.push(inlineInExpr(`${alias}.group_key`, exc.groups, budget, args, true));
   }
 
   return { joins, clause: clauses.join(" AND "), args, emptyIntersection };
@@ -452,21 +576,126 @@ export async function queryCsvOptions(
   };
 }
 
+async function hydrateDimNames(
+  e: Env,
+  batchId: string,
+  kind: "client" | "product",
+  candidates: Row[],
+): Promise<Row[]> {
+  const keys = [...new Set(candidates.map((r) => r.key).filter((k): k is string => !!k))];
+  if (!keys.length) return candidates;
+  const isClient = kind === "client";
+  const dimSql = isClient
+    ? "SELECT client_key AS k, client_raw AS raw, name AS title FROM ci_dim_customers WHERE batch_id=? AND client_key IN (SELECT value FROM json_each(?))"
+    : "SELECT product_key AS k, product_raw AS raw, description AS title FROM ci_dim_products WHERE batch_id=? AND product_key IN (SELECT value FROM json_each(?))";
+  const dimRows = (
+    await stmt(e, dimSql, batchId, JSON.stringify(keys)).all<{ k: string; raw: string; title: string | null }>()
+  ).results;
+
+  const dimMap = new Map(dimRows.map((d) => [d.k, d]));
+  const missingKeys = keys.filter((k) => !dimMap.get(k)?.title);
+  const rawMap = new Map<string, string>();
+  if (missingKeys.length) {
+    const fbSql = isClient
+      ? "SELECT client_key AS k, MAX(client_raw) AS raw FROM ci_fact_sales WHERE batch_id=? AND client_key IN (SELECT value FROM json_each(?)) AND client_raw IS NOT NULL AND client_raw<>'' GROUP BY client_key"
+      : "SELECT product_key AS k, MAX(product_raw) AS raw FROM ci_fact_sales WHERE batch_id=? AND product_key IN (SELECT value FROM json_each(?)) AND product_raw IS NOT NULL AND product_raw<>'' GROUP BY product_key";
+    const fallbackRows = (
+      await stmt(e, fbSql, batchId, JSON.stringify(missingKeys)).all<{ k: string; raw: string }>()
+    ).results;
+    for (const r of fallbackRows) rawMap.set(r.k, r.raw);
+  }
+
+  return candidates.map((row) => {
+    if (!row.key) return row;
+    const d = dimMap.get(row.key);
+    const label = d?.title ? `${d.raw || row.key} — ${d.title}` : rawMap.get(row.key) || d?.raw || row.key;
+    return { ...row, name: label };
+  });
+}
+
+async function hydrateCategoryNames(e: Env, batchId: string, candidates: Row[]): Promise<Row[]> {
+  if (!candidates.some((r) => !!r.key)) return candidates;
+  const [catRows, prodRows] = await Promise.all([
+    stmt(
+      e,
+      "SELECT dimension, value_key, display FROM ci_dim_catalog WHERE batch_id=? AND dimension IN ('macro_category','group')",
+      batchId,
+    ).all<{ dimension: string; value_key: string; display: string }>(),
+    stmt(
+      e,
+      "SELECT DISTINCT macro_category_key AS k, macro_category_raw AS raw FROM ci_dim_products WHERE batch_id=? AND macro_category_key IS NOT NULL",
+      batchId,
+    ).all<{ k: string; raw: string | null }>(),
+  ]);
+  const labelMap = new Map<string, string>();
+  for (const c of catRows.results) {
+    if (c.display) labelMap.set(c.value_key, c.display);
+  }
+  for (const p of prodRows.results) {
+    if (p.raw) labelMap.set(p.k, p.raw);
+  }
+  return candidates.map((row) => (row.key ? { ...row, name: labelMap.get(row.key) || row.name } : row));
+}
+
 export async function queryCsvReport(
   e: Env,
   u: DbUser,
   batchId: string,
   plan: Plan,
+  opts?: ReportQueryOptions,
 ): Promise<Report> {
   const acl = scopeForUser(u, plan.filters);
-  const { batch, hasCalendar, hasDenormMacro } = await loadBatchMeta(e, batchId);
+  const { batch, hasCalendar, hasDenormMacro } = opts?.preloadedMeta ?? (await loadBatchMeta(e, batchId));
   const comp = csvComparisonPeriod(plan.filters, batch.coverage_from, batch.coverage_to, batch.reference_date);
   const f = plan.filters;
   const conflicts = detectFilterConflicts(f);
   const toPair = (cVal: number | null, pVal: number | null) => ({ current: cVal, previous: pVal });
 
-  const salesW = buildFactWhere("s", batchId, f, acl, hasCalendar, hasDenormMacro, plan.group, true);
-  const retW = buildFactWhere("r", batchId, f, acl, hasCalendar, hasDenormMacro, plan.group, true);
+  const includeDocs = opts?.includeDocs !== false;
+  const includeActiveReps = opts?.includeActiveReps !== false;
+  const hasCustFilter = needsCustomerFilter(f, acl);
+  const hasProdFilter = needsProductFilter(f, hasDenormMacro);
+  const disjointPeriods = comp.previous.to < comp.current.from;
+  const canFastClient = plan.group === "client" && !hasCustFilter;
+  const canFastRegion = plan.group === "region" && !hasCustFilter && disjointPeriods;
+  const canFastProduct = plan.group === "product" && !hasProdFilter;
+  const canFastCategory = plan.group === "category" && hasDenormMacro && !hasProdFilter;
+  const omitCustJoin = canFastClient || canFastRegion;
+  const omitProdJoin = canFastProduct || canFastCategory;
+  const periodMode: PeriodMode = disjointPeriods ? "disjoint_dual" : "periods_join";
+
+  const salesW = buildFactWhere(
+    "s",
+    batchId,
+    f,
+    acl,
+    hasCalendar,
+    hasDenormMacro,
+    plan.group,
+    periodMode,
+    comp.previous.from,
+    comp.current.to,
+    comp.current.from,
+    comp.previous.to,
+    omitCustJoin,
+    omitProdJoin,
+  );
+  const retW = buildFactWhere(
+    "r",
+    batchId,
+    f,
+    acl,
+    hasCalendar,
+    hasDenormMacro,
+    plan.group,
+    periodMode,
+    comp.previous.from,
+    comp.current.to,
+    comp.current.from,
+    comp.previous.to,
+    omitCustJoin,
+    omitProdJoin,
+  );
 
   if (salesW.emptyIntersection) {
     return {
@@ -499,96 +728,513 @@ export async function queryCsvReport(
     };
   }
 
+  const canUseSummaryCache = batch.status === "validated" || batch.status === "active";
+  const summaryKey = canUseSummaryCache ? buildSummaryCacheKey(batch, hasCalendar, hasDenormMacro, acl, comp, f) : "";
+  const cachedSummary = canUseSummaryCache ? cacheGetSummary(summaryKey) : undefined;
+
   const periodArgs = [comp.current.from, comp.current.to, comp.previous.from, comp.previous.to];
   const periodsCte = "WITH periods(pk, pf, pt) AS (SELECT 0, ?, ? UNION ALL SELECT 1, ?, ?)";
-  const repsSalesW =
-    plan.group === "region"
-      ? null
-      : buildFactWhere("s", batchId, f, acl, hasCalendar, hasDenormMacro, "region", false, comp.current.from, comp.current.to);
 
-  let totalsSalesRes: { pk: number; gross: number; rows_n: number; buyers: number; docs: number }[] = [];
+  let curTotS: TotPair | undefined = cachedSummary?.curTotS;
+  let prevTotS: TotPair | undefined = cachedSummary?.prevTotS;
+  let docsCount = cachedSummary?.docsCount ?? 0;
+  let activeRepsCount = cachedSummary?.activeRepsCount ?? 0;
+
+  const needDocsQuery = includeDocs && cachedSummary?.docsCount === undefined;
+  const needRepsQuery = includeActiveReps && plan.group !== "region" && cachedSummary?.activeRepsCount === undefined;
+  const needTotsQuery = !cachedSummary && !canFastClient && !canFastRegion;
+
+  const docsPromise = needDocsQuery
+    ? (() => {
+        const docsW = buildFactWhere(
+          "s",
+          batchId,
+          f,
+          acl,
+          hasCalendar,
+          hasDenormMacro,
+          undefined,
+          "single_range",
+          comp.current.from,
+          comp.current.to,
+        );
+        return stmt(
+          e,
+          `SELECT COUNT(DISTINCT NULLIF(s.doc_no, '')) AS docs FROM ci_fact_sales s ${docsW.joins} WHERE ${docsW.clause}`,
+          ...docsW.args,
+        ).first<{ docs: number }>();
+      })()
+    : Promise.resolve(null);
+
+  const repsPromise = needRepsQuery
+    ? (() => {
+        const repsW = buildFactWhere(
+          "s",
+          batchId,
+          f,
+          acl,
+          hasCalendar,
+          hasDenormMacro,
+          hasCustFilter ? "region" : undefined,
+          "single_range",
+          comp.current.from,
+          comp.current.to,
+        );
+        if (!hasCustFilter) {
+          return stmt(
+            e,
+            `WITH ac AS (SELECT DISTINCT COALESCE(s.client_key, NULL) AS client_key FROM ci_fact_sales s ${repsW.joins} WHERE ${repsW.clause} AND s.client_key IS NOT NULL) SELECT COUNT(DISTINCT c.representative_key) AS n FROM ac JOIN ci_dim_customers c ON c.batch_id = ? AND c.client_key = ac.client_key WHERE c.representative_key IS NOT NULL`,
+            ...repsW.args,
+            batchId,
+          ).first<{ n: number }>();
+        }
+        return stmt(
+          e,
+          `SELECT COUNT(DISTINCT c.representative_key) AS n FROM ci_fact_sales s ${repsW.joins} WHERE ${repsW.clause} AND c.representative_key IS NOT NULL`,
+          ...repsW.args,
+        ).first<{ n: number }>();
+      })()
+    : Promise.resolve(null);
+
+  const totsPromise = needTotsQuery
+    ? (() => {
+        const totsW = buildFactWhere(
+          "s",
+          batchId,
+          f,
+          acl,
+          hasCalendar,
+          hasDenormMacro,
+          undefined,
+          periodMode,
+          comp.previous.from,
+          comp.current.to,
+          comp.current.from,
+          comp.previous.to,
+        );
+        if (disjointPeriods) {
+          return stmt(
+            e,
+            `SELECT
+               COALESCE(SUM(cg), 0) AS cur_gross, COALESCE(SUM(cn), 0) AS cur_rows,
+               COALESCE(SUM(CASE WHEN cn > 0 AND client_key IS NOT NULL THEN 1 ELSE 0 END), 0) AS cur_buyers,
+               COALESCE(SUM(pg), 0) AS prev_gross, COALESCE(SUM(pn), 0) AS prev_rows,
+               COALESCE(SUM(CASE WHEN pn > 0 AND client_key IS NOT NULL THEN 1 ELSE 0 END), 0) AS prev_buyers
+             FROM (
+               SELECT COALESCE(s.client_key, NULL) AS client_key,
+                 SUM(CASE WHEN s.date >= ? THEN s.gross_amount ELSE 0 END) AS cg,
+                 SUM(CASE WHEN s.date >= ? THEN 1 ELSE 0 END) AS cn,
+                 SUM(CASE WHEN s.date <= ? THEN s.gross_amount ELSE 0 END) AS pg,
+                 SUM(CASE WHEN s.date <= ? THEN 1 ELSE 0 END) AS pn
+               FROM ci_fact_sales s ${totsW.joins}
+               WHERE ${totsW.clause}
+               GROUP BY COALESCE(s.client_key, NULL)
+             )`,
+            comp.current.from,
+            comp.current.from,
+            comp.previous.to,
+            comp.previous.to,
+            ...totsW.args,
+          ).first<{
+            cur_gross: number;
+            cur_rows: number;
+            cur_buyers: number;
+            prev_gross: number;
+            prev_rows: number;
+            prev_buyers: number;
+          }>();
+        }
+        return stmt(
+          e,
+          `${periodsCte}
+           SELECT pk, SUM(gross) AS gross, SUM(rows_n) AS rows_n,
+             SUM(CASE WHEN rows_n > 0 AND client_key IS NOT NULL THEN 1 ELSE 0 END) AS buyers
+           FROM (
+             SELECT pd.pk AS pk, COALESCE(s.client_key, NULL) AS client_key, SUM(s.gross_amount) AS gross, COUNT(*) AS rows_n
+             FROM periods pd JOIN ci_fact_sales s ${totsW.joins}
+             WHERE ${totsW.clause}
+             GROUP BY pd.pk, COALESCE(s.client_key, NULL)
+           )
+           GROUP BY pk`,
+          ...periodArgs,
+          ...totsW.args,
+        ).all<{ pk: number; gross: number; rows_n: number; buyers: number }>();
+      })()
+    : Promise.resolve(null);
+
+  type FastAggSalesRow = { g: string | null; name?: string | null; cg: number; cn: number; cb: number; pg: number; pn: number; pb: number };
+  type FastAggRetRow = { g: string | null; name?: string | null; cr: number; pr: number };
   let groupedSalesRes: { pk: number; g: string | null; name?: string | null; gross: number; buyers: number }[] = [];
   let groupedRetRes: { pk: number; g: string | null; name?: string | null; returns: number }[] = [];
-  let activeRepsCount = 0;
+  let fastAggSales: FastAggSalesRow[] | null = null;
+  let fastAggRet: FastAggRetRow[] | null = null;
+  let overrideRetScaled: { cur: number; prev: number } | null = null;
+
+  const applyTotRaw = (totRaw: Awaited<typeof totsPromise>) => {
+    if (!totRaw) return;
+    if ("results" in totRaw) {
+      const c = totRaw.results.find((r) => r.pk === 0);
+      const p = totRaw.results.find((r) => r.pk === 1);
+      if (c) curTotS = { gross: c.gross, rows_n: c.rows_n, buyers: c.buyers };
+      if (p) prevTotS = { gross: p.gross, rows_n: p.rows_n, buyers: p.buyers };
+    } else {
+      if (totRaw.cur_rows > 0) curTotS = { gross: totRaw.cur_gross, rows_n: totRaw.cur_rows, buyers: totRaw.cur_buyers };
+      if (totRaw.prev_rows > 0) prevTotS = { gross: totRaw.prev_gross, rows_n: totRaw.prev_rows, buyers: totRaw.prev_buyers };
+    }
+  };
 
   if (plan.group === "month") {
-    const monthExpr =
-      "CASE WHEN pd.pk=0 THEN s.month_key ELSE (CAST(SUBSTR(s.month_key,1,4) AS INTEGER)+1) || SUBSTR(s.month_key,5,3) END";
-    const retMonthExpr =
-      "CASE WHEN pd.pk=0 THEN r.month_key ELSE (CAST(SUBSTR(r.month_key,1,4) AS INTEGER)+1) || SUBSTR(r.month_key,5,3) END";
+    if (opts?.skipMonthlySeries) {
+      const retTotalsPromise = cachedSummary
+        ? Promise.resolve(null)
+        : disjointPeriods
+          ? stmt(
+              e,
+              `SELECT COALESCE(SUM(CASE WHEN r.date >= ? THEN r.return_amount ELSE 0 END), 0) AS cr,
+                 COALESCE(SUM(CASE WHEN r.date <= ? THEN r.return_amount ELSE 0 END), 0) AS pr
+               FROM ci_fact_returns r ${retW.joins} WHERE ${retW.clause}`,
+              comp.current.from,
+              comp.previous.to,
+              ...retW.args,
+            ).first<{ cr: number; pr: number }>()
+          : stmt(
+              e,
+              `${periodsCte} SELECT pd.pk AS pk, COALESCE(SUM(r.return_amount), 0) AS returns
+               FROM periods pd JOIN ci_fact_returns r ${retW.joins} WHERE ${retW.clause} GROUP BY pd.pk`,
+              ...periodArgs,
+              ...retW.args,
+            ).all<{ pk: number; returns: number }>();
 
-    const [tots, gs, gr, repsRow] = await Promise.all([
+      const [totRaw, docsRow, retTotRaw, repsRow] = await Promise.all([
+        totsPromise,
+        docsPromise,
+        retTotalsPromise,
+        repsPromise,
+      ]);
+      applyTotRaw(totRaw);
+      if (needDocsQuery) docsCount = docsRow?.docs ?? 0;
+      if (needRepsQuery) activeRepsCount = repsRow?.n ?? 0;
+      if (cachedSummary) {
+        overrideRetScaled = { cur: cachedSummary.curRetScaled, prev: cachedSummary.prevRetScaled };
+      } else if (retTotRaw && "results" in retTotRaw) {
+        overrideRetScaled = {
+          cur: Number(retTotRaw.results.find((r) => r.pk === 0)?.returns ?? 0),
+          prev: Number(retTotRaw.results.find((r) => r.pk === 1)?.returns ?? 0),
+        };
+      } else if (retTotRaw) {
+        overrideRetScaled = { cur: Number(retTotRaw.cr ?? 0), prev: Number(retTotRaw.pr ?? 0) };
+      }
+    } else {
+      const salesMonthSql = disjointPeriods
+        ? `SELECT CASE WHEN s.date >= ? THEN 0 ELSE 1 END AS pk,
+             CASE WHEN s.date >= ? THEN SUBSTR(s.date,1,7) ELSE (CAST(SUBSTR(s.date,1,4) AS INTEGER)+1) || SUBSTR(s.date,5,3) END AS g,
+             SUM(s.gross_amount) AS gross, COUNT(DISTINCT s.client_key) AS buyers
+           FROM ci_fact_sales s ${salesW.joins} WHERE ${salesW.clause} GROUP BY pk, g`
+        : `${periodsCte} SELECT pd.pk AS pk,
+             CASE WHEN pd.pk=0 THEN SUBSTR(s.date,1,7) ELSE (CAST(SUBSTR(s.date,1,4) AS INTEGER)+1) || SUBSTR(s.date,5,3) END AS g,
+             SUM(s.gross_amount) AS gross, COUNT(DISTINCT s.client_key) AS buyers
+           FROM periods pd JOIN ci_fact_sales s ${salesW.joins} WHERE ${salesW.clause} GROUP BY pd.pk, g`;
+      const retMonthSql = disjointPeriods
+        ? `SELECT CASE WHEN r.date >= ? THEN 0 ELSE 1 END AS pk,
+             CASE WHEN r.date >= ? THEN SUBSTR(r.date,1,7) ELSE (CAST(SUBSTR(r.date,1,4) AS INTEGER)+1) || SUBSTR(r.date,5,3) END AS g,
+             SUM(r.return_amount) AS returns
+           FROM ci_fact_returns r ${retW.joins} WHERE ${retW.clause} GROUP BY pk, g`
+        : `${periodsCte} SELECT pd.pk AS pk,
+             CASE WHEN pd.pk=0 THEN SUBSTR(r.date,1,7) ELSE (CAST(SUBSTR(r.date,1,4) AS INTEGER)+1) || SUBSTR(r.date,5,3) END AS g,
+             SUM(r.return_amount) AS returns
+           FROM periods pd JOIN ci_fact_returns r ${retW.joins} WHERE ${retW.clause} GROUP BY pd.pk, g`;
+
+      const [totRaw, docsRow, gs, gr, repsRow] = await Promise.all([
+        totsPromise,
+        docsPromise,
+        stmt(
+          e,
+          salesMonthSql,
+          ...(disjointPeriods ? [comp.current.from, comp.current.from] : periodArgs),
+          ...salesW.args,
+        ).all<{ pk: number; g: string; gross: number; buyers: number }>(),
+        stmt(
+          e,
+          retMonthSql,
+          ...(disjointPeriods ? [comp.current.from, comp.current.from] : periodArgs),
+          ...retW.args,
+        ).all<{ pk: number; g: string; returns: number }>(),
+        repsPromise,
+      ]);
+      groupedSalesRes = gs.results;
+      groupedRetRes = gr.results;
+      if (needDocsQuery) docsCount = docsRow?.docs ?? 0;
+      if (needRepsQuery) activeRepsCount = repsRow?.n ?? 0;
+      applyTotRaw(totRaw);
+    }
+  } else if (canFastRegion) {
+    const [docsRow, fsRes, frRes] = await Promise.all([
+      docsPromise,
       stmt(
         e,
-        `${periodsCte} SELECT pd.pk AS pk, SUM(s.gross_amount) AS gross, COUNT(*) AS rows_n, COUNT(DISTINCT s.client_key) AS buyers, COUNT(DISTINCT CASE WHEN pd.pk=0 AND s.doc_no IS NOT NULL AND s.doc_no<>'' THEN s.doc_no END) AS docs FROM periods pd JOIN ci_fact_sales s ${salesW.joins} WHERE ${salesW.clause} GROUP BY pd.pk`,
+        `WITH agg AS (
+           SELECT COALESCE(s.client_key, NULL) AS client_key,
+             SUM(CASE WHEN s.date >= ? THEN s.gross_amount ELSE 0 END) AS cg,
+             SUM(CASE WHEN s.date >= ? THEN 1 ELSE 0 END) AS cn,
+             SUM(CASE WHEN s.date <= ? THEN s.gross_amount ELSE 0 END) AS pg,
+             SUM(CASE WHEN s.date <= ? THEN 1 ELSE 0 END) AS pn
+           FROM ci_fact_sales s ${salesW.joins}
+           WHERE ${salesW.clause}
+           GROUP BY COALESCE(s.client_key, NULL)
+         )
+         SELECT c.representative_key AS g,
+           COALESCE(MAX(c.representative_raw), c.representative_key) AS name,
+           SUM(agg.cg) AS cg, SUM(agg.cn) AS cn,
+           SUM(CASE WHEN agg.cn > 0 AND agg.client_key IS NOT NULL THEN 1 ELSE 0 END) AS cb,
+           SUM(agg.pg) AS pg, SUM(agg.pn) AS pn,
+           SUM(CASE WHEN agg.pn > 0 AND agg.client_key IS NOT NULL THEN 1 ELSE 0 END) AS pb
+         FROM agg
+         LEFT JOIN ci_dim_customers c ON c.batch_id = ? AND c.client_key = agg.client_key
+         GROUP BY c.representative_key`,
+        comp.current.from,
+        comp.current.from,
+        comp.previous.to,
+        comp.previous.to,
+        ...salesW.args,
+        batchId,
+      ).all<FastAggSalesRow>(),
+      stmt(
+        e,
+        `WITH agg AS (
+           SELECT COALESCE(r.client_key, NULL) AS client_key,
+             SUM(CASE WHEN r.date >= ? THEN r.return_amount ELSE 0 END) AS cr,
+             SUM(CASE WHEN r.date <= ? THEN r.return_amount ELSE 0 END) AS pr
+           FROM ci_fact_returns r ${retW.joins}
+           WHERE ${retW.clause}
+           GROUP BY COALESCE(r.client_key, NULL)
+         )
+         SELECT c.representative_key AS g,
+           COALESCE(MAX(c.representative_raw), c.representative_key) AS name,
+           SUM(agg.cr) AS cr, SUM(agg.pr) AS pr
+         FROM agg
+         LEFT JOIN ci_dim_customers c ON c.batch_id = ? AND c.client_key = agg.client_key
+         GROUP BY c.representative_key`,
+        comp.current.from,
+        comp.previous.to,
+        ...retW.args,
+        batchId,
+      ).all<FastAggRetRow>(),
+    ]);
+    fastAggSales = fsRes.results;
+    fastAggRet = frRes.results;
+    if (needDocsQuery) docsCount = docsRow?.docs ?? 0;
+    if (includeActiveReps) activeRepsCount = fastAggSales.filter((r) => r.cn > 0 && r.g !== null).length;
+
+    if (!cachedSummary) {
+      let cGross = 0, cRows = 0, cBuyers = 0, pGross = 0, pRows = 0, pBuyers = 0;
+      for (const r of fastAggSales) {
+        cGross += Number(r.cg ?? 0);
+        cRows += Number(r.cn ?? 0);
+        cBuyers += Number(r.cb ?? 0);
+        pGross += Number(r.pg ?? 0);
+        pRows += Number(r.pn ?? 0);
+        pBuyers += Number(r.pb ?? 0);
+      }
+      if (cRows > 0) curTotS = { gross: cGross, rows_n: cRows, buyers: cBuyers };
+      if (pRows > 0) prevTotS = { gross: pGross, rows_n: pRows, buyers: pBuyers };
+    }
+  } else if ((canFastClient || canFastProduct || canFastCategory) && disjointPeriods) {
+    const sKeyExpr = canFastClient
+      ? "COALESCE(s.client_key, NULL)"
+      : canFastProduct
+        ? "s.product_key"
+        : "COALESCE(s.macro_key, s.group_key)";
+    const rKeyExpr = canFastClient
+      ? "COALESCE(r.client_key, NULL)"
+      : canFastProduct
+        ? "r.product_key"
+        : "COALESCE(r.macro_key, r.group_key)";
+    const salesSql = canFastClient
+      ? `SELECT ${sKeyExpr} AS g,
+           SUM(CASE WHEN s.date >= ? THEN s.gross_amount ELSE 0 END) AS cg,
+           SUM(CASE WHEN s.date >= ? THEN 1 ELSE 0 END) AS cn, 0 AS cb,
+           SUM(CASE WHEN s.date <= ? THEN s.gross_amount ELSE 0 END) AS pg,
+           SUM(CASE WHEN s.date <= ? THEN 1 ELSE 0 END) AS pn, 0 AS pb
+         FROM ci_fact_sales s ${salesW.joins} WHERE ${salesW.clause} GROUP BY ${sKeyExpr}`
+      : `SELECT ${sKeyExpr} AS g,
+           SUM(CASE WHEN s.date >= ? THEN s.gross_amount ELSE 0 END) AS cg,
+           SUM(CASE WHEN s.date >= ? THEN 1 ELSE 0 END) AS cn,
+           COUNT(DISTINCT CASE WHEN s.date >= ? THEN s.client_key END) AS cb,
+           SUM(CASE WHEN s.date <= ? THEN s.gross_amount ELSE 0 END) AS pg,
+           SUM(CASE WHEN s.date <= ? THEN 1 ELSE 0 END) AS pn,
+           COUNT(DISTINCT CASE WHEN s.date <= ? THEN s.client_key END) AS pb
+         FROM ci_fact_sales s ${salesW.joins} WHERE ${salesW.clause} GROUP BY ${sKeyExpr}`;
+    const salesArgs = canFastClient
+      ? [comp.current.from, comp.current.from, comp.previous.to, comp.previous.to, ...salesW.args]
+      : [comp.current.from, comp.current.from, comp.current.from, comp.previous.to, comp.previous.to, comp.previous.to, ...salesW.args];
+
+    const [totRaw, docsRow, fsRes, frRes, repsRow] = await Promise.all([
+      totsPromise,
+      docsPromise,
+      stmt(e, salesSql, ...salesArgs).all<FastAggSalesRow>(),
+      stmt(
+        e,
+        `SELECT ${rKeyExpr} AS g,
+           SUM(CASE WHEN r.date >= ? THEN r.return_amount ELSE 0 END) AS cr,
+           SUM(CASE WHEN r.date <= ? THEN r.return_amount ELSE 0 END) AS pr
+         FROM ci_fact_returns r ${retW.joins} WHERE ${retW.clause} GROUP BY ${rKeyExpr}`,
+        comp.current.from,
+        comp.previous.to,
+        ...retW.args,
+      ).all<FastAggRetRow>(),
+      repsPromise,
+    ]);
+    fastAggSales = fsRes.results;
+    fastAggRet = frRes.results;
+    if (needDocsQuery) docsCount = docsRow?.docs ?? 0;
+    if (needRepsQuery) activeRepsCount = repsRow?.n ?? 0;
+    if (canFastClient && !cachedSummary) {
+      let cGross = 0, cRows = 0, cBuyers = 0, pGross = 0, pRows = 0, pBuyers = 0;
+      for (const r of fastAggSales) {
+        cGross += Number(r.cg ?? 0);
+        cRows += Number(r.cn ?? 0);
+        if (r.cn > 0 && r.g !== null) cBuyers++;
+        pGross += Number(r.pg ?? 0);
+        pRows += Number(r.pn ?? 0);
+        if (r.pn > 0 && r.g !== null) pBuyers++;
+      }
+      if (cRows > 0) curTotS = { gross: cGross, rows_n: cRows, buyers: cBuyers };
+      if (pRows > 0) prevTotS = { gross: pGross, rows_n: pRows, buyers: pBuyers };
+    } else {
+      applyTotRaw(totRaw);
+    }
+  } else if (canFastClient || canFastProduct || canFastCategory) {
+    const sKeyExpr = canFastClient
+      ? "COALESCE(s.client_key, NULL)"
+      : canFastProduct
+        ? "s.product_key"
+        : "COALESCE(s.macro_key, s.group_key)";
+    const rKeyExpr = canFastClient
+      ? "COALESCE(r.client_key, NULL)"
+      : canFastProduct
+        ? "r.product_key"
+        : "COALESCE(r.macro_key, r.group_key)";
+    const buyersSql = canFastClient ? "COUNT(*) AS buyers" : "COUNT(DISTINCT s.client_key) AS buyers";
+
+    const [totRaw, docsRow, fsRes, frRes, repsRow] = await Promise.all([
+      totsPromise,
+      docsPromise,
+      stmt(
+        e,
+        `${periodsCte} SELECT pd.pk AS pk, ${sKeyExpr} AS g, SUM(s.gross_amount) AS gross, ${buyersSql}
+         FROM periods pd JOIN ci_fact_sales s ${salesW.joins} WHERE ${salesW.clause} GROUP BY pd.pk, ${sKeyExpr}`,
         ...periodArgs,
         ...salesW.args,
-      ).all<{ pk: number; gross: number; rows_n: number; buyers: number; docs: number }>(),
+      ).all<{ pk: number; g: string | null; gross: number; buyers: number }>(),
       stmt(
         e,
-        `${periodsCte} SELECT pd.pk AS pk, ${monthExpr} AS g, SUM(s.gross_amount) AS gross, COUNT(DISTINCT s.client_key) AS buyers FROM periods pd JOIN ci_fact_sales s ${salesW.joins} WHERE ${salesW.clause} GROUP BY pd.pk, g`,
-        ...periodArgs,
-        ...salesW.args,
-      ).all<{ pk: number; g: string; gross: number; buyers: number }>(),
-      stmt(
-        e,
-        `${periodsCte} SELECT pd.pk AS pk, ${retMonthExpr} AS g, SUM(r.return_amount) AS returns FROM periods pd JOIN ci_fact_returns r ${retW.joins} WHERE ${retW.clause} GROUP BY pd.pk, g`,
+        `${periodsCte} SELECT pd.pk AS pk, ${rKeyExpr} AS g, SUM(r.return_amount) AS returns
+         FROM periods pd JOIN ci_fact_returns r ${retW.joins} WHERE ${retW.clause} GROUP BY pd.pk, ${rKeyExpr}`,
         ...periodArgs,
         ...retW.args,
-      ).all<{ pk: number; g: string; returns: number }>(),
-      stmt(
-        e,
-        `SELECT COUNT(DISTINCT c.representative_key) AS n FROM ci_fact_sales s ${repsSalesW!.joins} WHERE ${repsSalesW!.clause} AND c.representative_key IS NOT NULL`,
-        ...repsSalesW!.args,
-      ).first<{ n: number }>(),
+      ).all<{ pk: number; g: string | null; returns: number }>(),
+      repsPromise,
     ]);
-    totalsSalesRes = tots.results;
-    groupedSalesRes = gs.results;
-    groupedRetRes = gr.results;
-    activeRepsCount = repsRow?.n ?? 0;
+    groupedSalesRes = fsRes.results.map((r) => ({
+      pk: r.pk,
+      g: r.g,
+      name: r.g,
+      gross: r.gross,
+      buyers: canFastClient ? (r.buyers > 0 ? (r.g !== null ? 1 : 0) : 0) : r.buyers,
+    }));
+    groupedRetRes = frRes.results.map((r) => ({ pk: r.pk, g: r.g, name: r.g, returns: r.returns }));
+    if (needDocsQuery) docsCount = docsRow?.docs ?? 0;
+    if (needRepsQuery) activeRepsCount = repsRow?.n ?? 0;
+    if (canFastClient && !cachedSummary) {
+      let cGross = 0, cRows = 0, cBuyers = 0, pGross = 0, pRows = 0, pBuyers = 0;
+      for (const r of fsRes.results) {
+        if (r.pk === 0) {
+          cGross += Number(r.gross ?? 0);
+          cRows += Number(r.buyers ?? 0);
+          if (r.buyers > 0 && r.g !== null) cBuyers++;
+        } else {
+          pGross += Number(r.gross ?? 0);
+          pRows += Number(r.buyers ?? 0);
+          if (r.buyers > 0 && r.g !== null) pBuyers++;
+        }
+      }
+      if (cRows > 0) curTotS = { gross: cGross, rows_n: cRows, buyers: cBuyers };
+      if (pRows > 0) prevTotS = { gross: pGross, rows_n: pRows, buyers: pBuyers };
+    } else {
+      applyTotRaw(totRaw);
+    }
   } else {
     const sg = groupExpressions("s", plan.group);
     const rg = groupExpressions("r", plan.group);
-    const [tots, gs, gr, repsRow] = await Promise.all([
+    const salesGrpSql = disjointPeriods
+      ? `SELECT CASE WHEN s.date >= ? THEN 0 ELSE 1 END AS pk, ${sg.keyExpr} AS g, ${sg.labelExpr} AS name, SUM(s.gross_amount) AS gross, COUNT(DISTINCT s.client_key) AS buyers
+         FROM ci_fact_sales s ${salesW.joins} WHERE ${salesW.clause} GROUP BY pk, ${sg.keyExpr}`
+      : `${periodsCte} SELECT pd.pk AS pk, ${sg.keyExpr} AS g, ${sg.labelExpr} AS name, SUM(s.gross_amount) AS gross, COUNT(DISTINCT s.client_key) AS buyers
+         FROM periods pd JOIN ci_fact_sales s ${salesW.joins} WHERE ${salesW.clause} GROUP BY pd.pk, ${sg.keyExpr}`;
+    const retGrpSql = disjointPeriods
+      ? `SELECT CASE WHEN r.date >= ? THEN 0 ELSE 1 END AS pk, ${rg.keyExpr} AS g, ${rg.labelExpr} AS name, SUM(r.return_amount) AS returns
+         FROM ci_fact_returns r ${retW.joins} WHERE ${retW.clause} GROUP BY pk, ${rg.keyExpr}`
+      : `${periodsCte} SELECT pd.pk AS pk, ${rg.keyExpr} AS g, ${rg.labelExpr} AS name, SUM(r.return_amount) AS returns
+         FROM periods pd JOIN ci_fact_returns r ${retW.joins} WHERE ${retW.clause} GROUP BY pd.pk, ${rg.keyExpr}`;
+
+    const [totRaw, docsRow, gs, gr, repsRow] = await Promise.all([
+      totsPromise,
+      docsPromise,
       stmt(
         e,
-        `${periodsCte} SELECT pd.pk AS pk, SUM(s.gross_amount) AS gross, COUNT(*) AS rows_n, COUNT(DISTINCT s.client_key) AS buyers, COUNT(DISTINCT CASE WHEN pd.pk=0 AND s.doc_no IS NOT NULL AND s.doc_no<>'' THEN s.doc_no END) AS docs FROM periods pd JOIN ci_fact_sales s ${salesW.joins} WHERE ${salesW.clause} GROUP BY pd.pk`,
-        ...periodArgs,
-        ...salesW.args,
-      ).all<{ pk: number; gross: number; rows_n: number; buyers: number; docs: number }>(),
-      stmt(
-        e,
-        `${periodsCte} SELECT pd.pk AS pk, ${sg.keyExpr} AS g, ${sg.labelExpr} AS name, SUM(s.gross_amount) AS gross, COUNT(DISTINCT s.client_key) AS buyers FROM periods pd JOIN ci_fact_sales s ${salesW.joins} WHERE ${salesW.clause} GROUP BY pd.pk, ${sg.keyExpr}`,
-        ...periodArgs,
+        salesGrpSql,
+        ...(disjointPeriods ? [comp.current.from] : periodArgs),
         ...salesW.args,
       ).all<{ pk: number; g: string | null; name: string | null; gross: number; buyers: number }>(),
       stmt(
         e,
-        `${periodsCte} SELECT pd.pk AS pk, ${rg.keyExpr} AS g, ${rg.labelExpr} AS name, SUM(r.return_amount) AS returns FROM periods pd JOIN ci_fact_returns r ${retW.joins} WHERE ${retW.clause} GROUP BY pd.pk, ${rg.keyExpr}`,
-        ...periodArgs,
+        retGrpSql,
+        ...(disjointPeriods ? [comp.current.from] : periodArgs),
         ...retW.args,
       ).all<{ pk: number; g: string | null; name: string | null; returns: number }>(),
-      repsSalesW
-        ? stmt(
-            e,
-            `SELECT COUNT(DISTINCT c.representative_key) AS n FROM ci_fact_sales s ${repsSalesW.joins} WHERE ${repsSalesW.clause} AND c.representative_key IS NOT NULL`,
-            ...repsSalesW.args,
-          ).first<{ n: number }>()
-        : Promise.resolve(null),
+      repsPromise,
     ]);
-    totalsSalesRes = tots.results;
     groupedSalesRes = gs.results;
     groupedRetRes = gr.results;
-    activeRepsCount =
-      plan.group === "region"
-        ? groupedSalesRes.filter((r) => r.pk === 0 && r.g !== null).length
-        : (repsRow?.n ?? 0);
+    if (needDocsQuery) docsCount = docsRow?.docs ?? 0;
+    if (plan.group === "region") {
+      if (includeActiveReps) activeRepsCount = groupedSalesRes.filter((r) => r.pk === 0 && r.g !== null).length;
+    } else if (needRepsQuery) {
+      activeRepsCount = repsRow?.n ?? 0;
+    }
+    applyTotRaw(totRaw);
   }
 
-  const curTotS = totalsSalesRes.find((r) => r.pk === 0);
-  const prevTotS = totalsSalesRes.find((r) => r.pk === 1);
-  const curRetScaled = groupedRetRes.filter((r) => r.pk === 0).reduce((acc, r) => acc + Number(r.returns ?? 0), 0);
-  const prevRetScaled = groupedRetRes.filter((r) => r.pk === 1).reduce((acc, r) => acc + Number(r.returns ?? 0), 0);
+  const curRetScaled = overrideRetScaled
+    ? overrideRetScaled.cur
+    : fastAggRet
+      ? fastAggRet.reduce((acc, r) => acc + Number(r.cr ?? 0), 0)
+      : groupedRetRes.filter((r) => r.pk === 0).reduce((acc, r) => acc + Number(r.returns ?? 0), 0);
+  const prevRetScaled = overrideRetScaled
+    ? overrideRetScaled.prev
+    : fastAggRet
+      ? fastAggRet.reduce((acc, r) => acc + Number(r.pr ?? 0), 0)
+      : groupedRetRes.filter((r) => r.pk === 1).reduce((acc, r) => acc + Number(r.returns ?? 0), 0);
+
+  if (canUseSummaryCache) {
+    const nextEntry: CachedSummary = {
+      curTotS,
+      prevTotS,
+      curRetScaled,
+      prevRetScaled,
+      ...(cachedSummary?.docsCount !== undefined
+        ? { docsCount: cachedSummary.docsCount }
+        : includeDocs
+          ? { docsCount }
+          : {}),
+      ...(cachedSummary?.activeRepsCount !== undefined
+        ? { activeRepsCount: cachedSummary.activeRepsCount }
+        : includeActiveReps
+          ? { activeRepsCount }
+          : {}),
+    };
+    cacheSetSummary(summaryKey, nextEntry);
+  }
 
   const curGross = curTotS?.rows_n ? Number(curTotS.gross ?? 0) / MONEY_DIV : null;
   const prevGross = prevTotS?.rows_n ? Number(prevTotS.gross ?? 0) / MONEY_DIV : null;
@@ -611,6 +1257,7 @@ export async function queryCsvReport(
   };
 
   let rows: Row[] = [];
+  let totalCandidateCount = 0;
   if (plan.group === "month") {
     const mMap = new Map<string, { cg: number | null; cr: number; cb: number | null; pg: number | null; pr: number; pb: number | null }>();
     const touch = (m: string) => {
@@ -651,6 +1298,7 @@ export async function queryCsvReport(
           margin: toPair(null, null),
         },
       }));
+    totalCandidateCount = rows.length;
   } else {
     const gMap = new Map<
       string,
@@ -665,20 +1313,39 @@ export async function queryCsvReport(
       }
       return entry;
     };
-    for (const r of groupedSalesRes) {
-      const e0 = touch(r.g, r.name);
-      if (r.pk === 0) {
-        e0.cg = r.gross / MONEY_DIV;
-        e0.cb = r.buyers;
-      } else {
-        e0.pg = r.gross / MONEY_DIV;
-        e0.pb = r.buyers;
+    if (fastAggSales && fastAggRet) {
+      for (const r of fastAggSales) {
+        const e0 = touch(r.g, r.name ?? r.g);
+        if (r.cn > 0) {
+          e0.cg = r.cg / MONEY_DIV;
+          e0.cb = canFastClient ? (r.g !== null ? 1 : 0) : r.cb;
+        }
+        if (r.pn > 0) {
+          e0.pg = r.pg / MONEY_DIV;
+          e0.pb = canFastClient ? (r.g !== null ? 1 : 0) : r.pb;
+        }
       }
-    }
-    for (const r of groupedRetRes) {
-      const e0 = touch(r.g, r.name);
-      if (r.pk === 0) e0.cr = r.returns / MONEY_DIV;
-      else e0.pr = r.returns / MONEY_DIV;
+      for (const r of fastAggRet) {
+        const e0 = touch(r.g, r.name ?? r.g);
+        e0.cr = r.cr / MONEY_DIV;
+        e0.pr = r.pr / MONEY_DIV;
+      }
+    } else {
+      for (const r of groupedSalesRes) {
+        const e0 = touch(r.g, r.name);
+        if (r.pk === 0) {
+          e0.cg = r.gross / MONEY_DIV;
+          e0.cb = r.buyers;
+        } else {
+          e0.pg = r.gross / MONEY_DIV;
+          e0.pb = r.buyers;
+        }
+      }
+      for (const r of groupedRetRes) {
+        const e0 = touch(r.g, r.name);
+        if (r.pk === 0) e0.cr = r.returns / MONEY_DIV;
+        else e0.pr = r.returns / MONEY_DIV;
+      }
     }
 
     rows = [...gMap.values()].map((v) => ({
@@ -722,26 +1389,40 @@ export async function queryCsvReport(
       plan.order === "current"
         ? (r.values[plan.metric].current ?? -Infinity)
         : (r.values[plan.metric].current ?? 0) - (r.values[plan.metric].previous ?? 0);
-    rows.sort((a, b) => (plan.order === "decline" ? 1 : -1) * (score(a) - score(b)) || a.name.localeCompare(b.name, "pt-BR"));
+    const dir = plan.order === "decline" ? 1 : -1;
+    rows.sort((a, b) => dir * (score(a) - score(b)) || a.name.localeCompare(b.name, "pt-BR"));
+    totalCandidateCount = rows.length;
+
+    if ((canFastClient || canFastProduct || canFastCategory) && rows.length) {
+      let cut = Math.min(rows.length, 60);
+      if (rows.length > 30) {
+        const boundaryScore = score(rows[29]);
+        while (cut < rows.length && cut < 500 && score(rows[cut]) === boundaryScore) cut++;
+      }
+      const topSlice = rows.slice(0, cut);
+      rows = canFastCategory
+        ? await hydrateCategoryNames(e, batchId, topSlice)
+        : await hydrateDimNames(e, batchId, canFastClient ? "client" : "product", topSlice);
+      rows.sort((a, b) => dir * (score(a) - score(b)) || a.name.localeCompare(b.name, "pt-BR"));
+    }
   }
 
-  const docs = curTotS?.docs ?? 0;
   const ticketPerBuyer = curRev !== null && curBuyers && curBuyers > 0 ? curRev / curBuyers : null;
-  const ticketPerInvoice = curRev !== null && docs > 0 ? curRev / docs : null;
+  const ticketPerInvoice = curRev !== null && docsCount > 0 ? curRev / docsCount : null;
 
   return {
     total: totalRow,
     rows: rows.slice(0, 30),
     plan,
     asOf: new Date().toISOString(),
-    truncated: rows.length > 30,
+    truncated: totalCandidateCount > 30,
     source: "Arquivo manual (D1)",
     comparison: comp,
     ...(conflicts.length ? { filterConflicts: conflicts } : {}),
     summaryStats: {
       activeReps: activeRepsCount,
       ticketPerBuyer,
-      invoiceCount: docs,
+      invoiceCount: docsCount,
       ticketPerInvoice,
     },
     sourceInfo: {
@@ -807,10 +1488,12 @@ export async function reconcileCsvBatch(e: Env, batchId: string) {
       e,
       `SELECT
         (SELECT COUNT(DISTINCT representative_key) FROM ci_dim_customers WHERE batch_id=? AND representative_key IS NOT NULL) AS registered,
-        (SELECT COUNT(DISTINCT c.representative_key) FROM ci_fact_sales s JOIN ci_dim_customers c ON c.batch_id=s.batch_id AND c.client_key=s.client_key WHERE s.batch_id=? AND s.date BETWEEN '2026-01-01' AND ? AND c.representative_key IS NOT NULL) AS active`,
+        (WITH ac AS (SELECT DISTINCT COALESCE(client_key, NULL) AS client_key FROM ci_fact_sales WHERE batch_id=? AND date BETWEEN '2026-01-01' AND ? AND client_key IS NOT NULL)
+         SELECT COUNT(DISTINCT c.representative_key) FROM ac JOIN ci_dim_customers c ON c.batch_id=? AND c.client_key=ac.client_key WHERE c.representative_key IS NOT NULL) AS active`,
       batchId,
       batchId,
       refDate,
+      batchId,
     ).first<{ registered: number; active: number }>(),
     stmt(e, "SELECT COUNT(*) AS n FROM ci_fact_orders_open WHERE batch_id=?", batchId).first<{ n: number }>(),
   ]);
@@ -840,8 +1523,8 @@ export async function reconcileCsvBatch(e: Env, batchId: string) {
       e,
       `WITH by_c AS (
          SELECT client_key,
-           SUM(CASE WHEN month_key BETWEEN '2025-01' AND '2025-12' THEN gross_amount ELSE 0 END) AS y25,
-           SUM(CASE WHEN month_key BETWEEN '2026-01' AND '2026-12' THEN gross_amount ELSE 0 END) AS y26,
+           SUM(CASE WHEN date BETWEEN '2025-01-01' AND '2025-12-31' THEN gross_amount ELSE 0 END) AS y25,
+           SUM(CASE WHEN date BETWEEN '2026-01-01' AND '2026-12-31' THEN gross_amount ELSE 0 END) AS y26,
            SUM(CASE WHEN date BETWEEN '2025-01-01' AND ? THEN gross_amount ELSE 0 END) AS p_ytd,
            SUM(CASE WHEN date BETWEEN '2026-01-01' AND ? THEN gross_amount ELSE 0 END) AS c_ytd
          FROM ci_fact_sales WHERE batch_id=? AND date>='2025-01-01' GROUP BY client_key
@@ -959,7 +1642,8 @@ export async function askCsvDeterministic(
 }> {
   const t0 = Date.now();
   const acl = scopeForUser(u, activeFilters);
-  const { batch, hasCalendar, hasDenormMacro } = await loadBatchMeta(e, batchId);
+  const meta = await loadBatchMeta(e, batchId);
+  const { batch, hasCalendar, hasDenormMacro } = meta;
 
   const capabilities: NonNullable<Report["sourceInfo"]>["capabilities"] = {
     metrics: ["gross", "revenue", "returns", "buyers"],
@@ -972,6 +1656,19 @@ export async function askCsvDeterministic(
     fail(422, "Pergunta aberta fora do roteador determinístico; o modo shadow não envia dados reais à OpenAI.");
   }
 
+  const needActiveReps = intent.kind === "rep_registered_count" || intent.kind === "rep_active_count";
+  const skipMonthlySeries =
+    intent.kind === "customer_counts" ||
+    intent.kind === "buyers_period" ||
+    intent.kind === "rep_registered_count" ||
+    intent.kind === "rep_active_count";
+  const queryOpts: ReportQueryOptions = {
+    preloadedMeta: meta,
+    includeDocs: false,
+    includeActiveReps: needActiveReps,
+    skipMonthlySeries,
+  };
+
   const shadowProvider: DataProvider = {
     sourceType: "manual",
     versionId: batchId,
@@ -980,7 +1677,7 @@ export async function askCsvDeterministic(
       measures: { revenue: "Faturamento líquido", gross: "Faturamento bruto", returns: "Devoluções", buyers: "Clientes compradores", margin: null },
       capabilities,
     },
-    query: (p) => queryCsvReport(e, u, batchId, p),
+    query: (p) => queryCsvReport(e, u, batchId, p, queryOpts),
     search: (_f, dimension, query) =>
       dimension === "category"
         ? searchCsvCategory(e, batchId, query)
@@ -988,7 +1685,7 @@ export async function askCsvDeterministic(
   };
 
   const plan = await resolvePlanEntities(shadowProvider, intent.plan, activeFilters);
-  const report = await queryCsvReport(e, u, batchId, plan);
+  const report = await queryCsvReport(e, u, batchId, plan, queryOpts);
   const comp = report.comparison!;
   const netCurrent = report.total.values.revenue.current;
   const srcNote = `Fonte: Camada CSV estruturada (shadow · base até ${batch.reference_date ?? comp.current.to}). Recorte: ${comp.current.from} a ${comp.current.to} contra ${comp.previous.from} a ${comp.previous.to}.`;
@@ -1044,26 +1741,30 @@ export async function askCsvDeterministic(
       };
     }
   } else if (intent.kind === "churned_clients") {
-    const curW = buildFactWhere("s", batchId, plan.filters, acl, hasCalendar, hasDenormMacro, undefined, false, comp.current.from, comp.current.to);
-    const prevW = buildFactWhere("s", batchId, plan.filters, acl, hasCalendar, hasDenormMacro, undefined, false, comp.previous.from, comp.previous.to);
+    const curW = buildFactWhere("s", batchId, plan.filters, acl, hasCalendar, hasDenormMacro, undefined, "single_range", comp.current.from, comp.current.to);
+    const prevW = buildFactWhere("s", batchId, plan.filters, acl, hasCalendar, hasDenormMacro, undefined, "single_range", comp.previous.from, comp.previous.to);
+    const spanFrom = comp.previous.from < comp.current.from ? comp.previous.from : comp.current.from;
+    const spanTo = comp.previous.to > comp.current.to ? comp.previous.to : comp.current.to;
     const churnRows = curW.emptyIntersection
       ? []
       : (
           await stmt(
             e,
             `WITH by_c AS (
-               SELECT s.client_key,
+               SELECT COALESCE(s.client_key, NULL) AS client_key,
                  SUM(CASE WHEN ${curW.clause} AND s.gross_amount>0 THEN s.gross_amount ELSE 0 END) AS cur_g,
                  SUM(CASE WHEN ${prevW.clause} THEN s.gross_amount ELSE 0 END) AS prev_g
                FROM ci_fact_sales s ${curW.joins}
-               WHERE s.batch_id=? AND s.client_key IS NOT NULL AND ((s.date BETWEEN ? AND ?) OR (s.date BETWEEN ? AND ?))
-               GROUP BY s.client_key
+               WHERE s.batch_id=? AND s.client_key IS NOT NULL AND s.date BETWEEN ? AND ? AND ((s.date BETWEEN ? AND ?) OR (s.date BETWEEN ? AND ?))
+               GROUP BY COALESCE(s.client_key, NULL)
              )
              SELECT client_key, prev_g, (SELECT COUNT(*) FROM by_c WHERE prev_g>0 AND cur_g=0) AS total_churned
              FROM by_c WHERE prev_g>0 AND cur_g=0 ORDER BY prev_g DESC LIMIT 10`,
             ...curW.args,
             ...prevW.args,
             batchId,
+            spanFrom,
+            spanTo,
             comp.current.from,
             comp.current.to,
             comp.previous.from,
