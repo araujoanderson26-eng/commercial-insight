@@ -42,18 +42,73 @@ const month = z
   .regex(dateRE)
   .refine((s) => +s.slice(0, 4) >= 2001 && +s.slice(0, 4) <= 2100);
 const val = z.string().trim().max(140).default("");
+const multiVal = z.array(z.string().trim().min(1).max(140)).max(100).optional();
 export const filtersSchema = z
-  .object({ from: month, to: month, region: val, client: val, product: val,
-    regional: z.string().trim().max(140).optional(), state: z.string().trim().max(140).optional(), manager: z.string().trim().max(140).optional(), category: z.string().trim().max(140).optional(),
-    categoriesInclude: z.array(z.string().trim().min(1).max(140)).max(100).optional(),
-    categoriesExclude: z.array(z.string().trim().min(1).max(140)).max(100).optional(),
+  .object({
+    from: month,
+    to: month,
+    region: val,
+    client: val,
+    product: val,
+    regional: z.string().trim().max(140).optional(),
+    state: z.string().trim().max(140).optional(),
+    manager: z.string().trim().max(140).optional(),
+    category: z.string().trim().max(140).optional(),
+    categoriesInclude: multiVal,
+    categoriesExclude: multiVal,
+    regions: multiVal,
+    regionals: multiVal,
+    states: multiVal,
+    managers: multiVal,
+    clients: multiVal,
+    products: multiVal,
+    channels: multiVal,
+    segments: multiVal,
+    brands: multiVal,
+    revenueMin: z.number().finite().optional(),
+    revenueMax: z.number().finite().optional(),
+    ticketMin: z.number().finite().optional(),
+    ticketMax: z.number().finite().optional(),
+    variationDirection: z.enum(["all", "growth", "decline"]).optional(),
   })
   .strict()
   .refine((v) => {
     const n = monthsBetween(v.from, v.to);
     return n >= 0 && n < 24;
-  }, "Selecione de 1 a 24 meses.");
+  }, "Selecione de 1 a 24 meses.")
+  .refine(
+    (v) => v.revenueMin === undefined || v.revenueMax === undefined || v.revenueMin <= v.revenueMax,
+    "O faturamento mínimo não pode ser maior que o máximo.",
+  )
+  .refine(
+    (v) => v.ticketMin === undefined || v.ticketMax === undefined || v.ticketMin <= v.ticketMax,
+    "O ticket mínimo não pode ser maior que o máximo.",
+  );
 export type Filters = z.infer<typeof filtersSchema>;
+export function detectFilterConflicts(filters: Filters): string[] {
+  const conflicts: string[] = [];
+  const fold = (s: string) => s.normalize("NFC").trim().toLocaleUpperCase("pt-BR");
+  const inc = new Set((filters.categoriesInclude ?? []).map(fold));
+  const exc = new Set((filters.categoriesExclude ?? []).map(fold));
+  const overlap = [...inc].filter((v) => exc.has(v));
+  if (overlap.length) {
+    conflicts.push(
+      `Categoria selecionada para incluir e excluir simultaneamente (${overlap.join(", ")}): a exclusão prevalece no resultado.`,
+    );
+  }
+  if (filters.category && exc.has(fold(filters.category))) {
+    conflicts.push(
+      `A categoria selecionada (${filters.category}) está também marcada para exclusão: a exclusão prevalece.`,
+    );
+  }
+  if (filters.revenueMin !== undefined && filters.revenueMax !== undefined && filters.revenueMin > filters.revenueMax) {
+    conflicts.push("Faixa de faturamento conflitante: valor mínimo maior que o máximo.");
+  }
+  if (filters.ticketMin !== undefined && filters.ticketMax !== undefined && filters.ticketMin > filters.ticketMax) {
+    conflicts.push("Faixa de ticket médio conflitante: valor mínimo maior que o máximo.");
+  }
+  return conflicts;
+}
 export function monthsBetween(a: string, b: string) {
   return (+b.slice(0, 4) - +a.slice(0, 4)) * 12 + (+b.slice(5) - +a.slice(5));
 }
@@ -90,6 +145,15 @@ export type Report = {
     reason?: string;
   };
   warnings?: string[];
+  filterConflicts?: string[];
+  summaryStats?: {
+    activeReps?: number | null;
+    registeredClients?: number | null;
+    registeredReps?: number | null;
+    invoiceCount?: number | null;
+    ticketPerBuyer?: number | null;
+    ticketPerInvoice?: number | null;
+  };
   sourceInfo?: {
     versionId: string;
     extractedAt: string;

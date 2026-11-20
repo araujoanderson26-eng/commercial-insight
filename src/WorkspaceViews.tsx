@@ -41,7 +41,25 @@ import {
   type Session,
   type FilterDimension,
 } from "../shared/domain";
-import { api, Busy, Delta, ErrorBox, Graph, Kpis, planFor, Signals, useReport, sessionCapabilities, groupLabel, metricLabel, absoluteChange, ReportContext, message } from "./ui";
+import {
+  api,
+  Delta,
+  ErrorBox,
+  Graph,
+  Kpis,
+  planFor,
+  Signals,
+  useReport,
+  sessionCapabilities,
+  groupLabel,
+  metricLabel,
+  absoluteChange,
+  ReportContext,
+  message,
+} from "./ui";
+import { ReportSkeleton } from "./components/Skeletons";
+import { filterRowsLocally } from "./lib/analytics";
+import { makeScope } from "./lib/cache";
 import { exportReport } from "./exports";
 export const mainNav = [
   { p: "inicio", label: "Início", icon: House },
@@ -149,6 +167,7 @@ export function Home({
   ask,
   card,
   ready,
+  onCrossFilter,
 }: {
   s: Session;
   filters: Filters;
@@ -156,10 +175,11 @@ export function Home({
   ask: (q: string) => void;
   card: (p: string) => void;
   ready: boolean;
+  onCrossFilter?: (dimension: FilterDimension | "month", value: string) => void;
 }) {
   const [q, Q] = useState(""),
     [refresh, R] = useState(0),
-    report = useReport(planFor(filters), ready, refresh, (s.data?.source ?? "powerbi") + "|" + (s.data?.activeVersionId ?? ""));
+    report = useReport(planFor(filters), ready, refresh, makeScope(s));
   const hour = Number(
     new Intl.DateTimeFormat("pt-BR", {
       hour: "2-digit",
@@ -258,19 +278,25 @@ export function Home({
         </div>
         {!ready ? (
           <Connection s={s} go={go} />
-        ) : report.error ? (
+        ) : report.error && !report.data ? (
           <ErrorBox>{report.error}</ErrorBox>
         ) : report.data ? (
           <>
+            {report.error && <ErrorBox>{report.error}</ErrorBox>}
             <ReportContext r={report.data} />
             <Kpis r={report.data} />
             <div className="analytics">
-              <Graph r={report.data} />
+              <Graph
+                r={report.data}
+                refreshing={report.refreshing}
+                onCrossFilter={onCrossFilter}
+                activeFilterValue={filters.from === filters.to ? filters.from : undefined}
+              />
               <Signals r={report.data} ask={ask} />
             </div>
           </>
         ) : (
-          <Busy />
+          <ReportSkeleton withSignals />
         )}
       </section>
     </div>
@@ -287,6 +313,7 @@ export function Reports({
   initialPlan,
   drill,
   restore,
+  onCrossFilter,
 }: {
   page: string;
   filters: Filters;
@@ -298,6 +325,7 @@ export function Reports({
   initialPlan?: Plan;
   drill: (key: FilterDimension, name: string) => void;
   restore: (plan: Plan) => void;
+  onCrossFilter?: (dimension: FilterDimension | "month", value: string) => void;
 }) {
   const group0 = page === "clientes" ? "client" : page === "produtos" ? "product" : initialGroup;
   const [group, G] = useState<Group>(initialPlan?.group ?? group0),
@@ -325,8 +353,17 @@ export function Reports({
   const capabilities = sessionCapabilities(s);
   const effectiveGroup = capabilities.groups.includes(group) ? group : "month";
   const effectiveMetric = capabilities.metrics.includes(metric) ? metric : "revenue";
-  const report = useReport({ ...planFor(filters, effectiveGroup, effectiveMetric), order }, ready, refresh,
-    (s.data?.source ?? "powerbi") + "|" + (s.data?.activeVersionId ?? ""));
+  const report = useReport({ ...planFor(filters, effectiveGroup, effectiveMetric), order }, ready, refresh, makeScope(s));
+  const activeFilterValue =
+    effectiveGroup === "month"
+      ? filters.from === filters.to
+        ? filters.from
+        : undefined
+      : effectiveGroup === "category" && s.data?.source === "manual"
+        ? filters.categoriesInclude?.length === 1
+          ? filters.categoriesInclude[0]
+          : filters.category || undefined
+        : filters[effectiveGroup as FilterDimension] || undefined;
   const title = navs.find((n) => n.p === page)?.label || "Relatórios";
   return (
     <div className="stack">
@@ -348,6 +385,35 @@ export function Reports({
       {saved.length > 0 && <section className="panel saved-reports"><div className="mini"><Star size={14} /> Consultas favoritas</div><div className="saved-list">{saved.map((item) => <div key={item.id}><button className="soft compact" onClick={() => { G(item.plan.group); M(item.plan.metric); O(item.plan.order); restore(item.plan); }}><Star size={13} />{item.title}</button><button className="iconbtn" aria-label={"Excluir consulta " + item.title} onClick={() => void removeSaved(item.id)}><Trash2 size={13} /></button></div>)}</div></section>}
       {notice && <div className="notice" role="status">{notice}</div>}
       {savedError && <ErrorBox>{savedError}</ErrorBox>}
+      <div className="quick-views" role="group" aria-label="Visões executivas rápidas">
+        {([
+          { label: "Evolução mensal", g: "month", m: "revenue", o: "current" },
+          { label: "Por Regional", g: "regional", m: "revenue", o: "current" },
+          { label: "Representantes ↑", g: "region", m: "revenue", o: "growth" },
+          { label: "Mix Categorias", g: "category", m: "revenue", o: "current" },
+          { label: "Clientes ↓", g: "client", m: "revenue", o: "decline" },
+          { label: "Produtos ↑", g: "product", m: "revenue", o: "growth" },
+        ] as const)
+          .filter((item) => capabilities.groups.includes(item.g))
+          .map((item) => {
+            const active =
+              effectiveGroup === item.g && effectiveMetric === item.m && order === item.o;
+            return (
+              <button
+                key={item.label}
+                type="button"
+                className={active ? "soft compact active-view" : "soft compact"}
+                onClick={() => {
+                  G(item.g);
+                  M(item.m);
+                  O(item.o);
+                }}
+              >
+                {item.label}
+              </button>
+            );
+          })}
+      </div>
       <div className="panel toolbar">
         <label>
           Agrupar por
@@ -387,17 +453,27 @@ export function Reports({
       </div>
       {!ready ? (
         <Connection s={s} go={go} />
-      ) : report.error ? (
+      ) : report.error && !report.data ? (
         <ErrorBox>{report.error}</ErrorBox>
       ) : !report.data ? (
-        <Busy />
+        <ReportSkeleton withTable />
       ) : (
         <>
+          {report.error && <ErrorBox>{report.error}</ErrorBox>}
           <ReportContext r={report.data} />
           <div className="report-actions"><button className="soft compact" onClick={() => exportReport(report.data!)}><Download size={15} />Exportar Excel</button><button className="soft compact" onClick={() => printReport(report.data!)}><Printer size={15} />Imprimir / PDF</button><button className="soft compact" onClick={() => { ST(title + " · " + filters.to); SO(!saveOpen); }}><Star size={15} />Salvar consulta</button></div>
           {saveOpen && <form className="panel save-report-form" onSubmit={(event) => { event.preventDefault(); void save(); }}><label>Nome da consulta<input required maxLength={120} value={saveTitle} onChange={(event) => ST(event.target.value)} /></label><button className="primary">Salvar</button><button type="button" className="soft" onClick={() => SO(false)}>Cancelar</button></form>}
           <Kpis r={report.data} />
-          {page === "alertas" ? <Signals r={report.data} ask={ask} /> : <Graph r={report.data} />}
+          {page === "alertas" ? (
+            <Signals r={report.data} ask={ask} />
+          ) : (
+            <Graph
+              r={report.data}
+              refreshing={report.refreshing}
+              onCrossFilter={onCrossFilter}
+              activeFilterValue={activeFilterValue}
+            />
+          )}
           <section className="panel">
             <div className="sectionhead">
               <h2>{effectiveGroup === "month" ? "Detalhamento mensal" : "Ranking · " + groupLabel(effectiveGroup, capabilities)}</h2>
@@ -418,7 +494,7 @@ export function Reports({
                   </tr>
                 </thead>
                 <tbody>
-                  {report.data.rows.filter((row) => effectiveGroup === "month" || row.name.toLocaleLowerCase("pt-BR").includes(search.toLocaleLowerCase("pt-BR"))).map((row) => (
+                  {(effectiveGroup === "month" ? report.data.rows : filterRowsLocally(report.data.rows, search)).map((row) => (
                     <tr key={row.name}>
                       <td>
                         {capabilities.filters.includes(effectiveGroup as FilterDimension) && row.canDrill !== false ? (

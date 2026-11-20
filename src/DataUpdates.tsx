@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
 import { api, Busy, Empty, ErrorBox, message } from "./ui";
+import { apiUrl, getNativeToken, isNativeApp } from "./lib/runtime";
 import { metrics, type DataCapabilities } from "../shared/domain";
 
 type ValidationReport = {
@@ -158,10 +159,15 @@ function sendPart(
     const request = new XMLHttpRequest();
     const abort = () => request.abort();
     const finish = () => signal.removeEventListener("abort", abort);
-    request.open("PUT", `/api/admin/data/imports/${id}/parts/${partNumber}`);
+    request.open("PUT", apiUrl(`admin/data/imports/${id}/parts/${partNumber}`));
     request.withCredentials = true;
     request.timeout = 180000;
     request.setRequestHeader("Content-Type", "application/octet-stream");
+    if (isNativeApp()) {
+      request.setRequestHeader("X-Client-Platform", "capacitor");
+      const token = getNativeToken();
+      if (token) request.setRequestHeader("Authorization", "Bearer " + token);
+    }
     request.upload.onprogress = (ev) => update(ev.loaded);
     request.onload = () => {
       finish();

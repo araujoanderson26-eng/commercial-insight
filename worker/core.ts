@@ -11,6 +11,23 @@ export interface Env extends CloudflareBindings {
   HML_OPENAI_BUDGET_USD?: string;
   HML_REAL_DATA_AUTHORIZATION?: string;
   PRODUCTION_AI_BUDGET?: string;
+  MOBILE_ORIGINS?: string;
+}
+export function allowedMobileOrigin(e: Env, reqOrigin: string | null): string | null {
+  if (!reqOrigin || !e.MOBILE_ORIGINS) return null;
+  const list = e.MOBILE_ORIGINS.split(",").map((v) => v.trim()).filter(Boolean);
+  return list.includes(reqOrigin) ? reqOrigin : null;
+}
+export function corsHeaders(e: Env, req: Request): Record<string, string> {
+  const matched = allowedMobileOrigin(e, req.headers.get("origin"));
+  if (!matched) return {};
+  return {
+    "Access-Control-Allow-Origin": matched,
+    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Platform",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+    Vary: "Origin",
+  };
 }
 export class Problem extends Error {
   constructor(
@@ -24,6 +41,10 @@ export function fail(status: number, message: string): never {
   throw new Problem(status, message);
 }
 export const now = () => Math.floor(Date.now() / 1000);
+export function scheduleBackground(ctx: ExecutionContext | undefined, task: Promise<unknown>) {
+  const safe = task.catch(() => {});
+  if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(safe);
+}
 export const stmt = (e: Env, sql: string, ...args: (string | number | null)[]) =>
   e.DB.prepare(sql).bind(...args);
 export const audit = (e: Env, actor: string | null, action: string, target: string | null = null) =>

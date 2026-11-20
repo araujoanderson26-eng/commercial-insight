@@ -413,7 +413,8 @@ function security(u:DbUser,p:Plan) {
   if([...(p.filters.categoriesInclude??[]),...(p.filters.categoriesExclude??[])].some(v=>v.startsWith("Macro Categoria: ")))fail(422,"Macro Categoria exige a fonte relacional com cadastro oficial de produtos.");
   for(const [key,allowed] of [["region",regions],["client",clients],["product",[]],["category",[]]] as const) {
     const requested=p.filters[key],scoped=!national&&allowed.length>0;
-    if(requested&&scoped&&!(allowed as readonly string[]).includes(requested)) fail(403,"Seleção fora do seu escopo.");
+    const multiRequested=key==="region"?(p.filters.regions??[]):key==="client"?(p.filters.clients??[]):[];
+    if((requested&&scoped&&!(allowed as readonly string[]).includes(requested))||(scoped&&multiRequested.some(v=>!(allowed as readonly string[]).includes(v)))) fail(403,"Seleção fora do seu escopo.");
     const values=requested?[requested]:scoped?allowed:[];
     if(values.length) {clauses.push(key+" IN (SELECT value FROM json_each(?))");args.push(JSON.stringify(values));}
   }
@@ -450,16 +451,19 @@ export async function queryManual(e:Env,u:DbUser,p:Plan,versionId?:string):Promi
   if(m.formatVersion===2){const report=await queryNative(e,u,p,m,row.id);report.sourceInfo=sourceInfo(row,m);
     if(controlledHmlPolicy(e))report.warnings=[...(report.warnings??[]),"Validação autorizada limitada a janeiro–outubro de 2026 e ao período homólogo de 2025; nenhum período posterior foi incluído."];
     return report;}
-  if(!["month","client","region","product","category"].includes(p.group)||p.filters.state||p.filters.regional||p.filters.manager)fail(422,"Este filtro ou agrupamento não está disponível no pacote legado.");
+  if(!["month","client","region","product","category"].includes(p.group)||p.filters.state||p.filters.regional||p.filters.manager||p.filters.states?.length||p.filters.regionals?.length||p.filters.managers?.length||p.filters.regions?.length||p.filters.clients?.length||p.filters.products?.length||p.filters.channels?.length||p.filters.segments?.length||p.filters.brands?.length||p.filters.variationDirection&&p.filters.variationDirection!=="all"||p.filters.revenueMin!==undefined||p.filters.revenueMax!==undefined||p.filters.ticketMin!==undefined||p.filters.ticketMax!==undefined)fail(422,"Este filtro ou agrupamento não está disponível no pacote legado.");
   const selected=m.metrics.find(x=>x.id===p.metric&&x.status==="validated"&&x.kind!=="unavailable");
   if(!selected) fail(422,"Indicador indisponível nesta versão manual: "+(m.metrics.find(x=>x.id===p.metric)?.reason??"sem equivalência comprovada com o modelo Power BI"));
-  const acl=security(u,p), results=[], period=nativePeriod(m,p.filters);
-  for(const offset of [0,-1]) {
-    const range=offset===0?period.current:period.previous,where=[...acl.clauses,"date>=?","date<=?"],args=[...acl.args,range.from,range.to];
-    const total=await aggregate(e,row.id,m,where,args);
-    const details=await aggregate(e,row.id,m,where,args,p.group);
-    results.push({total:total[0],details});
-  }
+  const acl=security(u,p), period=nativePeriod(m,p.filters);
+  const currentWhere=[...acl.clauses,"date>=?","date<=?"],currentArgs=[...acl.args,period.current.from,period.current.to];
+  const previousWhere=[...acl.clauses,"date>=?","date<=?"],previousArgs=[...acl.args,period.previous.from,period.previous.to];
+  const [total0,details0,total1,details1]=await Promise.all([
+    aggregate(e,row.id,m,currentWhere,currentArgs),
+    aggregate(e,row.id,m,currentWhere,currentArgs,p.group),
+    aggregate(e,row.id,m,previousWhere,previousArgs),
+    aggregate(e,row.id,m,previousWhere,previousArgs,p.group),
+  ]);
+  const results=[{total:total0[0],details:details0},{total:total1[0],details:details1}];
   const names=new Set([...results[0].details,...results[1].details].map(x=>String(x.name)));
   let rows:Row[]=[];
   if(p.group==="month") {

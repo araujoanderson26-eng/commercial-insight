@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { passwordHash, passwordOK } from "../shared/password.mjs";
 import {
+  allowedMobileOrigin,
   audit,
   body,
   digest,
@@ -10,6 +11,7 @@ import {
   limit,
   now,
   passwordSchema,
+  scheduleBackground,
   stmt,
   token,
   type DbUser,
@@ -34,12 +36,18 @@ function cookie(e: Env, s: string, age: number) {
     (origin(e).startsWith("https:") ? "; Secure" : "")
   );
 }
-export async function authenticate(e: Env, req: Request) {
-  const raw = req.headers
+export async function authenticate(e: Env, req: Request, ctx?: ExecutionContext) {
+  const cookieRaw = req.headers
     .get("cookie")
     ?.split(/;\s*/)
     .find((v) => v.startsWith(cookieName(e) + "="))
     ?.split("=")[1];
+  const authHeader = req.headers.get("authorization");
+  const bearerRaw =
+    !cookieRaw && allowedMobileOrigin(e, req.headers.get("origin")) && authHeader?.startsWith("Bearer ")
+      ? authHeader.slice(7).trim()
+      : undefined;
+  const raw = cookieRaw || bearerRaw;
   if (!raw || !/^[a-f0-9]{64}$/.test(raw)) fail(401, "Entre para continuar.");
   const hash = await digest(raw);
   const user = await stmt(
@@ -51,8 +59,11 @@ export async function authenticate(e: Env, req: Request) {
   ).first<DbUser & { expires: number; seen: number }>();
   if (!user) fail(401, "Sua sessão terminou. Entre novamente.");
   if (user.update_only) user.role = "operador";
-  if (user.seen < now() - 60)
-    await stmt(e, "UPDATE sessions SET seen=? WHERE hash=?", now(), hash).run();
+  if (user.seen < now() - 60) {
+    const touch = stmt(e, "UPDATE sessions SET seen=? WHERE hash=?", now(), hash).run();
+    if (ctx && typeof ctx.waitUntil === "function") scheduleBackground(ctx, touch);
+    else await touch;
+  }
   return { user, hash };
 }
 export async function authRoute(e: Env, req: Request, path: string, ctx: ExecutionContext) {
@@ -84,7 +95,9 @@ export async function authRoute(e: Env, req: Request, path: string, ctx: Executi
       ),
       audit(e, u.id, "login"),
     ]);
-    return json({ ok: true }, 200, { "Set-Cookie": cookie(e, id, 8 * 3600) });
+    const isCapacitorMobile = !!allowedMobileOrigin(e, req.headers.get("origin"))
+      && req.headers.get("x-client-platform") === "capacitor";
+    return json(isCapacitorMobile ? { ok: true, token: id } : { ok: true }, 200, { "Set-Cookie": cookie(e, id, 8 * 3600) });
   }
   if (path === "forgot") {
     const { email } = z.object({ email: emailSchema }).parse(await body(req));
@@ -94,7 +107,8 @@ export async function authRoute(e: Env, req: Request, path: string, ctx: Executi
       limit(e, "reset-ip:" + ip, 15, 3600),
       limit(e, "reset-email:" + email, 4, 3600),
     ]);
-    ctx.waitUntil(
+    scheduleBackground(
+      ctx,
       (async () => {
         const u = await stmt(
           e,

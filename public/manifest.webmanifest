@@ -1,1 +1,25 @@
-{"id":"/","name":"Comercial Insight — Inteligência Comercial com IA","short_name":"Comercial Insight","lang":"pt-BR","start_url":"/","scope":"/","display":"standalone","background_color":"#091c36","theme_color":"#091c36","icons":[{"src":"/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any"},{"src":"/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any"},{"src":"/icon-maskable.png","sizes":"512x512","type":"image/png","purpose":"maskable"}]}
+{
+  "id": "/",
+  "name": "Comercial Insight — Inteligência Comercial com IA",
+  "short_name": "Comercial Insight",
+  "description": "Resultados, carteira, visitas e decisões comerciais com dados do Power BI.",
+  "lang": "pt-BR",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone"],
+  "categories": ["business", "finance", "productivity"],
+  "background_color": "#091c36",
+  "theme_color": "#091c36",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Relatórios", "short_name": "Relatórios", "url": "/relatorios" },
+    { "name": "Clientes", "short_name": "Clientes", "url": "/clientes" },
+    { "name": "Preparar visita", "short_name": "Visitas", "url": "/visitas" },
+    { "name": "Alertas e ações", "short_name": "Alertas", "url": "/alertas" }
+  ]
+}

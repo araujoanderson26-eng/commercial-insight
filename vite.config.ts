@@ -10,7 +10,7 @@ export default defineConfig({
       output: {
         manualChunks: {
           react: ["react", "react-dom", "react-dom/client"],
-          graficos: ["recharts"],
+          graficos: ["echarts"],
           validacao: ["zod"],
         },
       },

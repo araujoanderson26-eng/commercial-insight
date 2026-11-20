@@ -34,8 +34,9 @@ export function policy(u: User, m: ModelConfig, p: Plan) {
     ["category", []],
   ] as const) {
     const request = p.filters[dimension];
+    const multiRequest = dimension === "region" ? (p.filters.regions ?? []) : dimension === "client" ? (p.filters.clients ?? []) : [];
     const scoped = !national && allowed.length > 0;
-    if (request && scoped && !(allowed as readonly string[]).includes(request))
+    if ((request && scoped && !(allowed as readonly string[]).includes(request)) || (scoped && multiRequest.some((v) => !(allowed as readonly string[]).includes(v))))
       fail(403, "Seleção fora do seu escopo.");
     const values = request ? [request] : scoped ? allowed : [];
     if (values.length)
@@ -86,7 +87,26 @@ function expressions(m: ModelConfig, from: string, to: string) {
   return args.join(", ");
 }
 export function compile(m: ModelConfig, u: User, p: Plan) {
-  if (["state", "regional", "manager"].includes(p.group) || p.filters.state || p.filters.regional || p.filters.manager)
+  if (
+    ["state", "regional", "manager"].includes(p.group) ||
+    p.filters.state ||
+    p.filters.regional ||
+    p.filters.manager ||
+    p.filters.regions?.length ||
+    p.filters.clients?.length ||
+    p.filters.products?.length ||
+    p.filters.states?.length ||
+    p.filters.regionals?.length ||
+    p.filters.managers?.length ||
+    p.filters.channels?.length ||
+    p.filters.segments?.length ||
+    p.filters.brands?.length ||
+    (p.filters.variationDirection && p.filters.variationDirection !== "all") ||
+    p.filters.revenueMin !== undefined ||
+    p.filters.revenueMax !== undefined ||
+    p.filters.ticketMin !== undefined ||
+    p.filters.ticketMax !== undefined
+  )
     fail(422, "Este recorte está disponível na fonte manual compatível. O conector online ainda não possui esse mapeamento.");
   const acl = policy(u, m, p),
     { from, to } = p.filters;

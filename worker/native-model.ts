@@ -1,13 +1,28 @@
 import { z } from "zod";
-import { metricKeys, monthsBetween, type DataCapabilities, type Filters, type Group, type Metric, type Plan, type Report, type Row } from "../shared/domain";
+import { detectFilterConflicts, metricKeys, monthsBetween, type DataCapabilities, type Filters, type Group, type Metric, type Plan, type Report, type Row } from "../shared/domain";
 import { decimalInteger, type ControlFilters, type ManualManifest, type NativeModel } from "../shared/manual";
 import type { CustomerDetails } from "../shared/commercial";
+import { activeCsvBatch } from "./csv-importer";
 import { fail, stmt, type DbUser, type Env } from "./core";
 
 type NativeRole = "sales" | "returns" | "customers" | "calendar" | "regions" | "municipalities" | "latitudes" | "repArea";
 type NativeTable = ManualManifest["inventory"]["tables"][number];
 type Sql = { sql:string; args:(string|number|null)[] };
-export type NativeContext = ControlFilters & { categoriesInclude?:string[]; categoriesExclude?:string[]; macroTable?:string;macroKey?:string;macroValue?:string; name?:string; allowedRegions?:string[]; allowedClients?:string[] };
+export type NativeContext = ControlFilters & {
+  regions?: string[];
+  regionals?: string[];
+  states?: string[];
+  managers?: string[];
+  clients?: string[];
+  products?: string[];
+  channels?: string[];
+  segments?: string[];
+  brands?: string[];
+  csvBatchId?: string;
+  categoriesInclude?:string[];
+  categoriesExclude?:string[];
+  macroTable?:string;macroKey?:string;macroValue?:string; name?:string; allowedRegions?:string[]; allowedClients?:string[];
+};
 /** Matches the supported case-insensitive/accent-sensitive text contract while preserving raw/display values. */
 export function nativeKey(value:string):string|null {
   const text=value.normalize("NFC").trimEnd();if(text.length===0)return null;
@@ -113,21 +128,44 @@ export function nativePartStatements(e:Env,m:ManualManifest,version:string,table
   return statements;
 }
 
+const mergeKeys = (single?: string, list?: string[]) => {
+  const out = new Set<string>();
+  if (single) {
+    const k = nativeKey(single);
+    if (k) out.add(k);
+  }
+  for (const v of list ?? []) {
+    const k = nativeKey(v);
+    if (k) out.add(k);
+  }
+  return [...out];
+};
+
 export function compileNativeContexts(version:string,contexts:NativeContext[],includeDimensions=false):Sql {
   if(contexts.length<1||contexts.length>10001)throw Error("Quantidade de contextos inválida.");
   const key=(s:string|undefined)=>s?nativeKey(s)??"":"";
-  const normalized=contexts.map((c,index)=>({key:index,name:c.name??String(index),from:c.from,to:c.to,region:key(c.region),client:key(c.client),product:key(c.product),macroTable:c.macroTable??"",macroKey:c.macroKey??"",macroValue:c.macroValue??"",macroInclude:(c.categoriesInclude??[]).filter(v=>v.startsWith("Macro Categoria: ")).map(v=>key(v.slice(17))),macroExclude:(c.categoriesExclude??[]).filter(v=>v.startsWith("Macro Categoria: ")).map(v=>key(v.slice(17))),categoriesInclude:(c.categoriesInclude??[]).filter(v=>!v.startsWith("Macro Categoria: ")).map(key),categoriesExclude:(c.categoriesExclude??[]).filter(v=>!v.startsWith("Macro Categoria: ")).map(key),category:key(c.category),state:key(c.state),regional:key(c.regional),manager:key(c.manager),allowedRegions:(c.allowedRegions??[]).map(nativeKey),allowedClients:(c.allowedClients??[]).map(nativeKey)})).map(c=>({...c,hasRepresentative:c.region!==""||c.allowedRegions.length>0?1:0,hasSales:c.macroInclude.length>0||c.macroExclude.length>0||c.categoriesInclude.length>0||c.categoriesExclude.length>0||c.client!==""||c.product!==""||c.category!==""||c.state!==""||c.allowedClients.length>0?1:0}));
-  const hasGeo=normalized.some(c=>c.regional!==""||c.manager!==""),hasReps=normalized.some(c=>c.hasRepresentative),hasSales=normalized.some(c=>c.hasSales),hasCustomerPath=hasReps||hasSales;
-  const geoClause=(alias:string)=>hasGeo?" AND((c.regional='' AND c.manager='') OR EXISTS(SELECT 1 FROM geo WHERE geo.k=c.k AND geo.state IS "+alias+".state))":"";
-  const customerCuts=[...(normalized.some(c=>c.region!=="")?[normalized.every(c=>c.region!=="")?"b.representative=c.representative":"(c.representative='' OR b.representative=c.representative)"]:[]),...(normalized.some(c=>c.allowedRegions.length)?[normalized.every(c=>c.allowedRegions.length)?"b.representative IN(SELECT value FROM json_each(c.allowed_reps))":"(json_array_length(c.allowed_reps)=0 OR b.representative IN(SELECT value FROM json_each(c.allowed_reps)))"]:[])];
+  const normalized=contexts.map((c,index)=>{
+    const regionsList=mergeKeys(c.region,c.regions),clientsList=mergeKeys(c.client,c.clients),productsList=mergeKeys(c.product,c.products),statesList=mergeKeys(c.state,c.states),regionalsList=mergeKeys(c.regional,c.regionals),managersList=mergeKeys(c.manager,c.managers);
+    const channelsList=mergeKeys(undefined,c.channels),segmentsList=mergeKeys(undefined,c.segments),brandsList=mergeKeys(undefined,c.brands);
+    return {key:index,name:c.name??String(index),from:c.from,to:c.to,region:key(c.region),client:key(c.client)||(clientsList.length===1?clientsList[0]:""),product:key(c.product),regions:regionsList,clients:clientsList,products:productsList,states:statesList,regionals:regionalsList,managers:managersList,channels:channelsList,segments:segmentsList,brands:brandsList,csvBatchId:c.csvBatchId??"",macroTable:c.macroTable??"",macroKey:c.macroKey??"",macroValue:c.macroValue??"",macroInclude:(c.categoriesInclude??[]).filter(v=>v.startsWith("Macro Categoria: ")).map(v=>key(v.slice(17))),macroExclude:(c.categoriesExclude??[]).filter(v=>v.startsWith("Macro Categoria: ")).map(v=>key(v.slice(17))),categoriesInclude:(c.categoriesInclude??[]).filter(v=>!v.startsWith("Macro Categoria: ")).map(key),categoriesExclude:(c.categoriesExclude??[]).filter(v=>!v.startsWith("Macro Categoria: ")).map(key),category:key(c.category),state:key(c.state),regional:key(c.regional),manager:key(c.manager),allowedRegions:(c.allowedRegions??[]).map(nativeKey),allowedClients:(c.allowedClients??[]).map(nativeKey)};
+  }).map(c=>({...c,hasRepresentative:c.regions.length>0||c.allowedRegions.length>0?1:0,hasSales:c.macroInclude.length>0||c.macroExclude.length>0||c.categoriesInclude.length>0||c.categoriesExclude.length>0||c.clients.length>0||c.products.length>0||c.category!==""||c.states.length>0||c.channels.length>0||c.segments.length>0||c.brands.length>0||c.allowedClients.length>0?1:0}));
+  const hasGeo=normalized.some(c=>c.regionals.length>0||c.managers.length>0),hasReps=normalized.some(c=>c.hasRepresentative),hasSales=normalized.some(c=>c.hasSales),hasCustomerPath=hasReps||hasSales;
+  const geoClause=(alias:string)=>hasGeo?" AND((json_array_length(c.regionals)=0 AND json_array_length(c.managers)=0) OR EXISTS(SELECT 1 FROM geo WHERE geo.k=c.k AND geo.state IS "+alias+".state))":"";
+  const customerCuts=[...(normalized.some(c=>c.regions.length>0)?[normalized.every(c=>c.regions.length>0)?"b.representative IN(SELECT value FROM json_each(c.regions))":"(json_array_length(c.regions)=0 OR b.representative IN(SELECT value FROM json_each(c.regions)))"]:[]),...(normalized.some(c=>c.allowedRegions.length)?[normalized.every(c=>c.allowedRegions.length)?"b.representative IN(SELECT value FROM json_each(c.allowed_reps))":"(json_array_length(c.allowed_reps)=0 OR b.representative IN(SELECT value FROM json_each(c.allowed_reps)))"]:[])];
   const macroProducts=(_alias:string,field:string)=>"SELECT product FROM macro_products WHERE k=c.k AND product IS NOT NULL AND macro IN(SELECT value FROM json_each(c."+field+"))";
-  const salesCuts=[...(normalized.some(c=>c.macroExclude.length)?["(s.product IS NULL OR s.product NOT IN("+macroProducts("s","macro_exclude")+"))"]:[]),...(normalized.some(c=>c.categoriesInclude.length||c.macroInclude.length)?["((json_array_length(c.categories_include)=0 AND json_array_length(c.macro_include)=0) OR s.category IN(SELECT value FROM json_each(c.categories_include)) OR s.product IN("+macroProducts("s","macro_include")+"))"]:[]),...(normalized.some(c=>c.categoriesExclude.length)?["(s.category IS NULL OR s.category NOT IN(SELECT value FROM json_each(c.categories_exclude)))"]:[]),...(["client","product","category","state"] as const).filter(field=>normalized.some(c=>c[field]!=="")).map(field=>normalized.every(c=>c[field]!=="")?"s."+field+"=c."+field:"(c."+field+"='' OR s."+field+"=c."+field+")"),...(normalized.some(c=>c.allowedClients.length)?[normalized.every(c=>c.allowedClients.length)?"s.client IN(SELECT value FROM json_each(c.allowed_clients))":"(json_array_length(c.allowed_clients)=0 OR s.client IN(SELECT value FROM json_each(c.allowed_clients)))"]:[])];
+  const listCols=[["clients","client"],["products","product"],["states","state"]] as const;
+  const extendedCuts=[
+    ...(normalized.some(c=>c.channels.length>0)?["(json_array_length(c.channels)=0 OR EXISTS(SELECT 1 FROM ci_fact_sales fs WHERE fs.batch_id=c.csv_batch_id AND fs.date=s.date AND fs.client_key IS s.client AND fs.product_key IS s.product AND UPPER(TRIM(fs.channel)) IN(SELECT value FROM json_each(c.channels))))"]:[]),
+    ...(normalized.some(c=>c.segments.length>0)?["(json_array_length(c.segments)=0 OR EXISTS(SELECT 1 FROM ci_dim_customers dc WHERE dc.batch_id=c.csv_batch_id AND dc.client_key IS s.client AND UPPER(TRIM(dc.segment)) IN(SELECT value FROM json_each(c.segments))))"]:[]),
+    ...(normalized.some(c=>c.brands.length>0)?["(json_array_length(c.brands)=0 OR EXISTS(SELECT 1 FROM ci_dim_products dp WHERE dp.batch_id=c.csv_batch_id AND dp.product_key IS s.product AND UPPER(TRIM(dp.brand)) IN(SELECT value FROM json_each(c.brands))))"]:[]),
+  ];
+  const salesCuts=[...(normalized.some(c=>c.macroExclude.length)?["(s.product IS NULL OR s.product NOT IN("+macroProducts("s","macro_exclude")+"))"]:[]),...(normalized.some(c=>c.categoriesInclude.length||c.macroInclude.length)?["((json_array_length(c.categories_include)=0 AND json_array_length(c.macro_include)=0) OR s.category IN(SELECT value FROM json_each(c.categories_include)) OR s.product IN("+macroProducts("s","macro_include")+"))"]:[]),...(normalized.some(c=>c.categoriesExclude.length)?["(s.category IS NULL OR s.category NOT IN(SELECT value FROM json_each(c.categories_exclude)))"]:[]),...(normalized.some(c=>c.category!=="")?[normalized.every(c=>c.category!=="")?"s.category=c.category":"(c.category='' OR s.category=c.category)"]:[]),...listCols.filter(([field])=>normalized.some(c=>c[field].length>0)).map(([field,col])=>normalized.every(c=>c[field].length>0)?"s."+col+" IN(SELECT value FROM json_each(c."+field+"))":"(json_array_length(c."+field+")=0 OR s."+col+" IN(SELECT value FROM json_each(c."+field+")))"),...extendedCuts,...(normalized.some(c=>c.allowedClients.length)?[normalized.every(c=>c.allowedClients.length)?"s.client IN(SELECT value FROM json_each(c.allowed_clients))":"(json_array_length(c.allowed_clients)=0 OR s.client IN(SELECT value FROM json_each(c.allowed_clients)))"]:[])];
   const visibleSales=hasReps?" JOIN ctx c ON c.k=s.k WHERE "+(normalized.every(c=>c.hasRepresentative)?"":"c.has_representative=0 OR ")+"EXISTS(SELECT 1 FROM customer0 b WHERE b.k=s.k AND b.client IS s.client)":"";
   const salesKeys="SELECT DISTINCT s.k,s.client FROM visible_sales s"+(normalized.every(c=>c.hasSales)?"":" JOIN ctx c ON c.k=s.k WHERE c.has_sales=1");
   const visibleCustomers=hasSales?"SELECT DISTINCT b.k,b.client FROM customer0 b JOIN sales_client_keys s ON s.k=b.k AND s.client IS b.client"+(normalized.every(c=>c.hasSales)?"":" UNION SELECT DISTINCT b.k,b.client FROM customer0 b JOIN ctx c ON c.k=b.k WHERE c.has_sales=0"):"SELECT DISTINCT b.k,b.client FROM customer0 b";
   const returnsCustomer=hasCustomerPath?" AND("+(normalized.every(c=>c.hasRepresentative||c.hasSales)?"":"(c.has_representative=0 AND c.has_sales=0) OR ")+"EXISTS(SELECT 1 FROM visible_customers b WHERE b.k=c.k AND b.client IS r.client))":"";
   const sql=`WITH
-ctx AS MATERIALIZED (SELECT CAST(json_extract(value,'$.key') AS INTEGER) AS k,json_extract(value,'$.name') AS name,json_extract(value,'$.from') AS start,json_extract(value,'$.to') AS finish,json_extract(value,'$.region') AS representative,json_extract(value,'$.client') AS client,json_extract(value,'$.product') AS product,json_extract(value,'$.macroTable') AS macro_table,json_extract(value,'$.macroKey') AS macro_key,json_extract(value,'$.macroValue') AS macro_value,json_extract(value,'$.macroInclude') AS macro_include,json_extract(value,'$.macroExclude') AS macro_exclude,json_extract(value,'$.categoriesInclude') AS categories_include,json_extract(value,'$.categoriesExclude') AS categories_exclude,json_extract(value,'$.category') AS category,json_extract(value,'$.state') AS state,json_extract(value,'$.regional') AS regional,json_extract(value,'$.manager') AS manager,json_extract(value,'$.allowedRegions') AS allowed_reps,json_extract(value,'$.allowedClients') AS allowed_clients,json_extract(value,'$.hasRepresentative') AS has_representative,json_extract(value,'$.hasSales') AS has_sales FROM json_each(?)),
+ctx AS MATERIALIZED (SELECT CAST(json_extract(value,'$.key') AS INTEGER) AS k,json_extract(value,'$.name') AS name,json_extract(value,'$.from') AS start,json_extract(value,'$.to') AS finish,json_extract(value,'$.region') AS representative,json_extract(value,'$.client') AS client,json_extract(value,'$.product') AS product,json_extract(value,'$.regions') AS regions,json_extract(value,'$.clients') AS clients,json_extract(value,'$.products') AS products,json_extract(value,'$.states') AS states,json_extract(value,'$.regionals') AS regionals,json_extract(value,'$.managers') AS managers,json_extract(value,'$.channels') AS channels,json_extract(value,'$.segments') AS segments,json_extract(value,'$.brands') AS brands,json_extract(value,'$.csvBatchId') AS csv_batch_id,json_extract(value,'$.macroTable') AS macro_table,json_extract(value,'$.macroKey') AS macro_key,json_extract(value,'$.macroValue') AS macro_value,json_extract(value,'$.macroInclude') AS macro_include,json_extract(value,'$.macroExclude') AS macro_exclude,json_extract(value,'$.categoriesInclude') AS categories_include,json_extract(value,'$.categoriesExclude') AS categories_exclude,json_extract(value,'$.category') AS category,json_extract(value,'$.state') AS state,json_extract(value,'$.regional') AS regional,json_extract(value,'$.manager') AS manager,json_extract(value,'$.allowedRegions') AS allowed_reps,json_extract(value,'$.allowedClients') AS allowed_clients,json_extract(value,'$.hasRepresentative') AS has_representative,json_extract(value,'$.hasSales') AS has_sales FROM json_each(?)),
 sales AS (SELECT * FROM ci_native_sales WHERE version_id=?),
 returned AS (SELECT * FROM ci_native_returns WHERE version_id=?),
 customers AS (SELECT * FROM ci_native_customers WHERE version_id=?),
@@ -136,7 +174,7 @@ municipalities AS (SELECT * FROM ci_native_municipalities WHERE version_id=?),
 latitudes AS (SELECT * FROM ci_native_latitudes WHERE version_id=?),
 reparea AS (SELECT * FROM ci_native_reparea WHERE version_id=?),
 calendar AS (SELECT * FROM ci_native_calendar WHERE version_id=?),
-geo AS (SELECT DISTINCT c.k,r.state FROM ctx c JOIN regions r ON (c.regional='' OR r.regional=c.regional) AND(c.manager='' OR r.manager=c.manager)),
+geo AS (SELECT DISTINCT c.k,r.state FROM ctx c JOIN regions r ON (json_array_length(c.regionals)=0 OR r.regional IN(SELECT value FROM json_each(c.regionals))) AND(json_array_length(c.managers)=0 OR r.manager IN(SELECT value FROM json_each(c.managers)))),
 customer0 AS (SELECT c.k,b.client,b.representative,b.state,b.display FROM ctx c JOIN customers b ON ${customerCuts.join(" AND ")||"1=1"}${geoClause("b")}),
 macro_products AS MATERIALIZED (SELECT c.k,UPPER(RTRIM(CAST(json_extract(p.value,c.macro_key) AS TEXT))) AS product,UPPER(RTRIM(CAST(json_extract(p.value,c.macro_value) AS TEXT))) AS macro FROM ctx c JOIN ci_raw_rows p ON p.version_id=(SELECT version_id FROM sales LIMIT 1) AND p.table_id=c.macro_table),
 sales0 AS (SELECT c.k,s.* FROM ctx c JOIN sales s ON s.date>=c.start AND s.date<=c.finish${salesCuts.length?" AND "+salesCuts.join(" AND "):""} WHERE EXISTS(SELECT 1 FROM calendar d WHERE d.date=s.date)${geoClause("s")}),
@@ -171,8 +209,10 @@ function scope(u:DbUser,p:Plan) {
   const regions=z.array(z.string()).parse(JSON.parse(u.regions)),clients=z.array(z.string()).parse(JSON.parse(u.clients));
   const national=u.role==="admin"||(u.role==="diretoria"&&!!u.national);
   if(!national&&((u.role==="gerente"&&!regions.length)||(!regions.length&&!clients.length)))fail(403,"Nenhuma carteira ou regional autorizada.");
-  if(!national&&p.filters.region&&regions.length&&!regions.some(x=>nativeKey(x)===nativeKey(p.filters.region)))fail(403,"Seleção fora do seu escopo.");
-  if(!national&&p.filters.client&&clients.length&&!clients.some(x=>nativeKey(x)===nativeKey(p.filters.client)))fail(403,"Seleção fora do seu escopo.");
+  const reqRegions=mergeKeys(p.filters.region,p.filters.regions);
+  const reqClients=mergeKeys(p.filters.client,p.filters.clients);
+  if(!national&&regions.length&&reqRegions.some(req=>!regions.some(x=>nativeKey(x)===req)))fail(403,"Seleção fora do seu escopo.");
+  if(!national&&clients.length&&reqClients.some(req=>!clients.some(x=>nativeKey(x)===req)))fail(403,"Seleção fora do seu escopo.");
   return {allowedRegions:national?[]:regions,allowedClients:national?[]:clients};
 }
 function dates(filters:Filters,offset:number) {
@@ -307,11 +347,32 @@ export async function nativeCustomerDetails(e:Env,u:DbUser,filters:Filters,m:Man
   }
   return {lastPurchase,purchaseDays,municipality,limitations,period};
 }
+async function queryActiveReps(e:Env,version:string,current:NativeContext):Promise<number|null> {
+  const base=compileNativeContexts(version,[current],true);
+  const idx=base.sql.lastIndexOf("\nSELECT c.k,c.name,");
+  if(idx<0)return null;
+  const sql=base.sql.slice(0,idx)+" SELECT COUNT(DISTINCT b.representative) AS n FROM visible_sales s JOIN customer0 b ON b.k=s.k AND b.client IS s.client WHERE b.representative IS NOT NULL";
+  const row=await stmt(e,sql,...base.args).first<{n:number}>();
+  return row?.n??0;
+}
+
+function rowMetricTicket(row:Row):number|null {
+  const rev=row.values.revenue.current,buyers=row.values.buyers.current;
+  return rev!==null&&buyers!==null&&buyers>0?rev/buyers:null;
+}
+
 export async function queryNative(e:Env,u:DbUser,p:Plan,m:ManualManifest,version:string):Promise<Report> {
   if(!nativeCapabilities(m).groups.includes(p.group)||!nativeCapabilities(m).metrics.includes(p.metric))fail(422,"Indicador ou agrupamento indisponível nesta versão.");
-  if(p.filters.manager&&!native(m).regions.manager)fail(422,"Gerente não está mapeado nesta versão.");
-  const current=context(u,p,0,m),previous=context(u,p,-1,m),period=nativePeriod(m,p.filters);
-  const total=await nativeValues(e,version,[current,previous]);let rows:Row[]=[];
+  if((p.filters.manager||p.filters.managers?.length)&&!native(m).regions.manager)fail(422,"Gerente não está mapeado nesta versão.");
+  const csvActive=await activeCsvBatch(e);
+  if((p.filters.channels?.length||p.filters.segments?.length||p.filters.brands?.length)&&!csvActive) {
+    fail(422,"Os filtros de canal, segmento e marca exigem a camada CSV estruturada ativa.");
+  }
+  const current={...context(u,p,0,m),csvBatchId:csvActive?.batchId},previous={...context(u,p,-1,m),csvBatchId:csvActive?.batchId},period=nativePeriod(m,p.filters);
+  const hasRowFilters=Boolean((p.filters.variationDirection&&p.filters.variationDirection!=="all")||p.filters.revenueMin!==undefined||p.filters.revenueMax!==undefined||p.filters.ticketMin!==undefined||p.filters.ticketMax!==undefined);
+  let total:NativeResult[];
+  let rows:Row[]=[];
+  let activeReps:number|null=null;
   if(p.group==="month") {
     const contexts:NativeContext[]=[];const count=monthsBetween(p.filters.from,p.filters.to);
     for(let i=0;i<=count;i++) {
@@ -319,16 +380,58 @@ export async function queryNative(e:Env,u:DbUser,p:Plan,m:ManualManifest,version
       const month=date.toISOString().slice(0,7),monthly=nativePeriod(m,{...p.filters,from:month,to:month});
       for(const offset of [0,-1]) contexts.push({...current,...(offset===0?monthly.current:monthly.previous),name:month});
     }
-    const results=await nativeValues(e,version,contexts);for(let i=0;i<results.length;i+=2)rows.push(pair(results[i].name,results[i],results[i+1],m));
+    const [totalRows,results,repsCount]=await Promise.all([nativeValues(e,version,[current,previous]),nativeValues(e,version,contexts),queryActiveReps(e,version,current)]);
+    total=totalRows;
+    activeReps=repsCount;
+    for(let i=0;i<results.length;i+=2)rows.push(pair(results[i].name,results[i],results[i+1],m));
   } else {
-    const q=compileNativeGroups(version,[current,previous],p.group,false,{metric:p.metric as Exclude<Metric,"margin">,order:p.order}),results=(await stmt(e,q.sql,...q.args).all<NativeResult&{g:string|null}>()).results;
+    const q=compileNativeGroups(version,[current,previous],p.group,false,hasRowFilters?undefined:{metric:p.metric as Exclude<Metric,"margin">,order:p.order});
+    const [totalRows,groupResult,repsCount]=await Promise.all([nativeValues(e,version,[current,previous]),stmt(e,q.sql,...q.args).all<NativeResult&{g:string|null}>(),queryActiveReps(e,version,current)]);
+    total=totalRows;
+    activeReps=repsCount;
+    const results=groupResult.results;
     const keys=new Set(results.map(r=>r.g));
     const byContext=[new Map(results.filter(r=>r.k===0).map(r=>[r.g,r])),new Map(results.filter(r=>r.k===1).map(r=>[r.g,r]))];
     for(const key of keys){const a=byContext[0].get(key),b=byContext[1].get(key),name=a?.name??b?.name??"(Em branco)";rows.push({...pair(name,a,b,m),...(key===null?{canDrill:false}:{key:name})});}
+    if(hasRowFilters) {
+      rows=rows.filter(row=>{
+        const rev=row.values.revenue,cur=rev.current,prev=rev.previous;
+        if(p.filters.variationDirection==="growth"&&(cur===null||prev===null||cur<=prev))return false;
+        if(p.filters.variationDirection==="decline"&&(cur===null||prev===null||cur>=prev))return false;
+        if(p.filters.revenueMin!==undefined&&(cur===null||cur<p.filters.revenueMin))return false;
+        if(p.filters.revenueMax!==undefined&&(cur===null||cur>p.filters.revenueMax))return false;
+        if(p.filters.ticketMin!==undefined||p.filters.ticketMax!==undefined) {
+          const tkt=rowMetricTicket(row);
+          if(p.filters.ticketMin!==undefined&&(tkt===null||tkt<p.filters.ticketMin))return false;
+          if(p.filters.ticketMax!==undefined&&(tkt===null||tkt>p.filters.ticketMax))return false;
+        }
+        return true;
+      });
+    }
     const score=(r:Row)=>p.order==="current"?(r.values[p.metric].current??-Infinity):(r.values[p.metric].current??0)-(r.values[p.metric].previous??0);
     rows.sort((a,b)=>(p.order==="decline"?1:-1)*(score(a)-score(b))||a.name.localeCompare(b.name,"pt-BR"));
   }
-  const result:Report={total:pair("Total",total[0],total[1],m),rows:rows.slice(0,30),plan:p,asOf:new Date().toISOString(),truncated:rows.length>30,source:"Arquivo manual (D1)",comparison:period};
+  const conflicts=detectFilterConflicts(p.filters);
+  const totalRow=pair("Total",total[0],total[1],m);
+  const revCur=totalRow.values.revenue.current,buyersCur=totalRow.values.buyers.current;
+  const ticketPerBuyerVal=revCur!==null&&buyersCur!==null&&buyersCur>0?revCur/buyersCur:null;
+  let invoiceCount:number|null|undefined;
+  let ticketPerInvoice:number|null|undefined;
+  if(csvActive&&!current.allowedRegions?.length&&!current.allowedClients?.length&&!p.filters.region&&!p.filters.regions?.length&&!p.filters.client&&!p.filters.clients?.length&&!p.filters.product&&!p.filters.products?.length&&!p.filters.state&&!p.filters.states?.length&&!p.filters.regional&&!p.filters.regionals?.length&&!p.filters.manager&&!p.filters.managers?.length&&!p.filters.category&&!p.filters.categoriesInclude?.length&&!p.filters.categoriesExclude?.length) {
+    const nf=await stmt(e,"SELECT COUNT(DISTINCT doc_no) AS docs FROM ci_fact_sales WHERE batch_id=? AND date BETWEEN ? AND ? AND doc_no IS NOT NULL AND doc_no<>''",csvActive.batchId,period.current.from,period.current.to).first<{docs:number}>();
+    if(nf&&nf.docs>0){invoiceCount=nf.docs;if(revCur!==null)ticketPerInvoice=revCur/nf.docs;}
+  }
+  const result:Report={
+    total:totalRow,
+    rows:rows.slice(0,30),
+    plan:p,
+    asOf:new Date().toISOString(),
+    truncated:rows.length>30,
+    source:"Arquivo manual (D1)",
+    comparison:period,
+    ...(conflicts.length?{filterConflicts:conflicts}:{}),
+    summaryStats:{activeReps,ticketPerBuyer:ticketPerBuyerVal,...(invoiceCount!==undefined?{invoiceCount,ticketPerInvoice}:{})},
+  };
   const available=(range:{from:string;to:string})=>range.from<=range.to&&range.from>=m.projection.from&&range.to<=m.projection.to;
   for(const row of [result.total,...result.rows])for(const metric of metricKeys){
     let currentRange=period.current,previousRange=period.previous;
@@ -336,7 +439,10 @@ export async function queryNative(e:Env,u:DbUser,p:Plan,m:ManualManifest,version
     if(!available(currentRange))row.values[metric].current=null;
     if(!available(previousRange))row.values[metric].previous=null;
   }
-  if(p.group!=="month")result.warnings=["Os relacionamentos muitos-para-muitos do Power BI podem atribuir o mesmo cliente ou devolução a mais de um grupo. Não some as linhas para reconstruir o total oficial; ele é calculado separadamente."];
+  const warnings:string[]=[];
+  if(p.group!=="month")warnings.push("Os relacionamentos muitos-para-muitos do Power BI podem atribuir o mesmo cliente ou devolução a mais de um grupo. Não some as linhas para reconstruir o total oficial; ele é calculado separadamente.");
+  if(hasRowFilters&&p.group!=="month")warnings.push("Filtros de faixa ou direção de variação foram aplicados sobre os itens do ranking; o total oficial acima preserva todo o recorte de período e dimensões.");
+  if(warnings.length)result.warnings=warnings;
   if(p.group==="client"||p.group==="product"){
     const labels=await nativeIdentityLabels(e,m,version,p.group,result.rows.filter(row=>row.key).map(row=>row.key!));
     for(const row of result.rows){const identity=row.key?labels[row.key]:undefined;if(identity)Object.assign(row,identity);}
@@ -344,7 +450,7 @@ export async function queryNative(e:Env,u:DbUser,p:Plan,m:ManualManifest,version
   return result;
 }
 export async function nativeOptions(e:Env,u:DbUser,filters:Filters,m:ManualManifest,version:string) {
-  if(filters.manager&&!native(m).regions.manager)fail(422,"Gerente não está mapeado nesta versão.");
+  if((filters.manager||filters.managers?.length)&&!native(m).regions.manager)fail(422,"Gerente não está mapeado nesta versão.");
   const p:Plan={metric:"revenue",group:"month",order:"current",filters};scope(u,p);
   const base=context(u,p,0,m),values:Record<string,string[]>={},truncated:Record<string,boolean>={};
   const groups=["region","client","product","category","state","regional",...(native(m).regions.manager?["manager" as const]:[])] as const;
@@ -353,8 +459,14 @@ export async function nativeOptions(e:Env,u:DbUser,filters:Filters,m:ManualManif
     const visible=results.filter(r=>r.dimension===group).map(r=>r.name);
     values[group]=visible.slice(0,250);truncated[group]=visible.length>250;
   }
-  const labels:Record<string,Record<string,string>>={};
-  for(const group of ["client","product"] as const){const identities=await nativeIdentityLabels(e,m,version,group,values[group]);labels[group]=Object.fromEntries(Object.entries(identities).map(([key,value])=>[key,value.name]));}
+  const [clientIdentities,productIdentities]=await Promise.all([
+    nativeIdentityLabels(e,m,version,"client",values.client),
+    nativeIdentityLabels(e,m,version,"product",values.product),
+  ]);
+  const labels:Record<string,Record<string,string>>={
+    client:Object.fromEntries(Object.entries(clientIdentities).map(([key,value])=>[key,value.name])),
+    product:Object.fromEntries(Object.entries(productIdentities).map(([key,value])=>[key,value.name])),
+  };
   return {values,labels,sourceVersion:version,truncated};
 }
 export function compileNativeOptions(version:string,context:NativeContext,groups:readonly Exclude<Group,"month">[]):Sql{

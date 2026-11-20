@@ -1,206 +1,91 @@
-import { CategoryFilter } from "./CategoryFilter";
 import {
   Bell,
-  CalendarDays,
-  Check,
   ChevronRight,
   LayoutGrid,
-  SlidersHorizontal,
   WifiOff,
-  X,
 } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   defaultFilters,
-  filtersSchema,
   roles,
+  type FilterDimension,
   type Filters,
   type Group,
-  type Session,
-  type FilterDimension,
   type Plan,
+  type Session,
 } from "../shared/domain";
 import { Audit, Integrations, Team } from "./Admin";
 import Auth from "./Auth";
 import Chat, { type Seed } from "./Chat";
-import Profile from "./Profile";
+import { FilterBar, FilterSheetModal } from "./components/FilterBar";
+import { AppBootSkeleton } from "./components/Skeletons";
 import { DataUpdates } from "./DataUpdates";
-import Visits from "./Visits";
+import { loadSessionSnapshot, makeScope, purgeClientCache, saveSessionSnapshot } from "./lib/cache";
+import {
+  buildFilterSearch,
+  loadInitialFilters,
+  persistFilters,
+  sanitizeFiltersForCapabilities,
+} from "./lib/filter-state";
+import { clearNativeToken, initMobileRuntime } from "./lib/runtime";
+import Profile from "./Profile";
 import "./style.css";
-import { api, Brand, Busy, Credit, Empty, ErrorBox, isAbortError, message, period, sessionCapabilities } from "./ui";
+import { api, Brand, Credit, Empty, ErrorBox, message, sessionCapabilities } from "./ui";
+import Visits from "./Visits";
 import { adminNav, Home, mainNav, navs, Reports } from "./WorkspaceViews";
-const cleanPath = () => location.pathname === "/admin/atualizacao-dados" ? "atualizacao-dados" : location.pathname.split("/")[1] || "inicio";
-function Modal({
-  title,
-  close,
-  children,
-}: {
-  title: string;
-  close: () => void;
-  children: ReactNode;
-}) {
-  const ref = useRef<HTMLDialogElement>(null);
-  useEffect(() => {
-    const d = ref.current;
-    d?.showModal();
-    return () => d?.close();
-  }, []);
-  return (
-    <dialog
-      ref={ref}
-      onCancel={close}
-      onClick={(e) => {
-        if (e.target === e.currentTarget) close();
-      }}
-    >
-      <section>
-        <div className="sectionhead">
-          <h2>{title}</h2>
-          <button className="iconbtn" aria-label="Fechar" onClick={close}>
-            <X size={19} />
-          </button>
-        </div>
-        {children}
-      </section>
-    </dialog>
-  );
-}
-function FilterForm({
-  value,
-  apply,
-  s,
-  focusClient = false,
-}: {
-  value: Filters;
-  apply: (f: Filters) => void;
-  s: Session;
-  focusClient?: boolean;
-}) {
-  const [f, F] = useState(value),
-    [err, E] = useState(""),
-    [options, O] = useState<Partial<Record<FilterDimension, string[]>>>({}),
-    [optionLabels, OL] = useState<Partial<Record<FilterDimension, Record<string, string>>>>({});
-  const capabilities = sessionCapabilities(s);
-  const selectedDimensions = capabilities.filters;
-  useEffect(() => {
-    if (s.data?.source !== "manual" || !s.data.ready) return;
-    const valid = filtersSchema.safeParse(f);
-    if (!valid.success) return;
-    let alive = true;
-    const controller = new AbortController();
-    const timer = setTimeout(() => {
-      api<{ values: typeof options; labels?: typeof optionLabels }>("data/options", "POST", {...valid.data,categoriesInclude:[],categoriesExclude:[],category:""}, controller.signal)
-        .then((v) => { if (alive) { O(v.values); OL(v.labels ?? {}); E(""); } })
-        .catch((e) => { if (alive && !isAbortError(e)) E(message(e)); });
-    }, 300);
-    return () => { alive = false; clearTimeout(timer); controller.abort(); };
-  }, [s.data?.activeVersionId, f.from, f.to]);
-  function save(e: FormEvent) {
-    e.preventDefault();
-    const parsed = filtersSchema.safeParse(f);
-    if (!parsed.success) {
-      E("Informe entre 1 e 24 meses completos e confira os filtros.");
-      return;
-    }
-    const supported = { ...parsed.data };
-    for (const dimension of ["regional", "state", "manager", "category"] as const)
-      if (!capabilities.filters.includes(dimension)) delete supported[dimension];
-    if(!capabilities.filters.includes("category")){delete supported.categoriesInclude;delete supported.categoriesExclude;}
-    apply(supported);
-  }
-  return (
-    <form className="formpanel" onSubmit={save}>
-      <div className="formgrid">
-        {(["from", "to"] as const).map((k, i) => (
-          <label key={k}>
-            {i ? "Último mês" : "Primeiro mês"}
-            <input
-              required
-              type="month"
-              value={f[k]}
-              onChange={(e) => F({ ...f, [k]: e.target.value })}
-            />
-          </label>
-        ))}
-      </div>
-      {capabilities.filters.includes("category") && s.data?.source === "manual" && <CategoryFilter values={options.category??[]} include={f.categoriesInclude??(f.category?[f.category]:[])} exclude={f.categoriesExclude??[]} onChange={(categoriesInclude,categoriesExclude)=>F({...f,category:"",categoriesInclude,categoriesExclude})} />}
-      {selectedDimensions.filter(k=>k!=="category"||s.data?.source!=="manual").map((k) => {
-        const list = k === "region" ? s.user.regions : k === "client" ? s.user.clients : [];
-        const title = capabilities.labels?.[k] ?? { region: "Regional", client: "Cliente", product: "Produto", regional: "Regional comercial", state: "UF", manager: "Gerente", category: "Categoria" }[k];
-        return (
-          <label key={k}>
-            {title}
-            {list.length && !(s.user.role === "admin" || (s.user.role === "diretoria" && s.user.national)) ? (
-              <select value={f[k] ?? ""} onChange={(e) => F({ ...f, [k]: e.target.value })}>
-                <option value="">Todos no meu escopo</option>
-                {list.map((v) => (
-                  <option key={v} value={v}>{optionLabels[k]?.[v] ?? v}</option>
-                ))}
-              </select>
-            ) : (
-              <input
-                list={"source-options-" + k}
-                autoFocus={focusClient && k === "client"}
-                maxLength={140}
-                value={f[k] ?? ""}
-                onChange={(e) => F({ ...f, [k]: e.target.value })}
-                placeholder={"Todos · pesquise código ou descrição"}
-              />
-            )}
-            <datalist id={"source-options-" + k}>
-              {(options[k] ?? []).map((v) => <option key={v} value={v} label={optionLabels[k]?.[v] ?? v} />)}
-            </datalist>
-            {optionLabels[k]?.[f[k] ?? ""] && <small className="muted">{optionLabels[k]![f[k] ?? ""]}</small>}
-            {k === "region" && capabilities.labels?.region === "Representante" && <small className="muted">As permissões cadastradas para este campo continuam aplicadas ao representante autorizado.</small>}
-          </label>
-        );
-      })}
-      {err && <ErrorBox>{err}</ErrorBox>}
-      <div className="row spread">
-        <button type="button" className="soft" onClick={() => F(defaultFilters())}>
-          Limpar
-        </button>
-        <button className="primary">
-          <Check size={15} />
-          Aplicar filtros
-        </button>
-      </div>
-    </form>
-  );
-}
+
+const cleanPath = () =>
+  location.pathname === "/admin/atualizacao-dados"
+    ? "atualizacao-dados"
+    : location.pathname.split("/")[1] || "inicio";
+
 function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: () => void }) {
+  const capabilities = sessionCapabilities(s);
   const [page, V] = useState(cleanPath),
-    [filters, F] = useState(defaultFilters),
+    [filters, F] = useState<Filters>(() => loadInitialFilters(s.user.id, capabilities.filters)),
     [modal, W] = useState(""),
     [seed, S] = useState<Seed | null>(null),
     [chatKey, K] = useState(0),
     [reportGroup, G] = useState<Group>("month"),
     [restoredPlan, RP] = useState<Plan | undefined>();
+  const previousPeriodRef = useRef<{ from: string; to: string } | null>(null);
+
   const ready =
       s.data?.ready ?? (s.integrations.configured && (s.integrations.mode === "application" || s.integrations.linked)),
     admin = s.user.role === "admin",
     operator = s.user.role === "operador";
-  useEffect(() => { if (operator && page !== "atualizacao-dados" && page !== "perfil" && page !== "mais") go("atualizacao-dados"); }, [operator, page]);
-  const sourceFilters = JSON.stringify(sessionCapabilities(s).filters);
+
+  useEffect(() => {
+    if (operator && page !== "atualizacao-dados" && page !== "perfil" && page !== "mais")
+      go("atualizacao-dados");
+  }, [operator, page]);
+
+  const sourceFilters = JSON.stringify(capabilities.filters);
   useEffect(() => {
     const supported = JSON.parse(sourceFilters) as FilterDimension[];
     F((current) => {
-      const next = { ...current };
-      for (const dimension of ["regional", "state", "manager", "category"] as const)
-        if (!supported.includes(dimension)) delete next[dimension];
-      if(!supported.includes("category")){delete next.categoriesInclude;delete next.categoriesExclude;}
+      const next = sanitizeFiltersForCapabilities(current, supported);
       return JSON.stringify(next) === JSON.stringify(current) ? current : next;
     });
   }, [sourceFilters]);
+
+  useEffect(() => {
+    const supported = JSON.parse(sourceFilters) as FilterDimension[];
+    persistFilters(s.user.id, filters, supported);
+  }, [s.user.id, filters, sourceFilters]);
+
   function go(p: string) {
     W("");
     if (p !== page) {
-      history.pushState({}, "", p === "inicio" ? "/" : p === "atualizacao-dados" ? "/admin/atualizacao-dados" : "/" + p);
+      const target =
+        p === "inicio" ? "/" : p === "atualizacao-dados" ? "/admin/atualizacao-dados" : "/" + p;
+      history.pushState({}, "", target + buildFilterSearch(filters));
       V(p);
       window.scrollTo(0, 0);
     }
   }
+
   useEffect(() => {
     const fn = () => {
       V(cleanPath());
@@ -209,28 +94,65 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
     window.addEventListener("popstate", fn);
     return () => window.removeEventListener("popstate", fn);
   }, []);
+
+  function handleCrossFilter(dimension: FilterDimension | "month", value: string) {
+    if (dimension === "month") {
+      F((current) => {
+        if (current.from === value && current.to === value && previousPeriodRef.current) {
+          const restored = previousPeriodRef.current;
+          previousPeriodRef.current = null;
+          return { ...current, from: restored.from, to: restored.to };
+        }
+        if (current.from !== value || current.to !== value) {
+          previousPeriodRef.current = { from: current.from, to: current.to };
+          return { ...current, from: value, to: value };
+        }
+        const base = defaultFilters();
+        return { ...current, from: base.from, to: base.to };
+      });
+      return;
+    }
+    if (dimension === "category" && s.data?.source === "manual") {
+      F((current) => {
+        const existing = current.categoriesInclude ?? [];
+        const next = existing.length === 1 && existing[0] === value ? [] : [value];
+        return { ...current, category: "", categoriesInclude: next };
+      });
+      return;
+    }
+    F((current) => ({
+      ...current,
+      [dimension]: current[dimension] === value ? "" : value,
+    }));
+  }
+
   function chat(question: string, send: boolean) {
     S({ question, send, key: Date.now() });
     K((k) => k + 1);
     go("conversas");
   }
+
   function card(p: string) {
     if (p === "pergunta") return chat("", false);
     if (p === "analisar") return W("analisar");
     if (p === "visita") return W("visita");
     if (p === "regional") {
-      G(sessionCapabilities(s).groups.includes("regional") ? "regional" : "region");
+      G(capabilities.groups.includes("regional") ? "regional" : "region");
       return go("relatorios");
     }
     go(p);
   }
+
   const navigation = (items: typeof mainNav) =>
     items.map((n) => (
       <button
         key={n.p}
         className={page === n.p ? "navitem active" : "navitem"}
         onClick={() => {
-          if (n.p === "relatorios") { G("month"); RP(undefined); }
+          if (n.p === "relatorios") {
+            G("month");
+            RP(undefined);
+          }
           go(n.p);
         }}
       >
@@ -238,14 +160,25 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
         {n.label}
       </button>
     ));
+
   const initials = s.user.name
     .trim()
     .split(/\s+/)
     .filter((_, i, a) => i === 0 || i === a.length - 1)
     .map((v) => v[0])
     .join("");
+
+  const showFilters = ![
+    "integracoes",
+    "atualizacao-dados",
+    "equipe",
+    "auditoria",
+    "perfil",
+    "mais",
+  ].includes(page);
+
   return (
-    <div className="workspace">
+    <div className="workspace" data-source-scope={makeScope(s)}>
       <aside className="sidebar">
         <Brand />
         <div className="sidegroup">
@@ -299,25 +232,22 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
         <div className="content">
           {s.data?.source === "manual" && (
             <div className="notice" role="status">
-              {s.data.extractedAt ? "Arquivo manual · base extraída em " + new Date(s.data.extractedAt).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" }) : "Arquivo manual · nenhuma versão válida publicada."}
+              {s.data.extractedAt
+                ? "Arquivo manual · base extraída em " +
+                  new Date(s.data.extractedAt).toLocaleString("pt-BR", {
+                    timeZone: "America/Sao_Paulo",
+                  })
+                : "Arquivo manual · nenhuma versão válida publicada."}
               {s.data.stale ? " · Base desatualizada: solicite uma atualização ao administrador." : ""}
             </div>
           )}
-          {!["integracoes", "atualizacao-dados", "equipe", "auditoria", "perfil", "mais"].includes(page) && (
-            <div className="filterbar">
-              <div className="filterdate">
-                <CalendarDays size={15} />
-                {period(filters)}
-              </div>
-              <button onClick={() => W("filtros")} className="filterbtn">
-                <SlidersHorizontal size={15} />
-                Filtros
-                {(filters.categoriesInclude?.length||filters.categoriesExclude?.length)?" · categorias selecionadas":null}
-                {sessionCapabilities(s).filters.map((dimension) => filters[dimension]).filter(Boolean).length > 0
-                  ? " · " + sessionCapabilities(s).filters.map((dimension) => filters[dimension]).filter(Boolean).length
-                  : ""}
-              </button>
-            </div>
+          {showFilters && (
+            <FilterBar
+              s={s}
+              filters={filters}
+              onChange={F}
+              onOpenSheet={() => W("filtros")}
+            />
           )}
           {page === "inicio" ? (
             <Home
@@ -327,6 +257,7 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
               go={go}
               ask={(q) => chat(q, true)}
               card={card}
+              onCrossFilter={handleCrossFilter}
             />
           ) : page === "conversas" ? (
             <Chat
@@ -349,7 +280,13 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
               ask={(q) => chat(q, true)}
               initialGroup={reportGroup}
               initialPlan={restoredPlan}
-              restore={(plan) => { F(plan.filters); G(plan.group); RP(plan); go("relatorios"); }}
+              onCrossFilter={handleCrossFilter}
+              restore={(plan) => {
+                F(plan.filters);
+                G(plan.group);
+                RP(plan);
+                go("relatorios");
+              }}
               drill={(k, v) => {
                 F({ ...filters, [k]: v });
                 G("month");
@@ -364,7 +301,12 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
           ) : page === "atualizacao-dados" && (admin || operator) ? (
             <DataUpdates changed={reload} operator={operator} />
           ) : page === "equipe" && admin ? (
-            <Team self={s.user.id} scopeLabel={sessionCapabilities(s).labels?.region === "Representante" ? "Representantes" : "Regionais"} />
+            <Team
+              self={s.user.id}
+              scopeLabel={
+                capabilities.labels?.region === "Representante" ? "Representantes" : "Regionais"
+              }
+            />
           ) : page === "auditoria" && admin ? (
             <Audit />
           ) : page === "mais" ? (
@@ -389,7 +331,10 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
         </div>
       </main>
       <nav className="mobilebar">
-        {(operator ? [adminNav[0], navs.find((item) => item.p === "perfil")!] : [...mainNav.slice(0, 4), navs[navs.length - 1]]).map((n) => (
+        {(operator
+          ? [adminNav[0], navs.find((item) => item.p === "perfil")!]
+          : [...mainNav.slice(0, 4), navs[navs.length - 1]]
+        ).map((n) => (
           <button
             key={n.p}
             className={
@@ -405,7 +350,7 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
         ))}
       </nav>
       {modal && (
-        <Modal
+        <FilterSheetModal
           title={
             modal === "analisar"
               ? "Analisar cliente"
@@ -413,91 +358,115 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
                 ? "Preparar visita"
                 : "Filtros da análise"
           }
+          s={s}
+          value={filters}
+          focusClient={modal !== "filtros"}
           close={() => W("")}
-        >
-          <FilterForm
-            s={s}
-            value={filters}
-            focusClient={modal !== "filtros"}
-            apply={(f) => {
-              F(f);
-              W("");
-              if (modal === "analisar") {
-                G("month");
-                go(f.client ? "relatorios" : "clientes");
-              }
-              if (modal === "visita")
-                chat(
-                  f.client
-                    ? "Prepare uma visita para " +
-                        f.client +
-                        " com base no histórico comercial disponível."
-                    : "Prepare uma pauta de visita para o cliente ",
-                  !!f.client,
-                );
-            }}
-          />
-        </Modal>
+          apply={(f) => {
+            F(f);
+            W("");
+            if (modal === "analisar") {
+              G("month");
+              go(f.client ? "relatorios" : "clientes");
+            }
+            if (modal === "visita")
+              chat(
+                f.client
+                  ? "Prepare uma visita para " +
+                      f.client +
+                      " com base no histórico comercial disponível."
+                  : "Prepare uma pauta de visita para o cliente ",
+                !!f.client,
+              );
+          }}
+        />
       )}
     </div>
   );
 }
+
 function App() {
   const [s, S] = useState<Session | null>(null),
     [wait, B] = useState(true),
     [err, E] = useState(""),
     [net, N] = useState(navigator.onLine),
     [update, U] = useState<ServiceWorker | null>(null);
-  const clear = () => {
+  const lastValidatedRef = useRef(0);
+
+  const clear = (resetCache = true) => {
     S(null);
+    clearNativeToken();
+    if (resetCache) void purgeClientCache();
     if (location.pathname !== "/redefinir") history.replaceState({}, "", "/");
   };
+
   async function reload() {
     try {
       const v = await api<Session>("me");
+      lastValidatedRef.current = Date.now();
+      saveSessionSnapshot(v);
       E("");
       S(v);
     } catch (e) {
+      if (!navigator.onLine) {
+        const snap = loadSessionSnapshot();
+        if (snap) {
+          S(snap);
+          E("Sem conexão no momento. Exibindo dados em cache quando disponíveis.");
+          return;
+        }
+      }
       if (
         !["Entre para continuar.", "Sua sessão terminou. Entre novamente."].includes(message(e))
       ) {
         E(message(e));
+        clear(false);
+      } else {
+        clear(true);
       }
-      clear();
     } finally {
       B(false);
     }
   }
+
   useEffect(() => {
+    void initMobileRuntime();
     void reload();
     const offline = () => {
       N(false);
-      S(null);
-      E("Conecte-se à internet para consultar os dados comerciais.");
+      E("Sem conexão. Exibindo últimos dados em cache quando disponíveis.");
     };
     const online = () => {
       N(true);
       void reload();
     };
+    const sessionEnded = () => clear(true);
     window.addEventListener("offline", offline);
     window.addEventListener("online", online);
-    window.addEventListener("session-ended", clear);
+    window.addEventListener("session-ended", sessionEnded);
     const focus = () => {
-      if (document.visibilityState === "visible") void reload();
+      if (
+        document.visibilityState === "visible" &&
+        Date.now() - lastValidatedRef.current > 60_000
+      ) {
+        void reload();
+      }
     };
     document.addEventListener("visibilitychange", focus);
     return () => {
       window.removeEventListener("offline", offline);
       window.removeEventListener("online", online);
-      window.removeEventListener("session-ended", clear);
+      window.removeEventListener("session-ended", sessionEnded);
       document.removeEventListener("visibilitychange", focus);
     };
   }, []);
+
   useEffect(() => {
     if (!s) return;
-    const t = setTimeout(clear, Math.max(1, s.expires * 1000 - Date.now()));
+    const t = setTimeout(() => clear(true), Math.max(1, s.expires * 1000 - Date.now()));
     return () => clearTimeout(t);
   }, [s]);
+
   useEffect(() => {
     if (!("serviceWorker" in navigator) || !import.meta.env.PROD) return;
     let accepting = false;
@@ -526,12 +495,13 @@ function App() {
       window.removeEventListener("ci-update", accept);
     };
   }, []);
+
   return (
     <>
       {!net && (
         <div className="net">
           <WifiOff size={15} />
-          Sem conexão
+          Sem conexão · modo offline limitado ao cache
         </div>
       )}
       {update && (
@@ -556,13 +526,13 @@ function App() {
         </ErrorBox>
       )}
       {wait ? (
-        <Busy label="Abrindo Comercial Insight…" />
+        <AppBootSkeleton />
       ) : s ? (
         <Shell
           key={s.user.id + "|" + s.policyVersion + "|" + JSON.stringify(s.user)}
           s={s}
           reload={reload}
-          logout={clear}
+          logout={() => clear(true)}
         />
       ) : (
         <Auth done={reload} />
@@ -570,4 +540,5 @@ function App() {
     </>
   );
 }
+
 createRoot(document.getElementById("root")!).render(<App />);
