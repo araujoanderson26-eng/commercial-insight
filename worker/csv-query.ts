@@ -604,9 +604,9 @@ export async function csvCustomerDetails(
     comp.current.to,
   );
   const custScopeArgs: (string | number | null)[] = [batchId, clientKey];
-  const custScopeClauses = ["batch_id=?", "client_key=?"];
+  const custScopeClauses = ["c.batch_id=?", "c.client_key=?"];
   if (acl.allowedRegions.length) {
-    custScopeClauses.push(inlineInExpr("representative_key", acl.allowedRegions, { rem: 60 }, custScopeArgs));
+    custScopeClauses.push(inlineInExpr("c.representative_key", acl.allowedRegions, { rem: 60 }, custScopeArgs));
   }
 
   const [activity, muniRows] = await Promise.all([
@@ -619,8 +619,12 @@ export async function csvCustomerDetails(
         ).first<{ lastPurchase: string | null; purchaseDays: number }>(),
     stmt(
       e,
-      `SELECT DISTINCT s.municipality FROM ci_fact_sales s WHERE s.batch_id=? AND s.client_key=? AND s.municipality IS NOT NULL AND s.municipality<>'' AND EXISTS(SELECT 1 FROM ci_dim_customers c WHERE c.${custScopeClauses.join(" AND c.")}) LIMIT 3`,
-      ...custScopeArgs,
+      acl.allowedRegions.length
+        ? `SELECT DISTINCT s.municipality FROM ci_fact_sales s WHERE s.batch_id=? AND s.client_key=? AND s.municipality IS NOT NULL AND s.municipality<>'' AND EXISTS(SELECT 1 FROM ci_dim_customers c WHERE ${custScopeClauses.join(" AND ")}) LIMIT 3`
+        : "SELECT DISTINCT s.municipality FROM ci_fact_sales s WHERE s.batch_id=? AND s.client_key=? AND s.municipality IS NOT NULL AND s.municipality<>'' LIMIT 3",
+      batchId,
+      clientKey,
+      ...(acl.allowedRegions.length ? custScopeArgs : []),
     ).all<{ municipality: string }>(),
   ]);
   const municipality = muniRows.results.length === 1 ? muniRows.results[0].municipality : null;
@@ -713,7 +717,7 @@ async function hydrateDimNames(
   ).results;
 
   const dimMap = new Map(dimRows.map((d) => [d.k, d]));
-  const missingKeys = keys.filter((k) => !dimMap.get(k)?.title);
+  const missingKeys = keys.filter((k) => !dimMap.has(k));
   const rawMap = new Map<string, string>();
   if (missingKeys.length) {
     const fbSql = isClient

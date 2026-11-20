@@ -82,9 +82,10 @@ export async function prepareVisit(provider: DataProvider, filters: Filters): Pr
   const supported = (group: Group) => !provider.semantics.capabilities || provider.semantics.capabilities.groups.includes(group);
   if (!supported("client") || !supported("product")) fail(422, "Esta fonte não disponibiliza cliente e produto para preparar a visita.");
   const plan = (group: Group, order: Plan["order"] = "current"): Plan => ({ group, metric: "revenue", order, filters: { ...filters } });
-  // The first four independent reads share one immutable provider. Keep optional reads in the next batch.
-  const [timeline, products, productLosses, identity] = await Promise.all([
-    provider.query(plan("month")), provider.query(plan("product")), provider.query(plan("product", "decline")), provider.query(plan("client")),
+  // The first read warms summaryCache for all parallel dimensional queries in this visit briefing.
+  const timeline = await provider.query(plan("month"));
+  const [products, productLosses, identity] = await Promise.all([
+    provider.query(plan("product")), provider.query(plan("product", "decline")), provider.query(plan("client")),
   ]);
   if (identity.rows.length > 1) fail(422, "O código selecionado identifica mais de um cadastro. Selecione um único cliente.");
   let clientName = identity.rows[0]?.name;
