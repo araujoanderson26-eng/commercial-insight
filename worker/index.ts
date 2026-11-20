@@ -117,6 +117,9 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
         activeVersionId: data.active?.id ?? null,
         extractedAt: data.active?.extractedAt ?? null,
         stale: data.stale,
+        referenceDate: data.source === "manual" ? data.active?.referenceDate ?? null : null,
+        model: data.source === "manual" ? data.active?.model ?? null : null,
+        storageEngine: data.source === "manual" ? data.active?.storageEngine ?? null : null,
         capabilities: data.source === "manual" ? data.active?.capabilities : undefined,
       },
     });
@@ -300,6 +303,27 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
       result.message = financial.message!;
     }
     if (financial.budget) result.budget = financial.budget;
+    const deterministicReady =
+      provider.sourceType === "manual" &&
+      !controlledHmlPolicy(e) &&
+      Boolean(provider.semantics.capabilities) &&
+      u.role !== "operador" &&
+      !u.update_only;
+    const csvActive = deterministicReady ? await activeCsvBatch(e) : null;
+    result.deterministic = {
+      ready: deterministicReady,
+      source: !deterministicReady ? "none" : csvActive ? "csv" : "manual",
+      message: deterministicReady
+        ? csvActive
+          ? "Consultas comerciais diretas disponíveis na base CSV estruturada (D1), sem uso de créditos OpenAI."
+          : "Consultas comerciais diretas disponíveis na base manual (D1), sem uso de créditos OpenAI."
+        : "Consultas comerciais diretas indisponíveis para esta fonte.",
+    };
+    result.advancedAI = {
+      ready: result.ready,
+      reason: result.reason,
+      message: result.message,
+    };
     await checkAccess(e, u, revision, hash);
     return json(result);
   }
@@ -463,6 +487,9 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
       })
       .parse(await body(req));
     await limit(e, "chat:" + owner, 18, 600);
+    if (u.role === "operador" || u.update_only) {
+      fail(403, "O operador de atualização não possui acesso às análises comerciais.");
+    }
     const provider = await dataProvider(e, model, revision, u);
     const id = v.conversation || crypto.randomUUID();
     if (
@@ -485,11 +512,11 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
         ).results.reverse()
       : [];
     await checkAccess(e, u, revision, hash);
-    await assertAssistantAccess(e, provider, owner);
-    const intent =
-      provider.sourceType === "manual" && !controlledHmlPolicy(e) && provider.semantics.capabilities
-        ? routeCommercialIntent(v.question, v.filters, provider.semantics.capabilities, previous)
-        : null;
+    const deterministicAvailable =
+      provider.sourceType === "manual" && !controlledHmlPolicy(e) && Boolean(provider.semantics.capabilities);
+    const intent = deterministicAvailable
+      ? routeCommercialIntent(v.question, v.filters, provider.semantics.capabilities, previous)
+      : null;
     let plan: Plan;
     let report: Report;
     let commentary: Commentary;
@@ -503,8 +530,18 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
       visit = qa.visit;
       engine = "deterministic";
       await checkAccess(e, u, revision, hash);
-      await assertAssistantAccess(e, provider, owner);
     } else {
+      try {
+        await assertAssistantAccess(e, provider, owner);
+      } catch (err) {
+        if (err instanceof Problem && deterministicAvailable) {
+          fail(
+            err.status,
+            `Análise avançada com OpenAI temporariamente indisponível: ${err.message} Consultas comerciais diretas continuam disponíveis (ex.: faturamento, clientes, representantes, categorias e quedas).`,
+          );
+        }
+        throw err;
+      }
       const interpreted = await interpret(e, provider.semantics, v.question, v.filters, previous, owner);
       plan = await resolvePlanEntities(provider, interpreted, v.filters);
       const visitRequested = isVisitRequest(v.question);

@@ -6,6 +6,7 @@ import worker from "../worker/index";
 import { now } from "../worker/core";
 import { routeCommercialIntent } from "../worker/intent-router";
 import { nativePartStatements } from "../worker/native-model";
+import { productionAIModel } from "../worker/production-ai-budget";
 import { resolvePlanEntities, type DataProvider } from "../worker/providers";
 import { makeStore } from "./fixtures";
 import { nativeFixture, type NativeRows } from "./native-fixtures";
@@ -268,14 +269,20 @@ test("all 15 mandatory AI questions answer deterministically in milliseconds wit
   assert.equal(aclQ1.status, 200);
   assert.match(aclQ1.json.commentary.summary, /2 clientes distintos cadastrados/);
 
-  // Budget/policy guard stays 100% enforced
+  // Mode 1 (deterministic D1) keeps working even when OpenAI is restricted; Mode 2 (open OpenAI) stays strictly guarded
   s.env.PRODUCTION_AI_BUDGET = "true";
-  const denied = await ask("Qual foi o faturamento líquido?", s.secretSp);
-  assert.equal(denied.status, 403);
+  const detSp = await ask("Qual foi o faturamento líquido?", s.secretSp);
+  assert.equal(detSp.status, 200);
+  assert.equal(detSp.json.meta.engine, "deterministic");
+  const deniedOpenSp = await ask("Analise meu faturamento e sugira hipóteses estratégicas", s.secretSp);
+  assert.equal(deniedOpenSp.status, 403);
   delete s.env.PRODUCTION_AI_BUDGET;
 
   s.sql.exec("UPDATE ci_sources SET allow_ai=0");
-  assert.equal((await ask("Qual foi o faturamento líquido?")).status, 409);
+  const detDisabledAI = await ask("Qual foi o faturamento líquido?");
+  assert.equal(detDisabledAI.status, 200);
+  assert.equal(detDisabledAI.json.meta.engine, "deterministic");
+  assert.equal((await ask("Analise meu faturamento e sugira hipóteses estratégicas")).status, 409);
   s.sql.exec("UPDATE ci_sources SET allow_ai=1");
 
   // Open analytical questions still fall back cleanly to OpenAI
@@ -358,4 +365,212 @@ test("deterministic router and entity resolver keep Sucos Concentrados, Granel, 
   assert.ok(sucoConcIntent);
   assert.deepEqual(sucoConcIntent.plan.filters.categoriesInclude, ["SUCOS CONCENTRADOS"]);
   await assert.rejects(() => resolvePlanEntities(mockProvider, sucoConcIntent.plan, filters), /não são agrupados em SUCO/);
+});
+
+test("deterministic commercial queries stay available when OpenAI credits are unverified or expired, while OpenAI queries stay blocked with zero fetch calls", async (t) => {
+  const s = await setupDeterministicStore();
+  t.after(() => s.sql.close());
+
+  Object.assign(s.env, {
+    APP_ORIGIN: "https://commercial-insight.araujoempresarial.com.br",
+    PRODUCTION_AI_BUDGET: "true",
+    OPENAI_MODEL: productionAIModel,
+  });
+
+  const ts = now();
+  s.sql
+    .prepare(
+      `UPDATE ai_production_policy
+       SET enabled=1, administrator_id=?, organization_id='org-synthetic', project_id='proj_synthetic',
+           credit_ceiling_nano_usd=30000000000, credit_verified_at=?, credit_valid_until=?,
+           verification_reference='synthetic-proof-only', pricing_valid_until=?
+       WHERE id=1`,
+    )
+    .run(s.adminId, ts - 86401, ts + 3600, ts + 3600);
+
+  const opId = "op-det";
+  const secretOp = "c".repeat(64);
+  s.sql
+    .prepare("INSERT INTO users(id,email,name,password,role,national,regions,clients,update_only,active,created) VALUES(?,?,?,?,?,0,'[]','[]',1,1,?)")
+    .run(opId, "op@det.test", "Operador", "hash", "comercial", ts);
+  s.sql
+    .prepare("INSERT INTO sessions(hash,user_id,version,expires,seen) VALUES(?,?,1,?,?)")
+    .run(createHash("sha256").update(secretOp).digest("hex"), opId, ts + 3600, ts);
+
+  let fetchCalls = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    fetchCalls++;
+    throw new Error("OpenAI network fetch must NOT be called!");
+  });
+
+  const callApi = async (path: string, method: "GET" | "POST", payload?: unknown, secret = s.secretAdmin) => {
+    const res = await worker.fetch(
+      new Request(s.env.APP_ORIGIN + "/api/" + path, {
+        method,
+        headers: {
+          Origin: s.env.APP_ORIGIN,
+          Cookie: "__Host-ci=" + secret,
+          ...(payload !== undefined ? { "Content-Type": "application/json" } : {}),
+        },
+        ...(payload !== undefined ? { body: JSON.stringify(payload) } : {}),
+      }),
+      s.env,
+      { waitUntil() {} } as unknown as ExecutionContext,
+    );
+    return { status: res.status, json: (await res.json()) as Record<string, any> };
+  };
+
+  // Assistant status explicitly exposes both independent modes
+  const st = await callApi("assistant/status", "GET");
+  assert.equal(st.status, 200);
+  assert.equal(st.json.deterministic?.ready, true);
+  assert.equal(st.json.advancedAI?.ready, false);
+  assert.equal(st.json.advancedAI?.reason, "credits_unverified");
+  assert.equal(st.json.ready, false);
+  assert.equal(st.json.reason, "credits_unverified");
+
+  // Mode 1: all 5 core deterministic commercial questions succeed cleanly
+  const baseFilters = { from: "2026-01", to: "2026-01", region: "", client: "", product: "" };
+  for (const question of [
+    "Quantos clientes existem?",
+    "Quantos representantes venderam em 2026?",
+    "Quanto faturamos?",
+    "Quanto vendemos de Suco e Vinho, excluindo Granel?",
+    "Quais clientes apresentaram maior queda?",
+  ]) {
+    const res = await callApi("chat", "POST", { question, filters: baseFilters, conversation: null });
+    assert.equal(res.status, 200, `${question}: ${JSON.stringify(res.json)}`);
+    assert.equal(res.json.meta?.engine, "deterministic", question);
+    assert.equal(res.json.meta?.openaiCalls, 0, question);
+    assert.ok(typeof res.json.commentary?.summary === "string" && res.json.commentary.summary.length > 10);
+  }
+
+  // Non-admin commercial user still executes Mode 1 with ACL strictly applied, while Mode 2 stays 403
+  const spDet = await callApi(
+    "chat",
+    "POST",
+    { question: "Quantos clientes existem?", filters: baseFilters, conversation: null },
+    s.secretSp,
+  );
+  assert.equal(spDet.status, 200);
+  assert.match(spDet.json.commentary.summary, /2 clientes distintos cadastrados/);
+  const spOpen = await callApi(
+    "chat",
+    "POST",
+    {
+      question: "Analise a estratégia comercial e explique por que houve variação no trimestre",
+      filters: baseFilters,
+      conversation: null,
+    },
+    s.secretSp,
+  );
+  assert.equal(spOpen.status, 403);
+
+  // Update operator remains blocked (403) even on Mode 1 deterministic questions
+  const opDenied = await callApi(
+    "chat",
+    "POST",
+    { question: "Quanto faturamos?", filters: baseFilters, conversation: null },
+    secretOp,
+  );
+  assert.equal(opDenied.status, 403);
+
+  // Mode 2: open/advanced question for admin is blocked by expired/unverified credits (503) and does NOT auto-route
+  const openExpiredVerified = await callApi("chat", "POST", {
+    question: "Analise a estratégia comercial e explique por que houve variação no trimestre",
+    filters: baseFilters,
+    conversation: null,
+  });
+  assert.equal(openExpiredVerified.status, 503);
+  assert.match(String(openExpiredVerified.json.error), /Análise avançada com OpenAI temporariamente indisponível/);
+
+  // Also test expired credit_valid_until
+  s.sql
+    .prepare("UPDATE ai_production_policy SET credit_verified_at=?, credit_valid_until=? WHERE id=1")
+    .run(ts, ts - 10);
+  const detValidUntil = await callApi("chat", "POST", {
+    question: "Quanto faturamos?",
+    filters: baseFilters,
+    conversation: null,
+  });
+  assert.equal(detValidUntil.status, 200);
+  assert.equal(detValidUntil.json.meta?.engine, "deterministic");
+
+  const openValidUntil = await callApi("chat", "POST", {
+    question: "Analise a estratégia comercial e explique as causas da variação",
+    filters: baseFilters,
+    conversation: null,
+  });
+  assert.equal(openValidUntil.status, 503);
+
+  assert.equal(fetchCalls, 0);
+  assert.equal(s.sql.prepare("SELECT COUNT(*) n FROM ai_production_attempts").get()!.n, 0);
+});
+
+test("active CSV batch metadata replaces legacy manual date in /api/me, /api/data/status and /api/assistant/status", async (t) => {
+  const s = await setupDeterministicStore();
+  t.after(() => s.sql.close());
+
+  const batchId = randomUUID();
+  const activatedAt = 1795197805; // 2026-11-20T18:03:25Z (NOT the legacy 1970-01-01 / 2026-11-18 fixture!)
+  s.sql
+    .prepare(
+      `INSERT INTO ci_csv_batches(id,actor,owner,status,source_label,reference_date,coverage_from,coverage_to,file_count,sales_rows,return_rows,customer_rows,product_rows,created,updated,activated_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    )
+    .run(
+      batchId,
+      "Admin",
+      s.adminId,
+      "active",
+      "Produção Commercial Insight 2.0 (20 CSVs)",
+      "2026-11-17",
+      "2025-01-01",
+      "2026-11-17",
+      20,
+      404728,
+      19430,
+      11097,
+      660,
+      activatedAt - 100,
+      activatedAt,
+      activatedAt,
+    );
+  s.sql
+    .prepare(
+      "INSERT INTO ci_csv_active(id,active_batch_id,previous_batch_id,mode,updated,actor) VALUES(1,?,NULL,'active',?,'Admin') ON CONFLICT(id) DO UPDATE SET active_batch_id=excluded.active_batch_id,mode='active',updated=excluded.updated,actor=excluded.actor",
+    )
+    .run(batchId, activatedAt);
+
+  const get = async (path: string) => {
+    const res = await worker.fetch(
+      new Request(s.env.APP_ORIGIN + "/api/" + path, {
+        headers: { Origin: s.env.APP_ORIGIN, Cookie: "__Host-ci=" + s.secretAdmin },
+      }),
+      s.env,
+      { waitUntil() {} } as unknown as ExecutionContext,
+    );
+    return { status: res.status, json: (await res.json()) as Record<string, any> };
+  };
+
+  const me = await get("me");
+  assert.equal(me.status, 200);
+  assert.equal(me.json.data.activeVersionId, batchId);
+  assert.equal(me.json.data.storageEngine, "csv");
+  assert.equal(me.json.data.referenceDate, "2026-11-17");
+  assert.equal(me.json.data.model, "Produção Commercial Insight 2.0 (20 CSVs)");
+  assert.equal(me.json.data.extractedAt, new Date(activatedAt * 1000).toISOString());
+
+  const ds = await get("data/status");
+  assert.equal(ds.status, 200);
+  assert.equal(ds.json.active.id, batchId);
+  assert.equal(ds.json.active.storageEngine, "csv");
+  assert.equal(ds.json.active.tables, 20);
+  assert.equal(ds.json.active.rows, 404728 + 19430 + 11097 + 660);
+  assert.equal(ds.json.active.referenceDate, "2026-11-17");
+
+  const st = await get("assistant/status");
+  assert.equal(st.status, 200);
+  assert.equal(st.json.deterministic?.ready, true);
+  assert.equal(st.json.deterministic?.source, "csv");
 });

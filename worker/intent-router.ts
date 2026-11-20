@@ -329,7 +329,7 @@ export function routeCommercialIntent(
   }
 
   // 9. Clients with biggest decline / growth / revenue
-  if (/\bclientes?\b.*\b(?:maior\s+queda|maiores?\s+quedas|cairam|retracao|perda)\b|\b(?:maior\s+queda|cairam).*clientes?\b/u.test(f)) {
+  if (/\bclientes?\b.*\b(?:maior\s+queda|maiores?\s+quedas|cairam|retracao|perda|perderam)\b|\b(?:maior\s+queda|cairam).*clientes?\b/u.test(f)) {
     return {
       kind: "ranking",
       plan: { group: "client", metric: "revenue", order: "decline", filters },

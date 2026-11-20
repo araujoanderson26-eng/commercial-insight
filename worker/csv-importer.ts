@@ -79,19 +79,70 @@ function isMissingCsvSchemaError(err: unknown): boolean {
   return /no such table:\s*ci_(?:csv_|dim_|fact_|agg_)/i.test(msg);
 }
 
-export async function activeCsvBatch(
-  e: Env,
-): Promise<{ batchId: string; referenceDate: string | null; mode: "shadow" | "active" } | null> {
+export type ActiveCsvBatchInfo = {
+  batchId: string;
+  referenceDate: string | null;
+  mode: "shadow" | "active";
+  sourceLabel: string;
+  coverageFrom: string | null;
+  coverageTo: string | null;
+  fileCount: number;
+  salesRows: number;
+  returnRows: number;
+  customerRows: number;
+  productRows: number;
+  actor: string;
+  created: number;
+  updated: number;
+  activatedAt: number | null;
+};
+
+export async function activeCsvBatch(e: Env): Promise<ActiveCsvBatchInfo | null> {
   try {
     const active = await stmt(
       e,
-      "SELECT a.active_batch_id,a.mode,b.reference_date FROM ci_csv_active a LEFT JOIN ci_csv_batches b ON b.id=a.active_batch_id WHERE a.id=1",
-    ).first<{ active_batch_id: string | null; mode: "shadow" | "active"; reference_date: string | null }>();
+      `SELECT a.active_batch_id,a.mode,a.actor AS active_actor,
+         b.reference_date,b.source_label,b.coverage_from,b.coverage_to,
+         b.file_count,b.sales_rows,b.return_rows,b.customer_rows,b.product_rows,
+         b.actor AS batch_actor,b.created,b.updated,b.activated_at
+       FROM ci_csv_active a
+       LEFT JOIN ci_csv_batches b ON b.id=a.active_batch_id
+       WHERE a.id=1`,
+    ).first<{
+      active_batch_id: string | null;
+      mode: "shadow" | "active";
+      active_actor: string | null;
+      reference_date: string | null;
+      source_label: string | null;
+      coverage_from: string | null;
+      coverage_to: string | null;
+      file_count: number | null;
+      sales_rows: number | null;
+      return_rows: number | null;
+      customer_rows: number | null;
+      product_rows: number | null;
+      batch_actor: string | null;
+      created: number | null;
+      updated: number | null;
+      activated_at: number | null;
+    }>();
     if (!active || active.mode !== "active" || !active.active_batch_id) return null;
     return {
       batchId: active.active_batch_id,
       referenceDate: active.reference_date,
       mode: active.mode,
+      sourceLabel: active.source_label ?? "Base CSV estruturada (20 CSVs)",
+      coverageFrom: active.coverage_from,
+      coverageTo: active.coverage_to,
+      fileCount: active.file_count ?? 20,
+      salesRows: active.sales_rows ?? 0,
+      returnRows: active.return_rows ?? 0,
+      customerRows: active.customer_rows ?? 0,
+      productRows: active.product_rows ?? 0,
+      actor: active.active_actor ?? active.batch_actor ?? "Administrador",
+      created: active.created ?? active.updated ?? 0,
+      updated: active.updated ?? active.activated_at ?? 0,
+      activatedAt: active.activated_at ?? null,
     };
   } catch (err) {
     if (isMissingCsvSchemaError(err)) return null;

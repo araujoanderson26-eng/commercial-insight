@@ -651,6 +651,10 @@ p,
   background: #edf1f5;
   color: #516176;
 }
+.warn {
+  background: #fff4df;
+  color: #8c5a0d;
+}
 .analytics {
   display: grid;
   grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
@@ -1910,7 +1914,13 @@ dialog::backdrop {
 .ranked-signals { margin-top: 20px; padding-top: 15px; border-top: 1px solid var(--line); }
 .ranked-signals h3 { font-size: 13px; color: #596680; }
 .assistant-status { display: grid; gap: 12px; border-left: 3px solid #b89559; background: #fffdf8; }
+.assistant-status.is-ready { border-left-color: #14714e; background: #f8fcf9; }
+.assistant-status.is-limited { border-left-color: #b89559; background: #fffdf8; }
+.assistant-modes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.assistant-mode { display: grid; gap: 6px; padding: 12px 14px; border-radius: 10px; border: 1px solid #e6e9f2; background: #fff; min-width: 0; }
+.assistant-mode-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
 .assistant-status p { margin-top: 6px; }
+.assistant-mode p { margin-top: 0; }
 .visit-selector { display: grid; gap: 12px; }
 .visit-selector .ranking-search { margin: 8px 0 0; }
 .visit-selector > .row { flex-wrap: wrap; }
@@ -2314,6 +2324,7 @@ dialog.filter-sheet {
   }
   .sheet-body { max-height: calc(88svh - 140px); }
   .sheet-footer button { min-height: 44px; }
+  .assistant-modes { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
   .skeleton { animation: none !important; }

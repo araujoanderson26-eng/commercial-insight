@@ -52,6 +52,7 @@ type DataState = {
   source: "manual" | "powerbi";
   staleDays: number;
   allowAI: boolean;
+  manualActiveVersionId?: string | null;
   active: {
     id: string;
     publishedAt: number | string;
@@ -62,6 +63,9 @@ type DataState = {
     to: string;
     rows: number;
     tables: number;
+    model?: string;
+    referenceDate?: string;
+    storageEngine?: "csv" | "ndjson";
     capabilities?: DataCapabilities;
   } | null;
   history: ImportItem[];
@@ -482,14 +486,15 @@ export function DataUpdates({ changed, operator = false }: { changed: () => void
     }
   }
   async function restore(item: ImportItem) {
-    if (!state?.active) return;
+    const currentManualId = state?.manualActiveVersionId ?? state?.active?.id;
+    if (!currentManualId) return;
     setRestoreId(item.id);
     setError("");
     setNotice("");
     try {
       await api("admin/data/restore", "POST", {
         versionId: item.versionId,
-        expectedActiveVersionId: state.active.id,
+        expectedActiveVersionId: currentManualId,
       });
       await load();
       changedRef.current();
@@ -541,7 +546,7 @@ export function DataUpdates({ changed, operator = false }: { changed: () => void
           <div className="sectionhead">
             <div><div className="mini"><ShieldCheck size={14} /> Fonte comercial</div><h2>Base em uso</h2></div>
             <span className={active && state.source === "manual" ? "pill good" : "pill"}>
-              {state.source === "manual" ? "Arquivo manual" : "Power BI online"}
+              {state.active?.storageEngine === "csv" ? "Base CSV estruturada" : state.source === "manual" ? "Arquivo manual" : "Power BI online"}
             </span>
           </div>
           {active ? <>
@@ -586,7 +591,7 @@ export function DataUpdates({ changed, operator = false }: { changed: () => void
         </section>
         <section className="panel">
           <div className="sectionhead"><div><div className="mini"><History size={14} /> Rastreabilidade</div><h2>Histórico de importações</h2></div><button className="soft compact" onClick={() => load().catch((e) => setError(message(e)))}><RefreshCw size={14} />Atualizar</button></div>
-          {!state.history.length ? <Empty title="Nenhuma importação recebida">Os envios e seus resultados aparecerão aqui.</Empty> : <div className="du-history">{state.history.map((item) => <article key={item.id} className="du-history-item"><div className="du-history-head"><div><b>{item.filename}</b><small>Upload: {date(item.created)} · {bytes(item.bytes)}</small><small>{n(item.tables)} tabelas · {n(item.rows)} linhas</small></div><span className={`pill ${item.status === "published" ? "good" : ""}`}>{item.versionId === active?.id ? "Versão ativa" : labels[item.status] ?? item.status}</span></div>{item.error && <ErrorBox>{item.error}</ErrorBox>}<div className="du-actions"><button className="textlink" onClick={() => setExpanded(expanded === item.id ? "" : item.id)}>{expanded === item.id ? "Ocultar detalhes" : "Validações e detalhes"}</button>{["failed", "cancelled", "superseded"].includes(item.status) && <button className="soft compact" disabled={!!retryId || sending} onClick={() => retry(item)}><RefreshCw size={13} />{retryId === item.id ? "Retomando…" : "Tentar novamente"}</button>}{!operator && item.status === "published" && item.versionId !== active?.id && <button className="soft compact" disabled={!!restoreId || sending} onClick={() => restore(item)}><RotateCcw size={13} />{restoreId === item.id ? "Restaurando…" : "Restaurar esta versão"}</button>}</div>{expanded === item.id && <div className="du-details"><small>Importação {item.id}<br />Versão {item.versionId || "ainda não criada"}<br />Última mudança: {date(item.updated)}</small>{item.report ? <Validation report={item.report} /> : <p className="sub">O relatório de validação ficará disponível durante o processamento.</p>}<div className="du-links">{!operator && item.status !== "uploading" && <a className="textlink" href={`/api/admin/data/imports/${item.id}/package`} download>Baixar pacote original privado</a>}<a className="textlink" href={`/api/admin/data/imports/${item.id}/report`} target="_blank" rel="noreferrer">Abrir relatório completo</a></div></div>}</article>)}</div>}
+          {!state.history.length ? <Empty title="Nenhuma importação recebida">Os envios e seus resultados aparecerão aqui.</Empty> : <div className="du-history">{state.history.map((item) => { const currentManualId = state.manualActiveVersionId ?? active?.id; return <article key={item.id} className="du-history-item"><div className="du-history-head"><div><b>{item.filename}</b><small>Upload: {date(item.created)} · {bytes(item.bytes)}</small><small>{n(item.tables)} tabelas · {n(item.rows)} linhas</small></div><span className={`pill ${item.status === "published" ? "good" : ""}`}>{item.versionId === currentManualId ? "Versão ativa" : labels[item.status] ?? item.status}</span></div>{item.error && <ErrorBox>{item.error}</ErrorBox>}<div className="du-actions"><button className="textlink" onClick={() => setExpanded(expanded === item.id ? "" : item.id)}>{expanded === item.id ? "Ocultar detalhes" : "Validações e detalhes"}</button>{["failed", "cancelled", "superseded"].includes(item.status) && <button className="soft compact" disabled={!!retryId || sending} onClick={() => retry(item)}><RefreshCw size={13} />{retryId === item.id ? "Retomando…" : "Tentar novamente"}</button>}{!operator && item.status === "published" && item.versionId !== currentManualId && <button className="soft compact" disabled={!!restoreId || sending} onClick={() => restore(item)}><RotateCcw size={13} />{restoreId === item.id ? "Restaurando…" : "Restaurar esta versão"}</button>}</div>{expanded === item.id && <div className="du-details"><small>Importação {item.id}<br />Versão {item.versionId || "ainda não criada"}<br />Última mudança: {date(item.updated)}</small>{item.report ? <Validation report={item.report} /> : <p className="sub">O relatório de validação ficará disponível durante o processamento.</p>}<div className="du-links">{!operator && item.status !== "uploading" && <a className="textlink" href={`/api/admin/data/imports/${item.id}/package`} download>Baixar pacote original privado</a>}<a className="textlink" href={`/api/admin/data/imports/${item.id}/report`} target="_blank" rel="noreferrer">Abrir relatório completo</a></div></div>}</article>; })}</div>}
         </section>
       </>}
     </div>

@@ -8,7 +8,7 @@ import {
 } from "../shared/manual";
 import { audit, body, fail, json, now, stmt, type DbUser, type Env } from "./core";
 import { activeCsvBatch } from "./csv-importer";
-import { csvCustomerDetails, queryCsvOptions, queryCsvReport, searchCsvDimension } from "./csv-query";
+import { CSV_CAPABILITIES, csvCustomerDetails, queryCsvOptions, queryCsvReport, searchCsvDimension } from "./csv-query";
 import { assertControlledHmlManifest, assertControlledHmlPackage, assertControlledHmlUser, controlledHmlFilters, controlledHmlPolicy } from "./real-hml-policy";
 import { nativeCapabilities, nativeControl, nativeControlResult, nativeCustomerDetails, nativeOptions, nativePeriod, nativeSearch, nativePartStatements, nativeStorageTables, nativeValues, queryNative, validateNativeModel,validateNativeStorage,type NativeResult } from "./native-model";
 
@@ -67,12 +67,42 @@ function activeInfo(row: ImportRow, source:SourceRow) {
   const m = parsed(row)!;
   return { id: row.id, publishedAt: iso(source.active_at??row.published!), actor: source.active_actor??row.actor, importedPublishedAt:iso(row.published!), uploadedAt:iso(row.created), extractedAt: m.extractedAt,
     sourceUpdatedAt: m.sourceUpdatedAt, from: m.projection.from, to: m.projection.to,
-    rows: m.inventory.tables.reduce((sum,table)=>sum+table.rowCount,0), projectionRows:m.projection.rowCount, processedRows:row.rows, tables: row.tables, model: m.model.name, referenceDate: m.referenceDate, capabilities:m.formatVersion===2?nativeCapabilities(m):undefined };
+    rows: m.inventory.tables.reduce((sum,table)=>sum+table.rowCount,0), projectionRows:m.projection.rowCount, processedRows:row.rows, tables: row.tables, model: m.model.name, referenceDate: m.referenceDate, capabilities:m.formatVersion===2?nativeCapabilities(m):undefined, storageEngine: "ndjson" as const };
 }
 export async function dataStatus(e: Env) {
   const s = await sourceRow(e);
   const active = s.active_version_id ? await getImport(e, s.active_version_id) : null;
   if (active?.published) assertControlledHmlManifest(e, parsed(active)!, active.sha256,true);
+  const csvActive = !controlledHmlPolicy(e) && s.source === "manual" ? await activeCsvBatch(e) : null;
+  if (csvActive) {
+    const publishedAt = iso(csvActive.activatedAt ?? csvActive.updated);
+    const totalRows = csvActive.salesRows + csvActive.returnRows + csvActive.customerRows + csvActive.productRows;
+    return {
+      source: s.source,
+      staleDays: s.stale_days,
+      allowAI: !!s.allow_ai,
+      active: {
+        id: csvActive.batchId,
+        publishedAt,
+        actor: csvActive.actor,
+        importedPublishedAt: publishedAt,
+        uploadedAt: iso(csvActive.created),
+        extractedAt: publishedAt,
+        sourceUpdatedAt: null,
+        from: csvActive.coverageFrom ?? "",
+        to: csvActive.coverageTo ?? "",
+        rows: totalRows,
+        projectionRows: csvActive.salesRows + csvActive.returnRows,
+        processedRows: totalRows,
+        tables: csvActive.fileCount,
+        model: csvActive.sourceLabel,
+        referenceDate: csvActive.referenceDate ?? csvActive.coverageTo ?? "",
+        capabilities: CSV_CAPABILITIES,
+        storageEngine: "csv" as const,
+      },
+      stale: Date.now() - new Date(publishedAt).valueOf() > s.stale_days * 86400000,
+    };
+  }
   return { source: s.source, staleDays: s.stale_days, allowAI: !!s.allow_ai,
     active: active?.published ? activeInfo(active,s) : null,
     stale: active?.published ? Date.now()-new Date(parsed(active)!.sourceUpdatedAt??parsed(active)!.extractedAt).valueOf()>s.stale_days*86400000 : false };
@@ -106,7 +136,8 @@ async function status(e: Env, operator?: string) {
       rows: manifest?manifest.inventory.tables.reduce((sum,table)=>sum+table.rowCount,0):0, projectionRows:manifest?.projection.rowCount??0, processedRows:r.rows, actor:r.actor, uploadedAt:iso(r.created), tables: r.tables, error: r.error, report: r.report ? JSON.parse(r.report) : null,
       publishedAt: r.published ? iso(r.published) : null, uploadedParts: parts });
   }
-  return { ...await dataStatus(e), history, limits: { partBytes: UPLOAD_PART_BYTES, maxBytes: maxBytes(e), format: ".ci.ndjson" } };
+  const s = await sourceRow(e);
+  return { ...await dataStatus(e), manualActiveVersionId: s.active_version_id, history, limits: { partBytes: UPLOAD_PART_BYTES, maxBytes: maxBytes(e), format: ".ci.ndjson" } };
 }
 export async function manualRoute(req: Request, e: Env, u: DbUser, path: string): Promise<Response | null> {
   assertControlledHmlUser(e, u.id);

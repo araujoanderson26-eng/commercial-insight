@@ -7,6 +7,7 @@ import {
   metrics,
   pretty,
   type Commentary,
+  type DataCapabilities,
   type FilterDimension,
   type Filters,
   type Group,
@@ -35,11 +36,48 @@ type BatchMetaRow = {
   return_rows: number;
   customer_rows: number;
   product_rows: number;
+  created: number;
+  updated: number;
+  activated_at: number | null;
   summary_json: string | null;
   validation_json: string | null;
   has_cal: number;
   has_macro: number;
 };
+
+export const CSV_CAPABILITIES: DataCapabilities = {
+  metrics: ["gross", "revenue", "returns", "buyers"],
+  groups: ["month", "client", "region", "product", "category", "state", "regional", "manager"],
+  filters: ["region", "client", "product", "category", "state", "regional", "manager"],
+  labels: {
+    region: "Representante",
+    regional: "Regional",
+    state: "UF",
+    manager: "Gerente",
+    revenue: "Faturamento líquido",
+  },
+};
+
+function csvSourceInfo(
+  batch: BatchMetaRow,
+  comp: NonNullable<Report["comparison"]>,
+): NonNullable<Report["sourceInfo"]> {
+  const ts = batch.activated_at ?? batch.updated ?? batch.created;
+  const isoTs = Number.isFinite(ts) && ts > 0 ? new Date(ts * 1000).toISOString() : new Date().toISOString();
+  return {
+    versionId: batch.id,
+    extractedAt: isoTs,
+    publishedAt: isoTs,
+    sourceUpdatedAt: null,
+    referenceDate: batch.reference_date ?? comp.current.to,
+    coverage: {
+      from: batch.coverage_from ?? comp.current.from,
+      to: batch.coverage_to ?? comp.current.to,
+    },
+    model: batch.source_label,
+    capabilities: CSV_CAPABILITIES,
+  };
+}
 
 type PeriodMode = "periods_join" | "disjoint_dual" | "single_range";
 
@@ -464,7 +502,7 @@ async function loadBatchMeta(
   const batch = await stmt(
     e,
     `SELECT id,status,source_label,reference_date,coverage_from,coverage_to,file_count,
-       sales_rows,return_rows,customer_rows,product_rows,summary_json,validation_json,
+       sales_rows,return_rows,customer_rows,product_rows,created,updated,activated_at,summary_json,validation_json,
        EXISTS(SELECT 1 FROM ci_dim_calendar WHERE batch_id=? LIMIT 1) AS has_cal,
        EXISTS(SELECT 1 FROM ci_fact_sales WHERE batch_id=? AND macro_key IS NOT NULL LIMIT 1) AS has_macro
      FROM ci_csv_batches WHERE id=?`,
@@ -841,14 +879,7 @@ export async function queryCsvReport(
       comparison: comp,
       ...(conflicts.length ? { filterConflicts: conflicts } : {}),
       summaryStats: { activeReps: 0, ticketPerBuyer: null, invoiceCount: 0, ticketPerInvoice: null },
-      sourceInfo: {
-        versionId: batch.id,
-        extractedAt: new Date().toISOString(),
-        sourceUpdatedAt: null,
-        referenceDate: batch.reference_date ?? comp.current.to,
-        coverage: { from: batch.coverage_from ?? comp.current.from, to: batch.coverage_to ?? comp.current.to },
-        model: batch.source_label,
-      },
+      sourceInfo: csvSourceInfo(batch, comp),
     };
   }
 
@@ -1549,23 +1580,7 @@ export async function queryCsvReport(
       invoiceCount: docsCount,
       ticketPerInvoice,
     },
-    sourceInfo: {
-      versionId: batch.id,
-      extractedAt: new Date().toISOString(),
-      sourceUpdatedAt: null,
-      referenceDate: batch.reference_date ?? comp.current.to,
-      coverage: {
-        from: batch.coverage_from ?? comp.current.from,
-        to: batch.coverage_to ?? comp.current.to,
-      },
-      model: batch.source_label,
-      capabilities: {
-        metrics: ["gross", "revenue", "returns", "buyers"],
-        groups: ["month", "client", "region", "product", "category", "state", "regional", "manager"],
-        filters: ["region", "client", "product", "category", "state", "regional", "manager"],
-        labels: { region: "Representante", regional: "Regional", state: "UF", manager: "Gerente", revenue: "Faturamento líquido" },
-      },
-    },
+    sourceInfo: csvSourceInfo(batch, comp),
   };
 }
 

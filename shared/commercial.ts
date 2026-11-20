@@ -63,6 +63,16 @@ export type AssistantStatus = {
   pending: AssistantPending[];
   message: string;
   budget?: AssistantBudget;
+  deterministic?: {
+    ready: boolean;
+    source: "csv" | "manual" | "none";
+    message: string;
+  };
+  advancedAI?: {
+    ready: boolean;
+    reason: "ready" | AssistantPending;
+    message: string;
+  };
 };
 export type AssistantPending = 'source_disabled' | 'credential_missing' | 'policy_disabled' | 'account_not_authorized'
   | 'credits_unverified' | 'budget_exhausted' | 'request_in_progress' | 'budget_unavailable';

@@ -30,12 +30,36 @@ type Turn = {
   created: number;
   source_type?: string;
   source_version?: string | null;
+  engine?: "deterministic" | "openai";
   report?: Report;
   commentary?: Commentary;
   visit?: VisitBriefing;
 };
 type Thread = { id: string; title: string; updated: number };
 export type Seed = { question: string; send: boolean; key: number };
+
+function advancedModeBadge(reason?: AssistantStatus["reason"]) {
+  switch (reason) {
+    case "ready":
+      return "Disponível";
+    case "credits_unverified":
+      return "Aguardando verificação de créditos";
+    case "budget_exhausted":
+      return "Orçamento mensal atingido";
+    case "policy_disabled":
+      return "Aguardando liberação financeira";
+    case "account_not_authorized":
+      return "Restrita ao administrador autorizado";
+    case "request_in_progress":
+      return "Chamada em conciliação";
+    case "source_disabled":
+      return "Desabilitada para esta fonte";
+    case "credential_missing":
+      return "Credencial OpenAI pendente";
+    default:
+      return "Temporariamente indisponível";
+  }
+}
 function Answer({ turn, onLoad }: { turn: Turn; onLoad: (r: Report, c: Commentary, visit?: VisitBriefing) => void }) {
   const [err, E] = useState(""),
     [busy, B] = useState(false), [saved, S] = useState(false);
@@ -65,6 +89,12 @@ function Answer({ turn, onLoad }: { turn: Turn; onLoad: (r: Report, c: Commentar
       <div className="answer">
         <div className="mini">
           <Sparkles size={15} /> Comercial Insight
+          {turn.engine === "deterministic" && (
+            <span className="pill good">Consulta comercial direta (D1)</span>
+          )}
+          {turn.engine === "openai" && (
+            <span className="pill">Análise avançada (OpenAI)</span>
+          )}
         </div>
         <h2>
           {metricLabel(turn.plan.metric, turn.report?.sourceInfo?.capabilities)} · {groupLabel(turn.plan.group, turn.report?.sourceInfo?.capabilities)}
@@ -178,7 +208,14 @@ export default function Chat({
     L(false);
     D("");
     try {
-      const v = await api<{ id: string; turn: string; report: Report; commentary: Commentary; visit?: VisitBriefing }>(
+      const v = await api<{
+        id: string;
+        turn: string;
+        report: Report;
+        commentary: Commentary;
+        visit?: VisitBriefing;
+        meta?: { engine?: "deterministic" | "openai"; latencyMs?: number; openaiCalls?: number };
+      }>(
         "chat",
         "POST",
         { question: q.trim(), conversation: thread, filters },
@@ -191,6 +228,7 @@ export default function Chat({
           question: q,
           plan: v.report.plan,
           created: Date.now() / 1000,
+          engine: v.meta?.engine,
           report: v.report,
           commentary: v.commentary,
           visit: v.visit,
@@ -265,7 +303,56 @@ export default function Chat({
         </div>
       </div>
       {err && <ErrorBox>{err}</ErrorBox>}
-      {status && !status.ready && <div className="panel assistant-status"><div><strong>Assistente aguardando configuração</strong><p>{status.message}</p></div><p className="sub">Você pode consultar os relatórios e preparar uma visita com os dados autorizados.</p><div className="report-actions"><a className="soft compact" href="/relatorios">Abrir relatórios</a><a className="soft compact" href="/visitas">Preparar visita</a></div></div>}
+      {status && (() => {
+        const deterministicReady = status.deterministic?.ready ?? false;
+        const deterministicMsg =
+          status.deterministic?.message ??
+          "Consultas comerciais diretas indisponíveis para esta fonte.";
+        const advancedReady = status.advancedAI?.ready ?? status.ready;
+        const advancedReason = status.advancedAI?.reason ?? status.reason;
+        const advancedMsg = status.advancedAI?.message ?? status.message;
+        return (
+          <div
+            className={`panel assistant-status ${advancedReady ? "is-ready" : "is-limited"}`}
+            role="status"
+            aria-label="Disponibilidade do assistente"
+          >
+            <div className="assistant-modes">
+              <div className="assistant-mode">
+                <div className="assistant-mode-head">
+                  <strong>Consultas comerciais</strong>
+                  <span className={deterministicReady ? "pill good" : "pill warn"}>
+                    {deterministicReady ? "Disponíveis" : "Indisponíveis"}
+                  </span>
+                </div>
+                <p className="sub">{deterministicMsg}</p>
+              </div>
+              <div className="assistant-mode">
+                <div className="assistant-mode-head">
+                  <strong>Análise avançada com OpenAI</strong>
+                  <span className={advancedReady ? "pill good" : "pill warn"}>
+                    {advancedModeBadge(advancedReason)}
+                  </span>
+                </div>
+                <p className="sub">{advancedMsg}</p>
+              </div>
+            </div>
+            {!advancedReady && (
+              <>
+                <p className="sub">
+                  {deterministicReady
+                    ? "Você pode fazer perguntas comerciais diretas aqui mesmo (faturamento, clientes, representantes, categorias e quedas) ou abrir os relatórios e visitas."
+                    : "Você pode consultar os relatórios e preparar uma visita com os dados autorizados."}
+                </p>
+                <div className="report-actions">
+                  <a className="soft compact" href="/relatorios">Abrir relatórios</a>
+                  <a className="soft compact" href="/visitas">Preparar visita</a>
+                </div>
+              </>
+            )}
+          </div>
+        );
+      })()}
         {status?.budget && <section className="panel" aria-label="Consumo da IA">
           <strong>Orçamento da IA · {status.budget.month} (UTC)</strong>
           <p>Limite mensal: US$ {status.budget.capUsd.toFixed(2)}. Reservas comprometidas: US$ {status.budget.reservedUsd.toFixed(4)}. Consumo com tokens conhecidos, sem desconto de cache: US$ {status.budget.usageUpperUsd.toFixed(6)}.</p>
@@ -316,11 +403,12 @@ export default function Chat({
                   <Sparkles />
                 </div>
                 <h2>Que resultado você quer entender?</h2>
-                <p className="sub">A análise considera o modelo publicado e suas permissões.</p>
+                <p className="sub">Consultas comerciais diretas respondem pelos dados autorizados no D1 sem consumir créditos OpenAI.</p>
                 {[
-                  "Como está meu faturamento em relação ao ano anterior?",
-                  "Quais clientes mais perderam faturamento?",
-                  "Quais produtos lideram no período?",
+                  "Quanto faturamos em 2026?",
+                  "Quais clientes apresentaram maior queda?",
+                  "Quanto vendemos de Suco e Vinho, excluindo Granel?",
+                  "Quantos representantes venderam em 2026?",
                 ].map((q) => (
                   <button key={q} className="suggest" onClick={() => D(q)}>
                     {q}

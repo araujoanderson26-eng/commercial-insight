@@ -194,6 +194,9 @@ export type Session = {
     activeVersionId: string | null;
     extractedAt: string | null;
     stale: boolean;
+    referenceDate?: string | null;
+    model?: string | null;
+    storageEngine?: "csv" | "ndjson" | null;
     capabilities?: DataCapabilities;
   };
 };

@@ -232,12 +232,14 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
         <div className="content">
           {s.data?.source === "manual" && (
             <div className="notice" role="status">
-              {s.data.extractedAt
-                ? "Arquivo manual · base extraída em " +
-                  new Date(s.data.extractedAt).toLocaleString("pt-BR", {
-                    timeZone: "America/Sao_Paulo",
-                  })
-                : "Arquivo manual · nenhuma versão válida publicada."}
+              {s.data.storageEngine === "csv" && s.data.extractedAt
+                ? `Base CSV estruturada (${s.data.model ?? "20 CSVs"}) · ativa desde ${new Date(s.data.extractedAt).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}${s.data.referenceDate ? ` · dados até ${s.data.referenceDate.split("-").reverse().join("/")}` : ""}`
+                : s.data.extractedAt
+                  ? "Arquivo manual · base extraída em " +
+                    new Date(s.data.extractedAt).toLocaleString("pt-BR", {
+                      timeZone: "America/Sao_Paulo",
+                    })
+                  : "Arquivo manual · nenhuma versão válida publicada."}
               {s.data.stale ? " · Base desatualizada: solicite uma atualização ao administrador." : ""}
             </div>
           )}
