@@ -47,23 +47,90 @@ export class ManualD1Provider implements DataProvider {
   query(plan: Plan) { return queryManual(this.env, this.user, plan, this.versionId); }
 }
 
+const OFFICIAL_MACROS: Record<string, string> = {
+  SUCO: "SUCO",
+  SUCOS: "SUCO",
+  VINHO: "VINHO",
+  VINHOS: "VINHO",
+  ESPUMANTE: "ESPUMANTE",
+  ESPUMANTES: "ESPUMANTE",
+  VINAGRE: "VINAGRE",
+  VINAGRES: "VINAGRE",
+  "VINHO IMPORTADO": "VINHO IMPORTADO",
+  "VINHOS IMPORTADOS": "VINHO IMPORTADO",
+  "VINHO GRANEL": "VINHO GRANEL",
+  "VINHOS GRANEL": "VINHO GRANEL",
+  "VINAGRE GRANEL": "VINAGRE GRANEL",
+  "VINAGRES GRANEL": "VINAGRE GRANEL",
+  "BEBIDA QUENTE": "BEBIDA QUENTE",
+  "BEBIDAS QUENTES": "BEBIDA QUENTE",
+  "VENDA VAREJO": "VENDA VAREJO",
+  "VENDAS VAREJO": "VENDA VAREJO",
+  "SUCO CONCENTRADO DE UVA": "SUCO CONCENTRADO DE UVA",
+  "SUCOS CONCENTRADOS DE UVA": "SUCO CONCENTRADO DE UVA",
+  "SUCO CONCENTRADO DE MAÇÃ": "SUCO CONCENTRADO DE MAÇÃ",
+  "SUCO CONCENTRADO DE MACA": "SUCO CONCENTRADO DE MAÇÃ",
+  "SUCOS CONCENTRADOS DE MAÇÃ": "SUCO CONCENTRADO DE MAÇÃ",
+  "SUCOS CONCENTRADOS DE MACA": "SUCO CONCENTRADO DE MAÇÃ",
+  "SUCO CONCENTRADO DE LARANJA": "SUCO CONCENTRADO DE LARANJA",
+  "SUCOS CONCENTRADOS DE LARANJA": "SUCO CONCENTRADO DE LARANJA",
+  "SUCO CONCENTRADO DE TANGERINA": "SUCO CONCENTRADO DE TANGERINA",
+  "SUCOS CONCENTRADOS DE TANGERINA": "SUCO CONCENTRADO DE TANGERINA",
+};
+
 /** Resolve human-readable names only inside the provider's authorized snapshot. No fuzzy auto-selection. */
 export async function resolvePlanEntities(provider: DataProvider, plan: Plan, activeFilters?: Plan["filters"]) {
   if (!provider.search) return plan;
+  const normalize = (value: string) => value.normalize("NFC").trim().toLocaleLowerCase("pt-BR");
   const resolved = { ...plan, filters: { ...plan.filters } };
-  for(const field of ["categoriesInclude","categoriesExclude"]as const){
-    if(!resolved.filters[field]?.length)continue;
-    const values:string[]=[];
-    for(const requested of resolved.filters[field]!){
-      const word=requested.trim().toLocaleUpperCase('pt-BR');
-      const macro=({SUCOS:'SUCO',SUCO:'SUCO',VINHOS:'VINHO',VINHO:'VINHO',ESPUMANTES:'ESPUMANTE',ESPUMANTE:'ESPUMANTE'}as Record<string,string>)[word];
-      const target=macro?'Macro Categoria: '+macro:word==='GRANEL'?'GRANEL':requested;
-      const found=await provider.search({...resolved.filters,category:"",categoriesInclude:[],categoriesExclude:[]},"category",target);
-      if(word==='GRANEL'&&!found.truncated){const groups=found.items.filter(v=>!v.key.startsWith('Macro Categoria: ')&&/\bGRANEL\b/iu.test(v.key));if(groups.length){values.push(...groups.map(v=>v.key));continue;}}
-      const exact=found.items.filter(v=>v.key.trim().toLocaleLowerCase("pt-BR")===target.trim().toLocaleLowerCase("pt-BR")||v.name.trim().toLocaleLowerCase("pt-BR")===target.trim().toLocaleLowerCase("pt-BR"));
-      if(exact.length!==1)fail(422,"Selecione o grupo oficial exato nos filtros de categorias. Famílias genéricas precisam de classificação comercial validada.");
+  for (const field of ["categoriesInclude", "categoriesExclude"] as const) {
+    if (!resolved.filters[field]?.length) continue;
+    const values: string[] = [];
+    for (const requested of resolved.filters[field]!) {
+      const word = requested.normalize("NFC").trim().toLocaleUpperCase("pt-BR");
+      if (word === "SUCOS CONCENTRADOS") {
+        fail(
+          422,
+          "Sucos Concentrados são categorias independentes (ex.: Macro Categoria: SUCO CONCENTRADO DE UVA, MAÇÃ, LARANJA, TANGERINA e grupos oficiais). Selecione os códigos oficiais desejados individualmente nos filtros; eles não são agrupados em SUCO.",
+        );
+      }
+      const macro = OFFICIAL_MACROS[word];
+      const target = macro ? "Macro Categoria: " + macro : word === "GRANEL" ? "GRANEL" : requested;
+      const found = await provider.search(
+        { ...resolved.filters, category: "", categoriesInclude: [], categoriesExclude: [] },
+        "category",
+        target,
+      );
+      if (word === "GRANEL" && !found.truncated) {
+        const groups = found.items.filter((v) => !v.key.startsWith("Macro Categoria: ") && /\bGRANEL\b/iu.test(v.key));
+        if (groups.length) {
+          values.push(...groups.map((v) => v.key));
+          continue;
+        }
+      }
+      const exact = found.items.filter(
+        (v) => normalize(v.key) === normalize(target) || normalize(v.name) === normalize(target),
+      );
+      if (word === "SUCO IMPORTADO" || word === "SUCOS IMPORTADOS") {
+        if (exact.length === 1) {
+          values.push(exact[0].key);
+          continue;
+        }
+        fail(
+          422,
+          "Sucos Importados é uma categoria independente e não possui código oficial correspondente no catálogo atual; ela não é agrupada automaticamente em SUCO. Selecione os códigos oficiais desejados nos filtros.",
+        );
+      }
+      if (exact.length !== 1) {
+        if (activeFilters?.[field]?.some((item) => normalize(item) === normalize(requested))) {
+          values.push(requested);
+          continue;
+        }
+        fail(422, "Selecione o grupo oficial exato nos filtros de categorias. Famílias genéricas precisam de classificação comercial validada.");
+      }
       values.push(exact[0].key);
-    }resolved.filters[field]=[...new Set(values)];
+    }
+    resolved.filters[field] = [...new Set(values)];
   }
   for (const dimension of ["client", "product", "category"] as const) {
     const requested = resolved.filters[dimension];

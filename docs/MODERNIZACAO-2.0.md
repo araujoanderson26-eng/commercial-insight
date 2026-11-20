@@ -96,9 +96,9 @@ Executado via [`scripts/import-csv-local.ts`](../scripts/import-csv-local.ts) so
 
 ---
 
-## 5. Pendências que Exigem Decisão do Proprietário
+## 5. Decisão Comercial Definitiva e Pendências
 
-1. **Definição comercial de "Suco" e "Vinho" nos filtros rápidos:** confirmar se os concentrados de uva/maçã/laranja/tangerina e os vinhos importados/granel devem permanecer como seleções explícitas separadas de `SUCO` e `VINHO` ou agrupados em uma regra de negócio aprovada.
-2. **Ativação em Homologação Remota (HML) e Produção:** aprovar quando aplicar `migrations/0011_structured_csv_layer.sql` em HML (`wrangler.hml.jsonc`) e quando autorizar o merge da branch `feat/modernizacao-estrutural-2.0` para `main`.
+1. **Definição comercial de categorias (APROVADA E IMPLEMENTADA):** *Sucos Concentrados* (`SUCO CONCENTRADO DE UVA`, `MAÇÃ`, `LARANJA`, `TANGERINA` e grupos oficiais), *Granel* (`VINHO GRANEL`, `VINAGRE GRANEL`, `PA - GRANEL`, `PA - SUCO CONCENTRADO GRANEL`), *Sucos Importados* e *Vinho Importado* são tratados estritamente como **categorias independentes**. Nunca são agrupados automaticamente em `SUCO`, `VINHO` ou `VINAGRE`, preservando os códigos oficiais e permitindo inclusão/exclusão individual nos filtros e na IA determinística.
+2. **Ativação em Produção:** segue bloqueada até aprovação explícita após conclusão da homologação em HML e revisão da PR (ver `docs/PLANO-PUBLICACAO-PRODUCAO-2.0.md`).
 3. **Publicação Mobile (Capacitor / Android / iOS):** definir as origens permitidas para `MOBILE_ORIGINS` no Worker caso deseje compilar e distribuir o app nativo híbrido com `npm run mobile:sync`.
 4. **Visões extras de Carteira em Aberto (`Base Pedidos.csv`) e Metas (`Base Metas.csv`):** como ambas já possuem mapeamento isolado definido no inventário (`ci_fact_orders_open`), confirmar em uma etapa futura se deseja um painel dedicado de carteira em aberto x realizado sem misturar com o faturamento oficial.

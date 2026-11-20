@@ -168,5 +168,68 @@ test("CSV batch pipeline supports staging, R2 processing, validation, diff, acti
   const rbJson = (await rb.json()) as { activeBatchId: string; mode: string };
   assert.equal(rbJson.activeBatchId, batch1);
   assert.equal(rbJson.mode, "active");
+
+  // Shadow reconciliation, options, report and deterministic ask routes (admin-only)
+  assert.equal((await call(`admin/csv/batches/${batch1}/reconcile`, "GET", undefined, operador.secret)).status, 403);
+  const recRes = await call(`admin/csv/batches/${batch1}/reconcile`, "GET", undefined, admin.secret);
+  assert.equal(recRes.status, 200);
+  const recJson = (await recRes.json()) as {
+    ytd2026: { gross: number; returns: number; net: number };
+    aggConsistency: { grossDeltaScaled: number; returnsDeltaScaled: number };
+  };
+  assert.equal(recJson.ytd2026.gross, 1500);
+  assert.equal(recJson.ytd2026.returns, 100);
+  assert.equal(recJson.ytd2026.net, 1400);
+  assert.equal(recJson.aggConsistency.grossDeltaScaled, 0);
+  assert.equal(recJson.aggConsistency.returnsDeltaScaled, 0);
+
+  const optRes = await call(
+    `admin/csv/batches/${batch1}/options`,
+    "POST",
+    { from: "2026-01", to: "2026-01", region: "", client: "", product: "" },
+    admin.secret,
+  );
+  assert.equal(optRes.status, 200);
+  const optJson = (await optRes.json()) as { values: { category: string[] } };
+  assert.ok(optJson.values.category.includes("Macro Categoria: SUCO"));
+  assert.ok(optJson.values.category.includes("PA - GRANEL"));
+
+  const askRes = await call(
+    `admin/csv/batches/${batch1}/ask`,
+    "POST",
+    {
+      question: "Quanto faturamos em Suco e Vinho excluindo Granel em 2026?",
+      filters: { from: "2026-01", to: "2026-01", region: "", client: "", product: "" },
+    },
+    admin.secret,
+  );
+  assert.equal(askRes.status, 200);
+  const askJson = (await askRes.json()) as {
+    meta: { engine: string; openaiCalls: number; mode: string };
+    report: { total: { values: { gross: { current: number }; revenue: { current: number } } } };
+  };
+  assert.equal(askJson.meta.engine, "deterministic");
+  assert.equal(askJson.meta.openaiCalls, 0);
+  assert.equal(askJson.meta.mode, "shadow");
+  // P1 SUCO = 1000 gross, 100 return, 900 net; P2 GRANEL (500) excluded!
+  assert.equal(askJson.report.total.values.gross.current, 1000);
+  assert.equal(askJson.report.total.values.revenue.current, 900);
+
+  const repRes = await call(
+    `admin/csv/batches/${batch1}/report`,
+    "POST",
+    {
+      group: "category",
+      metric: "revenue",
+      order: "current",
+      filters: { from: "2026-01", to: "2026-01", region: "", client: "", product: "" },
+    },
+    admin.secret,
+  );
+  assert.equal(repRes.status, 200);
+  const repJson = (await repRes.json()) as { total: { values: { revenue: { current: number } } }; rows: { name: string }[] };
+  assert.equal(repJson.total.values.revenue.current, 1400);
+  assert.equal(repJson.rows.length, 2);
+
   assert.ok(await digest("ok"));
 });

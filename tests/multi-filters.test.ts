@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { detectFilterConflicts, filtersSchema, type Plan } from "../shared/domain";
 import { filterLabel } from "../src/export-model";
 import type { DbUser } from "../worker/core";
+import { queryCsvReport } from "../worker/csv-query";
 import { nativePartStatements, queryNative } from "../worker/native-model";
 import { makeStore, plan } from "./fixtures";
 import { nativeFixture, type NativeRows } from "./native-fixtures";
@@ -282,4 +283,101 @@ test("multi-select arrays enforce ACL scope, range/direction filters and conflic
   });
   assert.match(label, /UFs: SP, RJ/);
   assert.match(label, /Somente crescimento/);
+});
+
+test("independent commercial categories never auto-group SUCO/VINHO/VINAGRE with concentrated, granel or imported", async (t) => {
+  const s = makeStore();
+  t.after(() => s.sql.close());
+  s.sql.exec(readFileSync(new URL("../migrations/0011_structured_csv_layer.sql", import.meta.url), "utf8"));
+  const batchId = randomUUID();
+  s.sql
+    .prepare(
+      "INSERT INTO ci_csv_batches(id,actor,owner,status,source_label,reference_date,coverage_from,coverage_to,created,updated) VALUES(?,?,?,?,?,?,?,?,1,1)",
+    )
+    .run(batchId, "a", "a", "validated", "Independencia", "2026-01-31", "2025-01-01", "2026-01-31");
+
+  const products: [string, string, string][] = [
+    ["PS", "Suco Integral", "SUCO"],
+    ["PSC_UVA", "Suco Concentrado Uva", "SUCO CONCENTRADO DE UVA"],
+    ["PSC_MACA", "Suco Concentrado Maçã", "SUCO CONCENTRADO DE MAÇÃ"],
+    ["PV", "Vinho Nacional", "VINHO"],
+    ["PVI", "Vinho Importado", "VINHO IMPORTADO"],
+    ["PVG", "Vinho Granel", "VINHO GRANEL"],
+    ["PVIN", "Vinagre", "VINAGRE"],
+    ["PVING", "Vinagre Granel", "VINAGRE GRANEL"],
+  ];
+  for (const [k, desc, macro] of products) {
+    s.sql
+      .prepare(
+        "INSERT INTO ci_dim_products(batch_id,product_key,product_raw,description,macro_category_key,macro_category_raw) VALUES(?,?,?,?,?,?)",
+      )
+      .run(batchId, k, k, desc, macro, macro);
+  }
+  s.sql
+    .prepare("INSERT INTO ci_dim_customers(batch_id,client_key,client_raw,name,representative_key,representative_raw,state_key) VALUES(?,?,?,?,?,?,?)")
+    .run(batchId, "C1", "C1", "Cliente 1", "REP SP", "Rep SP", "SP");
+  s.sql
+    .prepare("INSERT INTO ci_dim_regions(batch_id,state_key,state_name,regional_key,regional_raw) VALUES(?,?,?,?,?)")
+    .run(batchId, "SP", "São Paulo", "SUDESTE", "Sudeste");
+
+  const sales: [number, string, string, number][] = [
+    [1, "PS", "PA - SUCO VIDRO", 1000_0000],
+    [2, "PSC_UVA", "PA - SUCO CONCENTRADO TB/BB/BIN", 2000_0000],
+    [3, "PSC_MACA", "PA - SUCO CONCENTRADO GRANEL", 3000_0000],
+    [4, "PV", "PA - VINHOS FINOS NACIONAL 750ML", 4000_0000],
+    [5, "PVI", "PA - VINHOS FINOS IMPORTADO 750ML", 5000_0000],
+    [6, "PVG", "PA - GRANEL", 6000_0000],
+    [7, "PVIN", "PA - VINAGRE", 700_0000],
+    [8, "PVING", "PA - GRANEL", 800_0000],
+  ];
+  for (const [rowNo, prod, grp, amt] of sales) {
+    s.sql
+      .prepare(
+        "INSERT INTO ci_fact_sales(batch_id,row_no,date,month_key,doc_no,client_key,client_raw,product_key,product_raw,group_key,group_raw,state_key,gross_amount) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      )
+      .run(batchId, rowNo, "2026-01-10", "2026-01", `NF-${rowNo}`, "C1", "C1", prod, prod, grp, grp, "SP", amt);
+  }
+
+  // SUCO only must NOT include SUCO CONCENTRADO DE UVA or MAÇÃ
+  const sucoOnly = await queryCsvReport(s.env, admin, batchId, {
+    ...plan,
+    filters: { from: "2026-01", to: "2026-01", region: "", client: "", product: "", categoriesInclude: ["Macro Categoria: SUCO"] },
+  });
+  assert.equal(sucoOnly.total.values.gross.current, 1000);
+
+  // VINHO only must NOT include VINHO IMPORTADO or VINHO GRANEL
+  const vinhoOnly = await queryCsvReport(s.env, admin, batchId, {
+    ...plan,
+    filters: { from: "2026-01", to: "2026-01", region: "", client: "", product: "", categoriesInclude: ["Macro Categoria: VINHO"] },
+  });
+  assert.equal(vinhoOnly.total.values.gross.current, 4000);
+
+  // VINAGRE only must NOT include VINAGRE GRANEL
+  const vinagreOnly = await queryCsvReport(s.env, admin, batchId, {
+    ...plan,
+    filters: { from: "2026-01", to: "2026-01", region: "", client: "", product: "", categoriesInclude: ["Macro Categoria: VINAGRE"] },
+  });
+  assert.equal(vinagreOnly.total.values.gross.current, 700);
+
+  // Explicit inclusion of SUCO + SUCO CONCENTRADO DE UVA excluding PA - GRANEL
+  const customMix = await queryCsvReport(s.env, admin, batchId, {
+    ...plan,
+    filters: {
+      from: "2026-01",
+      to: "2026-01",
+      region: "",
+      client: "",
+      product: "",
+      categoriesInclude: ["Macro Categoria: SUCO", "Macro Categoria: SUCO CONCENTRADO DE UVA", "Macro Categoria: VINHO GRANEL"],
+      categoriesExclude: ["PA - GRANEL"],
+    },
+  });
+  assert.equal(customMix.total.values.gross.current, 3000);
+
+  // ACL still rejects out-of-scope rep in CSV structured layer
+  const scopedUser: DbUser = { ...admin, id: "scoped", role: "comercial", national: 0, regions: '["REP SP"]', clients: "[]" };
+  await assert.rejects(
+    () => queryCsvReport(s.env, scopedUser, batchId, { ...plan, filters: { from: "2026-01", to: "2026-01", region: "REP RJ", client: "", product: "" } }),
+    /Seleção fora do seu escopo/,
+  );
 });

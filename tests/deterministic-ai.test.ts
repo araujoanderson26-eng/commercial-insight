@@ -4,7 +4,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import worker from "../worker/index";
 import { now } from "../worker/core";
+import { routeCommercialIntent } from "../worker/intent-router";
 import { nativePartStatements } from "../worker/native-model";
+import { resolvePlanEntities, type DataProvider } from "../worker/providers";
 import { makeStore } from "./fixtures";
 import { nativeFixture, type NativeRows } from "./native-fixtures";
 
@@ -281,4 +283,79 @@ test("all 15 mandatory AI questions answer deterministically in milliseconds wit
   assert.equal(openRes.status, 200);
   assert.equal(openRes.json.meta.engine, "openai");
   assert.ok(openAiCalls >= 1);
+});
+
+test("deterministic router and entity resolver keep Sucos Concentrados, Granel, Vinho Importado and Sucos Importados strictly independent", async () => {
+  const filters = { from: "2026-01", to: "2026-01", region: "", client: "", product: "" };
+  const capabilities = {
+    metrics: ["revenue" as const, "gross" as const, "returns" as const, "buyers" as const],
+    groups: ["month" as const, "client" as const, "product" as const, "category" as const, "region" as const, "state" as const, "regional" as const],
+    filters: ["region" as const, "client" as const, "product" as const, "category" as const, "state" as const, "regional" as const],
+  };
+
+  const catalogKeys = [
+    "Macro Categoria: SUCO",
+    "Macro Categoria: SUCO CONCENTRADO DE UVA",
+    "Macro Categoria: SUCO CONCENTRADO DE MAÇÃ",
+    "Macro Categoria: SUCO CONCENTRADO DE LARANJA",
+    "Macro Categoria: SUCO CONCENTRADO DE TANGERINA",
+    "Macro Categoria: VINHO",
+    "Macro Categoria: VINHO IMPORTADO",
+    "Macro Categoria: VINHO GRANEL",
+    "Macro Categoria: VINAGRE",
+    "Macro Categoria: VINAGRE GRANEL",
+    "PA - GRANEL",
+    "PA - SUCO CONCENTRADO GRANEL",
+  ];
+  const mockProvider: DataProvider = {
+    sourceType: "manual",
+    versionId: "v",
+    semantics: { allowAI: false, measures: { revenue: "Líq", gross: "Bruto", returns: "Dev", buyers: "Comp", margin: null }, capabilities },
+    query: async () => {
+      throw new Error("not used");
+    },
+    search: async (_f, _dim, q) => ({
+      items: catalogKeys
+        .filter((k) => k.toLocaleLowerCase("pt-BR").includes(q.toLocaleLowerCase("pt-BR")))
+        .map((key) => ({ key, name: key })),
+      truncated: false,
+    }),
+  };
+
+  const uvaIntent = routeCommercialIntent("Quanto faturamos em Suco Concentrado de Uva em 2026?", filters, capabilities, []);
+  assert.ok(uvaIntent);
+  assert.deepEqual(uvaIntent.plan.filters.categoriesInclude, ["Macro Categoria: SUCO CONCENTRADO DE UVA"]);
+  const uvaResolved = await resolvePlanEntities(mockProvider, uvaIntent.plan, filters);
+  assert.deepEqual(uvaResolved.filters.categoriesInclude, ["Macro Categoria: SUCO CONCENTRADO DE UVA"]);
+
+  const impVinhoIntent = routeCommercialIntent("Quanto faturamos em Vinho Importado em 2026?", filters, capabilities, []);
+  assert.ok(impVinhoIntent);
+  assert.deepEqual(impVinhoIntent.plan.filters.categoriesInclude, ["Macro Categoria: VINHO IMPORTADO"]);
+  const impVinhoResolved = await resolvePlanEntities(mockProvider, impVinhoIntent.plan, filters);
+  assert.deepEqual(impVinhoResolved.filters.categoriesInclude, ["Macro Categoria: VINHO IMPORTADO"]);
+
+  const vinhoGranelIntent = routeCommercialIntent("Quanto faturamos em Vinho Granel em 2026?", filters, capabilities, []);
+  assert.ok(vinhoGranelIntent);
+  assert.deepEqual(vinhoGranelIntent.plan.filters.categoriesInclude, ["Macro Categoria: VINHO GRANEL"]);
+
+  const excConcIntent = routeCommercialIntent(
+    "Quanto faturamos em Suco e Vinho excluindo Suco Concentrado de Uva e Granel?",
+    filters,
+    capabilities,
+    [],
+  );
+  assert.ok(excConcIntent);
+  assert.deepEqual(excConcIntent.plan.filters.categoriesInclude, ["SUCO", "VINHO"]);
+  assert.deepEqual(excConcIntent.plan.filters.categoriesExclude, ["Macro Categoria: SUCO CONCENTRADO DE UVA", "GRANEL"]);
+
+  // Generic Sucos Importados / Sucos Concentrados never auto-map to SUCO
+  const sucoImpIntent = routeCommercialIntent("Quanto faturamos em Sucos Importados?", filters, capabilities, []);
+  assert.ok(sucoImpIntent);
+  assert.deepEqual(sucoImpIntent.plan.filters.categoriesInclude, ["SUCO IMPORTADO"]);
+  await assert.rejects(() => resolvePlanEntities(mockProvider, sucoImpIntent.plan, filters), /não é agrupada automaticamente em SUCO/);
+
+  const sucoConcIntent = routeCommercialIntent("Quanto faturamos em Sucos Concentrados?", filters, capabilities, []);
+  assert.ok(sucoConcIntent);
+  assert.deepEqual(sucoConcIntent.plan.filters.categoriesInclude, ["SUCOS CONCENTRADOS"]);
+  await assert.rejects(() => resolvePlanEntities(mockProvider, sucoConcIntent.plan, filters), /não são agrupados em SUCO/);
 });

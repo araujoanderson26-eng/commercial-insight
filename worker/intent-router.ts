@@ -113,39 +113,55 @@ function detectState(question: string, capabilities?: DataCapabilities): string 
   return canonicalState(code);
 }
 
+function extractFromClause(clause: string): string[] {
+  if (!clause.trim()) return [];
+  let rest = clause;
+  const matched: string[] = [];
+  // Longer, compound official categories MUST be matched and stripped first so base words
+  // ("suco", "vinho", "vinagre", "granel") never absorb independent commercial categories.
+  const specs: [RegExp, string][] = [
+    [/\bsucos?\s+concentrados?\s+(?:de\s+)?uva\b/gu, "Macro Categoria: SUCO CONCENTRADO DE UVA"],
+    [/\bsucos?\s+concentrados?\s+(?:de\s+)?maca\b/gu, "Macro Categoria: SUCO CONCENTRADO DE MAÇÃ"],
+    [/\bsucos?\s+concentrados?\s+(?:de\s+)?laranja\b/gu, "Macro Categoria: SUCO CONCENTRADO DE LARANJA"],
+    [/\bsucos?\s+concentrados?\s+(?:de\s+)?tangerina\b/gu, "Macro Categoria: SUCO CONCENTRADO DE TANGERINA"],
+    [/\bsucos?\s+concentrados?\b/gu, "SUCOS CONCENTRADOS"],
+    [/\bsucos?\s+importados?\b/gu, "SUCO IMPORTADO"],
+    [/\bvinhos?\s+importados?\b/gu, "Macro Categoria: VINHO IMPORTADO"],
+    [/\bvinhos?\s+(?:graneis|granel)\b/gu, "Macro Categoria: VINHO GRANEL"],
+    [/\bvinagres?\s+(?:graneis|granel)\b/gu, "Macro Categoria: VINAGRE GRANEL"],
+    [/\bbebidas?\s+quentes?\b/gu, "Macro Categoria: BEBIDA QUENTE"],
+    [/\bvendas?\s+varejo\b/gu, "Macro Categoria: VENDA VAREJO"],
+    [/\bsucos?\b/gu, "SUCO"],
+    [/\bvinhos?\b/gu, "VINHO"],
+    [/\bespumantes?\b/gu, "ESPUMANTE"],
+    [/\bvinagres?\b/gu, "VINAGRE"],
+    [/\b(?:graneis|granel)\b/gu, "GRANEL"],
+  ];
+
+  for (const [re, label] of specs) {
+    if (re.test(rest)) {
+      matched.push(label);
+      rest = rest.replace(re, " ");
+    }
+  }
+  return [...new Set(matched)];
+}
+
 function extractCategories(question: string): {
   include: string[];
   exclude: string[];
 } {
   const f = fold(question);
-  const exclude: string[] = [];
-  const include: string[] = [];
 
-  const tokens: [RegExp, string][] = [
-    [/\bsucos?\b/u, "SUCO"],
-    [/\bvinhos?(?!\s+importad)\b/u, "VINHO"],
-    [/\bespumantes?\b/u, "ESPUMANTE"],
-    [/\bvinagres?\b/u, "VINAGRE"],
-    [/\bgran[eé]is?\b|\bgranel\b/u, "GRANEL"],
-  ];
-
-  // Detect explicit exclusion clause (e.g. "excluindo Granel", "sem Granel", "exceto Granel")
-  const excClauseMatch = f.match(/\b(?:exclu\w*|sem|exceto|menos)\s+(?:o\s+)?([^\n,.?!;]+)/u);
+  // Detect explicit exclusion clause (e.g. "excluindo Granel", "sem Granel", "exceto Vinho Importado")
+  const excClauseMatch = f.match(/\b(?:exclu\w*|sem|exceto|menos)\s+(?:os?\s+|as?\s+)?([^\n,.?!;]+)/u);
   const excClause = excClauseMatch?.[1] ?? "";
   const incClause = excClauseMatch ? f.slice(0, excClauseMatch.index) : f;
 
-  for (const [re, label] of tokens) {
-    if (excClause && re.test(excClause)) exclude.push(label);
-    else if (re.test(incClause) && label !== "GRANEL") include.push(label);
-    else if (label === "GRANEL" && /\b(?:apenas|s[oó]|somente)\s+(?:o\s+)?granel\b/u.test(incClause)) {
-      include.push("GRANEL");
-    }
-  }
+  const exclude = extractFromClause(excClause);
+  const include = extractFromClause(incClause);
 
-  return {
-    include: [...new Set(include)],
-    exclude: [...new Set(exclude)],
-  };
+  return { include, exclude };
 }
 
 function mergeFiltersWithQuestion(

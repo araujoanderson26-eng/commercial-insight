@@ -12,7 +12,14 @@ import {
   resolveCsvColumnMap,
   type CsvRole,
 } from "../shared/csv";
+import { filtersSchema, planSchema } from "../shared/domain";
 import { audit, body, fail, json, now, stmt, type DbUser, type Env } from "./core";
+import {
+  askCsvDeterministic,
+  queryCsvOptions,
+  queryCsvReport,
+  reconcileCsvBatch,
+} from "./csv-query";
 
 type CsvEnv = Env & { BUCKET?: R2Bucket; CSV_MAX_FILE_BYTES?: string };
 
@@ -1088,6 +1095,28 @@ export async function csvAdminRoute(req: Request, e: Env, u: DbUser, path: strin
           audit(e, u.id, "csv_lote_ativado", batchId),
         ]);
         return json({ ok: true, mode: "active", activeBatchId: batchId });
+      }
+    }
+
+    const shadowReadMatch = path.match(
+      /^\/admin\/csv\/batches\/([a-f0-9-]{36})\/(reconcile|report|options|ask)$/,
+    );
+    if (shadowReadMatch) {
+      if (u.role !== "admin") fail(403, "Consulta shadow restrita ao administrador.");
+      const [, batchId, op] = shadowReadMatch;
+      if (op === "reconcile" && method === "GET") return json(await reconcileCsvBatch(e, batchId));
+      if (op === "report" && method === "POST") {
+        return json(await queryCsvReport(e, u, batchId, planSchema.parse(await body(req))));
+      }
+      if (op === "options" && method === "POST") {
+        return json(await queryCsvOptions(e, u, batchId, filtersSchema.parse(await body(req))));
+      }
+      if (op === "ask" && method === "POST") {
+        const q = z
+          .object({ question: z.string().trim().min(2).max(900), filters: filtersSchema })
+          .strict()
+          .parse(await body(req));
+        return json(await askCsvDeterministic(e, u, batchId, q.question, q.filters));
       }
     }
 
