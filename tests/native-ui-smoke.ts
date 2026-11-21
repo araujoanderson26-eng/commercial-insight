@@ -70,7 +70,7 @@ try {
   await expect(page.locator(".kpis")).not.toContainText("Margem comercial");
   await page.getByLabel(/^Indicador/).selectOption("gross");
   await expect.poll(() => plans.at(-1)?.metric).toBe("gross");
-  await page.getByRole("button", { name: /^Filtros/ }).click();
+  await page.getByRole("button", { name: /^(Filtros|Consultar filtros)/ }).first().click();
   const dialog = page.getByRole("dialog");
   await expect.poll(() => optionRequests.length).toBeGreaterThan(0);
   await page.clock.install({ time: new Date("2026-11-19T12:00:00Z") });
@@ -83,7 +83,7 @@ try {
   expect(optionRequests.length).toBe(beforeRapidEdits);
   await dialog.getByRole("button", { name: "Fechar", exact: true }).click({ force: true });
   await page.clock.runFor(1000); expect(optionRequests.length).toBe(beforeRapidEdits);
-  await page.getByRole("button", { name: /^Filtros/ }).click({ force: true });
+  await page.getByRole("button", { name: /^(Filtros|Consultar filtros)/ }).first().click({ force: true });
   await dialog.getByLabel("Primeiro mês", { exact: true }).fill("2026-01");
   await dialog.getByLabel("Último mês", { exact: true }).fill("2026-10");
   await page.clock.runFor(299); expect(optionRequests.length).toBe(beforeRapidEdits);
@@ -95,7 +95,7 @@ try {
   await dialog.getByRole("button", { name: "Fechar", exact: true }).click({ force: true });
   await expect.poll(() => cancelledOptions).toBe(1); await expect(page.getByRole("alert")).toHaveCount(0);
   delayOptions = false; await page.clock.resume();
-  await page.getByRole("button", { name: /^Filtros/ }).click();
+  await page.getByRole("button", { name: /^(Filtros|Consultar filtros)/ }).first().click();
   for (const key of ["region", "regional", "state", "manager"] as const) {
     await expect(dialog.locator(`[data-filter-dim="${key}"]`)).toBeVisible();
   }

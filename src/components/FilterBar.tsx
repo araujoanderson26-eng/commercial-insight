@@ -5,8 +5,6 @@ import {
   ChevronDown,
   ChevronUp,
   LoaderCircle,
-  RotateCcw,
-  Search,
   SlidersHorizontal,
   X,
 } from "lucide-react";
@@ -32,7 +30,6 @@ import {
 } from "../lib/cache";
 import {
   activeFilterChips,
-  buildCompactFilterSummary,
   hasAnyActiveFilter,
   periodPresets,
   removeIncompatibleSelections,
@@ -106,93 +103,10 @@ export function FilterBar({
   onOpenSheet: () => void;
 }) {
   const capabilities = sessionCapabilities(s);
-  const scope = makeScope(s);
-  const optKey = optionsCacheKey(filters);
-  const cachedOptions = getCachedSync<OptionsPayload>(scope, optKey);
-  const chips = activeFilterChips(filters, capabilities, cachedOptions?.labels);
-  const summary = buildCompactFilterSummary(filters, capabilities, cachedOptions?.labels);
+  const activeCount = activeFilterChips(filters, capabilities).length;
   const conflicts = detectFilterConflicts(filters);
   const presets = periodPresets();
   const hasAny = hasAnyActiveFilter(filters, capabilities);
-  const activeCount = chips.length;
-
-  const [detailsExpanded, setDetailsExpanded] = useState(false);
-  const [quickQuery, setQuickQuery] = useState("");
-  const [quickItems, setQuickItems] = useState<{ key: string; name: string; hasSalesInPeriod?: boolean }[]>([]);
-  const [quickOpen, setQuickOpen] = useState(false);
-  const quickRef = useRef<HTMLDivElement>(null);
-
-  const quickCascadeFilters = useMemo<Filters>(
-    () => ({ ...filters, client: "", clients: undefined, clientsExclude: undefined }),
-    [filters],
-  );
-  const quickCascadeKey = useMemo(() => canonicalFiltersKey(quickCascadeFilters), [quickCascadeFilters]);
-
-  useEffect(() => {
-    if (s.data?.source !== "manual" || !s.data.ready || !capabilities.filters.includes("client")) {
-      setQuickItems([]);
-      return;
-    }
-    const q = quickQuery.trim();
-    if (q.length < 2) {
-      setQuickItems([]);
-      return;
-    }
-    let alive = true;
-    const controller = new AbortController();
-    const timer = setTimeout(() => {
-      api<{ items: { key: string; name: string; hasSalesInPeriod?: boolean }[] }>(
-        "data/search",
-        "POST",
-        {
-          filters: quickCascadeFilters,
-          dimension: "client",
-          query: q,
-        },
-        controller.signal,
-      )
-        .then((res) => {
-          if (alive) {
-            setQuickItems(res.items.slice(0, 8));
-            setQuickOpen(true);
-          }
-        })
-        .catch(() => {
-          if (alive) setQuickItems([]);
-        });
-    }, 250);
-    return () => {
-      alive = false;
-      clearTimeout(timer);
-      controller.abort();
-    };
-  }, [
-    quickQuery,
-    s.data?.source,
-    s.data?.ready,
-    s.data?.activeVersionId,
-    quickCascadeKey,
-    capabilities.filters,
-  ]);
-
-  useEffect(() => {
-    if (!quickOpen) return;
-    const onPointer = (ev: MouseEvent) => {
-      if (quickRef.current && !quickRef.current.contains(ev.target as Node)) {
-        setQuickOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", onPointer);
-    return () => document.removeEventListener("mousedown", onPointer);
-  }, [quickOpen]);
-
-  useEffect(() => {
-    if (chips.length <= 4 && detailsExpanded) {
-      setDetailsExpanded(false);
-    }
-  }, [chips.length, detailsExpanded]);
-
-  const compactMode = chips.length > 4;
 
   return (
     <div className="smart-filterbar">
@@ -221,139 +135,39 @@ export function FilterBar({
         </div>
 
         <div className="filterbar-actions">
-          {s.data?.source === "manual" &&
-            s.data.ready &&
-            capabilities.filters.includes("client") && (
-              <div className="quick-search-wrap" ref={quickRef}>
-                <label className="quick-search">
-                  <Search size={14} />
-                  <input
-                    type="search"
-                    maxLength={100}
-                    aria-label="Busca rápida de cliente"
-                    placeholder="Buscar cliente…"
-                    value={quickQuery}
-                    onFocus={() => {
-                      if (quickItems.length > 0) setQuickOpen(true);
-                    }}
-                    onChange={(e) => setQuickQuery(e.target.value)}
-                  />
-                </label>
-                {quickOpen && quickItems.length > 0 && (
-                  <div className="quick-search-menu" role="listbox" aria-label="Sugestões de cliente">
-                    {quickItems.map((item) => (
-                      <button
-                        key={item.key}
-                        type="button"
-                        onClick={() => {
-                          onChange({ ...filters, client: item.key, clients: undefined });
-                          setQuickQuery("");
-                          setQuickItems([]);
-                          setQuickOpen(false);
-                        }}
-                      >
-                        <span>{item.name}</span>
-                        {item.hasSalesInPeriod === false && (
-                          <small className="muted"> · Sem venda no período</small>
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-          {hasAny && (
-            <button
-              type="button"
-              className="filter-clear-btn"
-              onClick={() => onChange(defaultFilters())}
-              title="Restaurar período padrão e limpar todos os filtros"
-            >
-              <RotateCcw size={13} />
-              <span>Limpar filtros</span>
-            </button>
-          )}
-
-          <button type="button" onClick={onOpenSheet} className="filterbtn filterbar-open-btn">
+          <button
+            type="button"
+            onClick={onOpenSheet}
+            data-filter-trigger="main"
+            className={hasAny ? "filter-status-btn has-active" : "filter-status-btn"}
+          >
             <SlidersHorizontal size={15} />
-            <span>Filtros</span>
-            {activeCount > 0 && <span className="filter-badge">{activeCount}</span>}
+            <span className="filter-status-label">
+              {hasAny ? "Filtros aplicados — Consultar filtros escolhidos" : "Consultar filtros"}
+            </span>
+            {activeCount > 0 && (
+              <span className="filter-count-pill">
+                {activeCount} {activeCount === 1 ? "filtro ativo" : "filtros ativos"}
+              </span>
+            )}
+            {conflicts.length > 0 && (
+              <span
+                className="filter-conflict-dot"
+                title="Há conflitos entre inclusão e exclusão nos filtros"
+              >
+                <AlertTriangle size={12} />
+                {conflicts.length}
+              </span>
+            )}
           </button>
         </div>
       </div>
-
-      {(chips.length > 0 || conflicts.length > 0) && (
-        <div className="active-filters-area">
-          {compactMode && (
-            <div className="filter-summary-bar" role="status" aria-label="Resumo dos filtros ativos">
-              <span className="filter-summary-text">
-                <strong>{summary.totalCount} filtros ativos:</strong> {summary.summaryText}
-              </span>
-              {conflicts.length > 0 && (
-                <button
-                  type="button"
-                  className="filter-conflict-pill"
-                  onClick={onOpenSheet}
-                  title={conflicts.join(" ")}
-                >
-                  <AlertTriangle size={13} />
-                  <span>{conflicts.length} conflito(s)</span>
-                </button>
-              )}
-              <button
-                type="button"
-                className="filter-link-btn"
-                aria-expanded={detailsExpanded}
-                onClick={() => setDetailsExpanded((v) => !v)}
-              >
-                {detailsExpanded ? "Recolher detalhes" : "Expandir detalhes"}
-              </button>
-            </div>
-          )}
-
-          {!compactMode && conflicts.length > 0 && (
-            <div className="filter-summary-bar" role="status">
-              <button
-                type="button"
-                className="filter-conflict-pill"
-                onClick={onOpenSheet}
-                title={conflicts.join(" ")}
-              >
-                <AlertTriangle size={13} />
-                <span>{conflicts[0]}</span>
-              </button>
-            </div>
-          )}
-
-          {(!compactMode || detailsExpanded) && chips.length > 0 && (
-            <div className="active-chips" aria-label="Filtros ativos">
-              {chips.map((chip) => (
-                <span
-                  className={chip.mode === "exclude" ? "filter-chip exclude" : "filter-chip"}
-                  key={chip.id}
-                >
-                  <span className="filter-chip-label">{chip.label}:</span>
-                  <span className="filter-chip-value">{chip.value}</span>
-                  <button
-                    type="button"
-                    aria-label={`Remover filtro ${chip.label} ${chip.value}`}
-                    onClick={() => onChange(chip.remove(filters))}
-                  >
-                    <X size={12} />
-                  </button>
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
 
       <button
         type="button"
         onClick={onOpenSheet}
         className="filter-fab"
-        aria-label={activeCount > 0 ? `Filtros (${activeCount} ativos)` : "Filtros"}
+        aria-label={activeCount > 0 ? `Filtros (${activeCount} ativos)` : "Consultar filtros"}
       >
         <SlidersHorizontal size={17} />
         <span>Filtros</span>
@@ -398,6 +212,14 @@ export function FilterSheetModal({
   const validKey = useMemo(
     () => (validFilters.success ? canonicalFiltersKey(validFilters.data) : null),
     [validFilters],
+  );
+  const draftCachedOptions = useMemo(
+    () => (validFilters.success ? getCachedSync<OptionsPayload>(scope, optionsCacheKey(validFilters.data)) : null),
+    [scope, validFilters],
+  );
+  const draftChips = useMemo(
+    () => activeFilterChips(f, capabilities, optionsPayload?.labels ?? draftCachedOptions?.labels),
+    [f, capabilities, optionsPayload?.labels, draftCachedOptions?.labels],
   );
 
   useEffect(() => {
@@ -564,6 +386,60 @@ export function FilterSheetModal({
             </div>
           )}
 
+          <section className="sheet-selected-box" aria-label="Filtros escolhidos">
+            <div className="sheet-selected-head">
+              <h3>Filtros escolhidos ({draftChips.length})</h3>
+              {draftChips.length > 0 && (
+                <button
+                  type="button"
+                  className="filter-link-btn"
+                  onClick={() =>
+                    setF((curr) => ({
+                      from: curr.from,
+                      to: curr.to,
+                      region: "",
+                      client: "",
+                      product: "",
+                    }))
+                  }
+                >
+                  Limpar todos
+                </button>
+              )}
+            </div>
+            {draftChips.length > 0 ? (
+              <div className="sheet-selected-list">
+                {draftChips.map((chip) => (
+                  <span
+                    className={
+                      chip.mode === "exclude" ? "sheet-selected-chip exclude" : "sheet-selected-chip"
+                    }
+                    key={chip.id}
+                  >
+                    <span className="sheet-selected-chip-label">
+                      {chip.mode === "exclude" && !chip.label.startsWith("Excluir")
+                        ? `Excluir ${chip.label}`
+                        : chip.label}
+                      :
+                    </span>
+                    <span className="sheet-selected-chip-value">{chip.value}</span>
+                    <button
+                      type="button"
+                      aria-label={`Remover ${chip.label} ${chip.value}`}
+                      onClick={() => setF((curr) => chip.remove(curr))}
+                    >
+                      <X size={12} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <p className="sheet-selected-empty">
+                Nenhum filtro específico selecionado — exibindo todo o escopo autorizado no período.
+              </p>
+            )}
+          </section>
+
           {capabilities.filters.includes("category") &&
             s.data?.source === "manual" &&
             !hasSplitPowerBiCategories && (
@@ -619,6 +495,7 @@ export function FilterSheetModal({
                           dim === "product" ? Boolean(optionsPayload?.meta?.productHasMoreRegistered) : false
                         }
                         incompatibleValues={incList}
+                        truncated={Boolean(optionsPayload?.truncated?.[dim])}
                         searchEndpointSupported={searchSupported}
                         restrictedOptions={restricted}
                         autoFocusSearch={focusClient && dim === "client"}
@@ -724,14 +601,19 @@ export function FilterSheetModal({
           {err && <ErrorBox>{err}</ErrorBox>}
         </div>
 
-        <div className="row spread sheet-footer">
+        <div className="sheet-footer">
           <button type="button" className="soft" onClick={() => setF(defaultFilters())}>
-            Limpar
+            Limpar tudo
           </button>
-          <button className="primary">
-            <Check size={15} />
-            Aplicar filtros
-          </button>
+          <div className="sheet-footer-actions">
+            <button type="button" className="soft" onClick={close}>
+              Cancelar
+            </button>
+            <button type="submit" className="primary">
+              <Check size={15} />
+              Aplicar filtros
+            </button>
+          </div>
         </div>
       </form>
     </dialog>

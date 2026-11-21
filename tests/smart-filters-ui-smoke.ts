@@ -331,11 +331,33 @@ const server = createServer(async (request, response) => {
       return json(computeSyntheticOptions(f));
     }
     if (url.pathname === "/api/data/search") {
-      const { dimension, query } = JSON.parse(body.toString()) as {
+      const { dimension, query, filters: searchFilters } = JSON.parse(body.toString()) as {
         dimension: string;
         query: string;
+        filters?: Filters;
       };
-      const q = query.trim().toLowerCase();
+      const fold = (v: string) =>
+        v.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+      const q = fold(query.trim());
+      if (dimension === "client") {
+        const scopedKeys = searchFilters
+          ? new Set(computeSyntheticOptions(searchFilters).values.client)
+          : null;
+        const seen = new Set<string>();
+        const allClients = ROWS.filter((r) => {
+          if (seen.has(r.client)) return false;
+          seen.add(r.client);
+          return !scopedKeys || scopedKeys.has(r.client);
+        }).map((r) => ({
+          key: r.client,
+          name: `${r.client} — ${r.clientName}`,
+          hasSalesInPeriod: true,
+        }));
+        return json({
+          items: allClients.filter((i) => fold(i.name).includes(q) || fold(i.key).includes(q)),
+          truncated: false,
+        });
+      }
       if (dimension === "product") {
         const all = [
           ...ROWS.map((r) => ({ key: r.product, name: `${r.product} — ${r.productName}`, hasSalesInPeriod: true })),
@@ -345,7 +367,7 @@ const server = createServer(async (request, response) => {
             hasSalesInPeriod: false,
           },
         ];
-        return json({ items: all.filter((i) => i.name.toLowerCase().includes(q)), truncated: false });
+        return json({ items: all.filter((i) => fold(i.name).includes(q)), truncated: false });
       }
       return json({ items: [], truncated: false });
     }
@@ -413,9 +435,23 @@ try {
   page.on("pageerror", (error) => errors.push(error.message));
 
   await page.goto(origin + "/relatorios");
-  await page.getByRole("button", { name: /^Filtros/ }).click();
+
+  // 0. Painel fechado por padrão, nenhum chip na tela principal e aviso discreto "Consultar filtros"
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.locator(".filter-chip")).toHaveCount(0);
+  await expect(page.locator(".active-chips")).toHaveCount(0);
+  const mainTrigger = page.locator('[data-filter-trigger="main"]');
+  await expect(mainTrigger).toContainText("Consultar filtros");
+
+  await mainTrigger.click();
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
+
+  // Desktop: verificar painel lateral ancorado à direita
+  const desktopDrawerBox = await dialog.boundingBox();
+  expect(desktopDrawerBox).not.toBeNull();
+  expect(desktopDrawerBox!.x + desktopDrawerBox!.width).toBeGreaterThanOrEqual(1430);
+  expect(desktopDrawerBox!.height).toBeGreaterThanOrEqual(950);
 
   // 1. Verificar nomes oficiais de Regional (nunca gerentes) vs Gerente Regional separado
   await dialog.locator('[data-filter-dim="regional"]').click();
@@ -434,11 +470,37 @@ try {
   await expect(mgrGroup).toContainText("Renata");
   await dialog.locator('[data-filter-dim="manager"]').click(); // recolhe gerente
 
-  // 2. Multi-select em cascata: Centro-Oeste 1 + São Paulo => UFs AC, MS, MT, RO, SP
+  // 2. Cascata: selecionar Centro-Oeste 1 restringe Clientes apenas ao CO1
   await regionalGroup.locator(".filter-option-row", { hasText: "Centro-Oeste 1" }).locator("input").check();
+  await dialog.locator('[data-filter-dim="client"]').click();
+  const clientGroup = dialog.getByRole("group", { name: "Opções de Cliente" });
+  await expect(clientGroup).toContainText("C_CO1");
+  await expect(clientGroup).toContainText("C_CO4");
+  await expect(clientGroup).not.toContainText("C_SP1");
+  await expect(clientGroup).not.toContainText("C_RJ1");
+  await expect(clientGroup).not.toContainText("C_EX1");
+
+  // Multi-select regional: adicionar São Paulo amplia Clientes para a união (CO1 + SP)
   await regionalGroup.locator(".filter-option-row", { hasText: "São Paulo" }).locator("input").check();
+  await expect(clientGroup).toContainText("C_SP1");
+  await expect(clientGroup).toContainText("C_CO1");
+  await expect(clientGroup).not.toContainText("C_RJ1");
+  await expect(clientGroup).not.toContainText("C_EX1");
+
+  // Multisseleção real de Cliente por pesquisa (código e nome) com checkboxes
+  const clientSearch = dialog.getByLabel("Pesquisar Cliente");
+  await clientSearch.fill("C_CO1");
+  await clientGroup.locator(".filter-option-row", { hasText: "C_CO1" }).locator("input").check();
+  await clientSearch.fill("CO MS");
+  await expect(clientGroup).toContainText("C_CO2");
+  await clientGroup.locator(".filter-option-row", { hasText: "C_CO2" }).locator("input").check();
+  await clientSearch.fill("");
+  const selectedBox = dialog.locator(".sheet-selected-box");
+  await expect(selectedBox).toContainText("C_CO1");
+  await expect(selectedBox).toContainText("C_CO2");
+
   const beforeOpt = optionRequests.length;
-  await expect.poll(() => optionRequests.length, { timeout: 2500 }).toBeGreaterThan(beforeOpt);
+  await expect.poll(() => optionRequests.length, { timeout: 2500 }).toBeGreaterThanOrEqual(beforeOpt);
 
   await dialog.locator('[data-filter-dim="state"]').click();
   const stateGroup = dialog.getByRole("group", { name: "Opções de UF" });
@@ -461,18 +523,16 @@ try {
   const macroGroup = dialog.getByRole("group", { name: "Opções de Macrocategoria" });
   await macroGroup.locator(".filter-option-row", { hasText: "SUCO" }).first().locator("input").check();
 
-  // Alterna para Excluir no card de Macrocategoria
   const macroCard = dialog.getByRole("region", { name: "Filtro Macrocategoria" });
   await macroCard.getByRole("button", { name: /^Excluir/ }).click();
   await macroGroup.locator(".filter-option-row", { hasText: "SUCO CONCENTRADO DE UVA" }).locator("input").check();
 
-  // Seleciona mais 3 dimensões para ultrapassar 4 filtros e validar resumo compacto (>4)
+  // Seleciona Segmento, Canal comercial e Produto cadastrado sem venda
   await dialog.locator('[data-filter-dim="segment"]').click();
   await dialog.getByRole("group", { name: "Opções de Segmento" }).locator(".filter-option-row", { hasText: "Atacado" }).locator("input").check();
   await dialog.locator('[data-filter-dim="channel"]').click();
   await dialog.getByRole("group", { name: "Opções de Canal comercial" }).locator(".filter-option-row", { hasText: "Clientes Canal Direto" }).locator("input").check();
 
-  // Produto: mostrar cadastrados sem venda no período
   await dialog.locator('[data-filter-dim="product"]').click();
   await dialog.getByLabel(/Mostrar cadastrados sem venda no período/).check();
   const prodGroup = dialog.getByRole("group", { name: "Opções de Produto" });
@@ -480,35 +540,71 @@ try {
   await expect(prodGroup).toContainText("Sem venda no período");
   await prodGroup.locator(".filter-option-row", { hasText: "P_SUCO1" }).locator("input").check();
 
+  // Garante painel selecionado visível no topo do drawer para screenshot
+  await dialog.locator(".sheet-body").evaluate((el) => el.scrollTo(0, 0));
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.screenshot({ path: resolve(artifacts, "desktop-open.png") });
+  await page.screenshot({ path: resolve(artifacts, "desktop-drawer-open.png") });
 
-  // 5. Aplicar filtros => modo compacto (>4 filtros) + expandir/recolher + resumo no ReportContext
+  // 5. Aplicar filtros => fecha automaticamente, preserva filtros aplicados e NÃO exibe chips/valores na tela principal
   await dialog.getByRole("button", { name: "Aplicar filtros" }).click();
+  await expect(dialog).toHaveCount(0);
   await expect.poll(() => (plans.at(-1)?.filters.segments ?? []).includes("Atacado")).toBe(true);
+  expect(plans.at(-1)?.filters.clients).toEqual(["C_CO1", "C_CO2"]);
 
-  const summaryBar = page.locator(".filter-summary-bar");
-  await expect(summaryBar).toBeVisible();
-  await expect(summaryBar).toContainText("filtros ativos");
-  await summaryBar.getByRole("button", { name: "Expandir detalhes" }).click();
-  await expect(page.locator(".active-chips")).toBeVisible();
-  await expect(page.locator(".filter-chip.exclude")).toBeVisible();
-  await expect(page.locator(".report-filter-summary")).toContainText("Centro-Oeste 1");
+  await expect(mainTrigger).toContainText("Filtros aplicados — Consultar filtros escolhidos");
+  await expect(mainTrigger).toContainText("filtros ativos");
+  await expect(page.locator(".filter-chip")).toHaveCount(0);
+  await expect(page.locator(".active-chips")).toHaveCount(0);
+  await expect(page.locator(".chart-active-badge")).toHaveCount(0);
+  await expect(page.locator(".report-filter-summary")).not.toBeVisible();
+
+  const barText = await page.locator(".smart-filterbar").innerText();
+  for (const forbiddenLeak of ["Centro-Oeste 1", "C_CO1", "C_CO2", "Atacado", "SUCO", "P_SUCO1"]) {
+    expect(barText).not.toContain(forbiddenLeak);
+  }
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.screenshot({ path: resolve(artifacts, "desktop-summary.png") });
+  await page.screenshot({ path: resolve(artifacts, "desktop-main-active.png") });
 
-  // 6. Validação Android/Mobile em 390x844 e 360x800 (overflow zero + bottom sheet)
-  await page.setViewportSize({ width: 390, height: 844 });
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.screenshot({ path: resolve(artifacts, "mobile-summary.png") });
-
-  await page.locator(".filter-fab").click();
+  // 6. Cancelar alterações não descarta filtros anteriormente aplicados
+  const plansBeforeCancel = plans.length;
+  const activeTextBefore = await mainTrigger.innerText();
+  await mainTrigger.click();
   await expect(dialog).toBeVisible();
-  await dialog.locator('[data-filter-dim="regional"]').click();
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.screenshot({ path: resolve(artifacts, "mobile-sheet.png") });
+  await expect(dialog.locator(".sheet-selected-box")).toContainText("C_CO1");
+  await dialog.getByRole("button", { name: "Limpar tudo" }).click();
+  await expect(dialog.locator(".sheet-selected-box")).toContainText("Nenhum filtro específico selecionado");
+  await dialog.getByRole("button", { name: "Cancelar" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(plans.length).toBe(plansBeforeCancel);
+  expect(await mainTrigger.innerText()).toBe(activeTextBefore);
 
+  // Reabrir confirma que os filtros permanecem preservados
+  await mainTrigger.click();
+  await expect(dialog.locator(".sheet-selected-box")).toContainText("C_CO1");
+  await dialog.getByRole("button", { name: "Cancelar" }).click();
+  await expect(dialog).toHaveCount(0);
+
+  // 7. Validação Android/Mobile em 390x844 e 360x800 (bottom sheet + overflow zero + sem chips)
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(mainTrigger).toContainText("Filtros aplicados — Consultar filtros escolhidos");
+  await expect(page.locator(".filter-chip")).toHaveCount(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: resolve(artifacts, "mobile-main-active.png") });
+
+  await mainTrigger.click();
+  await expect(dialog).toBeVisible();
+  const mobileSheetBox = await dialog.boundingBox();
+  expect(mobileSheetBox).not.toBeNull();
+  expect(mobileSheetBox!.y + mobileSheetBox!.height).toBeGreaterThanOrEqual(838);
+  expect(mobileSheetBox!.y).toBeGreaterThan(20);
+  await dialog.locator('[data-filter-dim="client"]').click();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: resolve(artifacts, "mobile-sheet-open.png") });
+
+  await dialog.getByRole("button", { name: "Cancelar" }).click();
+  await expect(dialog).toHaveCount(0);
   await page.setViewportSize({ width: 360, height: 800 });
+  await expect(mainTrigger).toContainText("Filtros aplicados — Consultar filtros escolhidos");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 
   expect(errors).toEqual([]);

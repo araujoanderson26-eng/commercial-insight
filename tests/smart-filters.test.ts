@@ -740,3 +740,70 @@ function expectArrayMatch(f: Filters) {
   );
   assert.ok(vals.includes("SP") || vals.includes("CENTRO OESTE 1"));
 }
+
+test("Pesquisa e multisseleção de clientes em cascata por código, nome sem acento, múltiplas regionais, categoria e ACL", async (t) => {
+  const { s, admin, repSpUser, clientScopedUser, call } = await setupSyntheticCsvStore();
+  t.after(() => s.sql.close());
+
+  const searchClients = async (query: string, filters: Filters, secret = admin.secret) => {
+    const res = await call(
+      "data/search",
+      "POST",
+      { dimension: "client", query, filters },
+      secret,
+    );
+    assert.equal(res.status, 200);
+    return (await res.json()) as {
+      items: { key: string; name: string; hasSalesInPeriod?: boolean }[];
+      truncated: boolean;
+    };
+  };
+
+  const base: Filters = { from: "2026-01", to: "2026-02", region: "", client: "", product: "" };
+
+  // Busca por nome sem acento ("Atacadao" -> "Atacadão Campinas") e por código ("C_CO_AC")
+  const byAsciiName = await searchClients("Atacadao", base);
+  assert.ok(byAsciiName.items.some((i) => i.key === "C_SP2" && i.hasSalesInPeriod === true));
+
+  const byCode = await searchClients("C_CO_AC", base);
+  assert.deepEqual(byCode.items.map((i) => i.key), ["C_CO_AC"]);
+
+  // Cascata regional única (Centro-Oeste 1): somente clientes da regional
+  const coOnly = await searchClients("SINTETICO", { ...base, regionals: ["CENTRO OESTE 1"] });
+  assert.deepEqual(
+    coOnly.items.map((i) => i.key).sort(),
+    ["C_CO_AC", "C_CO_MT"],
+  );
+
+  // Cascata múltiplas regionais (Centro-Oeste 1 + SP): união dos clientes das duas regionais,
+  // priorizando quem teve venda no período antes de cliente cadastrado sem compra
+  const coAndSp = await searchClients("SINTETICO", { ...base, regionals: ["CENTRO OESTE 1", "SP"] });
+  const coSpKeys = coAndSp.items.map((i) => i.key);
+  assert.equal(coSpKeys.length, 5);
+  assert.ok(["C_CO_AC", "C_CO_MT", "C_SP1", "C_SP2", "C_REG_ZERO"].every((k) => coSpKeys.includes(k)));
+  assert.ok(!coSpKeys.includes("C_SE_RJ"));
+  assert.ok(!coSpKeys.includes("C_EX1"));
+  assert.equal(coAndSp.items.at(-1)?.key, "C_REG_ZERO");
+  assert.equal(coAndSp.items.at(-1)?.hasSalesInPeriod, false);
+
+  // Cascata com filtro factual de categoria (Macrocategoria SUCO em CO1+SP exclui Suco Concentrado e sem venda)
+  const sucoCoSp = await searchClients("SINTETICO", {
+    ...base,
+    regionals: ["CENTRO OESTE 1", "SP"],
+    categoriesInclude: ["Macro Categoria: SUCO"],
+  });
+  assert.deepEqual(
+    sucoCoSp.items.map((i) => i.key).sort(),
+    ["C_SP1", "C_SP2"],
+  );
+
+  // Restrição ACL na pesquisa de clientes
+  const clientScoped = await searchClients("SINTETICO", base, clientScopedUser.secret);
+  assert.deepEqual(clientScoped.items.map((i) => i.key), ["C_CO_AC"]);
+
+  const repOut = await searchClients("C_CO_AC", base, repSpUser.secret);
+  assert.deepEqual(repOut.items, []);
+
+  const repIn = await searchClients("Mercado", base, repSpUser.secret);
+  assert.deepEqual(repIn.items.map((i) => i.key), ["C_SP1"]);
+});

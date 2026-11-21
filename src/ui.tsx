@@ -441,12 +441,12 @@ export function ReportContext({ r }: { r: Report }) {
   return (
     <div className="report-context">
       {r.plan.filters.categoriesInclude?.length || r.plan.filters.categoriesExclude?.length ? (
-        <p>
+        <p className="print-only">
           Incluir: {r.plan.filters.categoriesInclude?.join(", ") || "Todas"}. Excluir:{" "}
           {r.plan.filters.categoriesExclude?.join(", ") || "Nenhuma"}.
         </p>
       ) : null}
-      {activeSummary ? <p className="report-filter-summary">Filtros: {filterLabel(r)}</p> : null}
+      {activeSummary ? <p className="report-filter-summary print-only">Filtros: {filterLabel(r)}</p> : null}
       <span>
         <Info size={12} />
         {r.comparison
@@ -583,11 +583,6 @@ export function Graph({
         <span>
           {metricLabel(metric, capabilities)} · {period(f)}
         </span>
-        {activeFilterValue && (
-          <span className="chart-active-badge">
-            Filtro no gráfico: <b>{activeFilterValue}</b>
-          </span>
-        )}
       </div>
       {data.every((x) => x.atual === null && x.anterior === null) ? (
         <Empty title="Sem valores no recorte">Confira o indicador e os filtros selecionados.</Empty>

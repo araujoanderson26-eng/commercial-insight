@@ -205,6 +205,8 @@ function formatItemLabel(
   return rawKey;
 }
 
+const PAGE_SIZE = 50;
+
 export function DimensionMultiFilter({
   dimension,
   title,
@@ -217,6 +219,7 @@ export function DimensionMultiFilter({
   registeredProducts = [],
   registeredHasMore = false,
   incompatibleValues = [],
+  truncated = false,
   searchEndpointSupported = false,
   restrictedOptions,
   autoFocusSearch = false,
@@ -233,6 +236,7 @@ export function DimensionMultiFilter({
   registeredProducts?: string[];
   registeredHasMore?: boolean;
   incompatibleValues?: string[];
+  truncated?: boolean;
   searchEndpointSupported?: boolean;
   restrictedOptions?: string[];
   autoFocusSearch?: boolean;
@@ -241,8 +245,10 @@ export function DimensionMultiFilter({
   const [mode, setMode] = useState<"include" | "exclude">("include");
   const [searchText, setSearchText] = useState("");
   const [remoteItems, setRemoteItems] = useState<SearchItem[]>([]);
+  const [remoteTruncated, setRemoteTruncated] = useState(false);
   const [searchingRemote, setSearchingRemote] = useState(false);
   const [showRegistered, setShowRegistered] = useState(false);
+  const [visibleLimit, setVisibleLimit] = useState(PAGE_SIZE);
 
   const { include, exclude } = useMemo(
     () => readDimensionSelection(filters, dimension),
@@ -267,6 +273,10 @@ export function DimensionMultiFilter({
   const withoutSelfJson = useMemo(() => JSON.stringify(withoutSelfFilters), [withoutSelfFilters]);
 
   useEffect(() => {
+    setVisibleLimit(PAGE_SIZE);
+  }, [open, searchText, options]);
+
+  useEffect(() => {
     const canSearch =
       open &&
       searchEndpointSupported &&
@@ -275,6 +285,7 @@ export function DimensionMultiFilter({
     const q = searchText.trim();
     if (!canSearch || q.length < 2) {
       setRemoteItems([]);
+      setRemoteTruncated(false);
       setSearchingRemote(false);
       return;
     }
@@ -283,7 +294,7 @@ export function DimensionMultiFilter({
     setSearchingRemote(true);
     const parsedFilters = JSON.parse(withoutSelfJson) as Filters;
     const timer = setTimeout(() => {
-      api<{ items: SearchItem[] }>(
+      api<{ items: SearchItem[]; truncated?: boolean }>(
         "data/search",
         "POST",
         {
@@ -296,12 +307,14 @@ export function DimensionMultiFilter({
         .then((res) => {
           if (alive) {
             setRemoteItems(res.items);
+            setRemoteTruncated(Boolean(res.truncated));
             setSearchingRemote(false);
           }
         })
         .catch(() => {
           if (alive) {
             setRemoteItems([]);
+            setRemoteTruncated(false);
             setSearchingRemote(false);
           }
         });
@@ -359,10 +372,9 @@ export function DimensionMultiFilter({
 
     const qFold = foldSearch(searchText.trim());
     const all = [...byNorm.values()];
-    const filtered = qFold
+    return qFold
       ? all.filter((item) => foldSearch(item.label).includes(qFold) || foldSearch(item.key).includes(qFold))
       : all;
-    return filtered.slice(0, 260);
   }, [
     dimension,
     effectiveOptions,
@@ -374,6 +386,12 @@ export function DimensionMultiFilter({
     labels,
     searchText,
   ]);
+
+  const filteredItems = visibleItems;
+  const pagedItems = useMemo(
+    () => filteredItems.slice(0, visibleLimit),
+    [filteredItems, visibleLimit],
+  );
 
   const toggleItem = (key: string) => {
     const kNorm = normDimKey(dimension, key);
@@ -390,7 +408,7 @@ export function DimensionMultiFilter({
   };
 
   const selectAllVisible = () => {
-    const keysToAdd = visibleItems.map((i) => i.key);
+    const keysToAdd = pagedItems.map((i) => i.key);
     if (!keysToAdd.length) return;
     if (mode === "include") {
       onChangeFilters(writeDimensionSelection(filters, dimension, [...include, ...keysToAdd], exclude));
@@ -489,7 +507,13 @@ export function DimensionMultiFilter({
             <input
               type="search"
               aria-label={`Pesquisar ${title}`}
-              placeholder={`Pesquisar ${title.toLocaleLowerCase("pt-BR")}…`}
+              placeholder={
+                dimension === "client"
+                  ? "Pesquisar por código ou razão social/nome…"
+                  : dimension === "product"
+                    ? "Pesquisar por código ou descrição do produto…"
+                    : `Pesquisar ${title.toLocaleLowerCase("pt-BR")}…`
+              }
               autoFocus={autoFocusSearch}
               value={searchText}
               onChange={(e) => setSearchText(e.target.value)}
@@ -500,10 +524,10 @@ export function DimensionMultiFilter({
             <button
               type="button"
               className="filter-link-btn"
-              disabled={visibleItems.length === 0}
+              disabled={pagedItems.length === 0}
               onClick={selectAllVisible}
             >
-              Selecionar visíveis ({visibleItems.length})
+              Selecionar visíveis ({pagedItems.length})
             </button>
             {activeModeCount > 0 && (
               <button type="button" className="filter-link-btn" onClick={clearCurrentMode}>
@@ -538,54 +562,74 @@ export function DimensionMultiFilter({
           )}
 
           <div className="filter-option-list" role="group" aria-label={`Opções de ${title}`}>
-            {visibleItems.length === 0 ? (
+            {pagedItems.length === 0 ? (
               <p className="filter-option-empty">
                 {searchText.trim()
                   ? "Nenhum item encontrado para a pesquisa."
                   : "Nenhuma opção disponível para o recorte atual."}
               </p>
             ) : (
-              visibleItems.map((item) => {
-                const isInc = incSet.has(item.norm);
-                const isExc = excSet.has(item.norm);
-                const checked = mode === "include" ? isInc : isExc;
-                const isOverlap = isInc && isExc;
-                const isIncompatible = incompSet.has(item.norm);
-                return (
-                  <label
-                    key={item.norm}
-                    className={
-                      isOverlap
-                        ? "filter-option-row overlap"
-                        : isIncompatible
-                          ? "filter-option-row incompatible"
-                          : "filter-option-row"
-                    }
+              <>
+                {pagedItems.map((item) => {
+                  const isInc = incSet.has(item.norm);
+                  const isExc = excSet.has(item.norm);
+                  const checked = mode === "include" ? isInc : isExc;
+                  const isOverlap = isInc && isExc;
+                  const isIncompatible = incompSet.has(item.norm);
+                  return (
+                    <label
+                      key={item.norm}
+                      className={
+                        isOverlap
+                          ? "filter-option-row overlap"
+                          : isIncompatible
+                            ? "filter-option-row incompatible"
+                            : "filter-option-row"
+                      }
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleItem(item.key)}
+                      />
+                      <span className="filter-option-text">{item.label}</span>
+                      <span className="filter-option-badges">
+                        {isOverlap && <span className="filter-option-badge warn">Exclusão prevalece</span>}
+                        {!isOverlap && mode === "include" && isExc && (
+                          <span className="filter-option-badge exclude">Excluído</span>
+                        )}
+                        {!isOverlap && mode === "exclude" && isInc && (
+                          <span className="filter-option-badge include">Incluído</span>
+                        )}
+                        {isIncompatible && <span className="filter-option-badge warn">Fora do recorte</span>}
+                        {item.hasSalesInPeriod === false && (
+                          <span className="filter-option-badge muted">Sem venda no período</span>
+                        )}
+                      </span>
+                    </label>
+                  );
+                })}
+                {filteredItems.length > visibleLimit && (
+                  <button
+                    type="button"
+                    className="filter-load-more-btn"
+                    onClick={() => setVisibleLimit((n) => n + PAGE_SIZE)}
                   >
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => toggleItem(item.key)}
-                    />
-                    <span className="filter-option-text">{item.label}</span>
-                    <span className="filter-option-badges">
-                      {isOverlap && <span className="filter-option-badge warn">Exclusão prevalece</span>}
-                      {!isOverlap && mode === "include" && isExc && (
-                        <span className="filter-option-badge exclude">Excluído</span>
-                      )}
-                      {!isOverlap && mode === "exclude" && isInc && (
-                        <span className="filter-option-badge include">Incluído</span>
-                      )}
-                      {isIncompatible && <span className="filter-option-badge warn">Fora do recorte</span>}
-                      {item.hasSalesInPeriod === false && (
-                        <span className="filter-option-badge muted">Sem venda no período</span>
-                      )}
-                    </span>
-                  </label>
-                );
-              })
+                    Mostrar mais {Math.min(PAGE_SIZE, filteredItems.length - visibleLimit)} (
+                    {pagedItems.length} de {filteredItems.length})
+                  </button>
+                )}
+              </>
             )}
           </div>
+
+          {(truncated || remoteTruncated || filteredItems.length > pagedItems.length) && (
+            <small className="filter-truncated-hint">
+              Exibindo {pagedItems.length} itens
+              {filteredItems.length > pagedItems.length ? ` de ${filteredItems.length}` : ""} no recorte.
+              Use a pesquisa acima para localizar outros itens.
+            </small>
+          )}
 
           {restrictedOptions?.length ? (
             <small className="muted">

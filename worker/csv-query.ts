@@ -970,15 +970,6 @@ export async function searchCsvDimension(
   }
 
   if (dimension === "client") {
-    const clauses = ["c.batch_id=?"];
-    const args: (string | number | null)[] = [batchId];
-    let joinRegions = false;
-    if (acl.allowedRegions.length) {
-      clauses.push(inlineInExpr("c.representative_key", acl.allowedRegions, budget, args));
-    }
-    if (acl.allowedClients.length) {
-      clauses.push(inlineInExpr("c.client_key", acl.allowedClients, budget, args));
-    }
     const reqReps = mergeNormalizedKeys(cleanedFilters.region, cleanedFilters.regions);
     const reqRepsExc = mergeNormalizedKeys(undefined, cleanedFilters.regionsExclude);
     const reqStates = mergeNormalizedKeys(cleanedFilters.state, cleanedFilters.states);
@@ -989,6 +980,98 @@ export async function searchCsvDimension(
     const reqManagersExc = mergeNormalizedKeys(undefined, cleanedFilters.managersExclude);
     const reqSegments = mergeNormalizedKeys(undefined, cleanedFilters.segments);
     const reqSegmentsExc = mergeNormalizedKeys(undefined, cleanedFilters.segmentsExclude);
+    if (
+      allExcluded(reqReps, reqRepsExc) ||
+      allExcluded(reqStates, reqStatesExc) ||
+      allExcluded(reqRegionals, reqRegionalsExc) ||
+      allExcluded(reqManagers, reqManagersExc) ||
+      allExcluded(reqSegments, reqSegmentsExc)
+    ) {
+      return { items: [], truncated: false };
+    }
+
+    const clientSearchDimSql = `(c.client_key LIKE ? ESCAPE '\\' OR c.client_raw LIKE ? ESCAPE '\\' OR COALESCE(c.name,'') LIKE ? ESCAPE '\\' OR ${sqlUpperPt("COALESCE(c.name,'')")} LIKE ? ESCAPE '\\' OR ${sqlFoldAscii("COALESCE(c.name,'')")} LIKE ? ESCAPE '\\')`;
+    const clientSearchArgs = [upperPattern, pattern, pattern, upperPattern, foldedUpperPattern];
+
+    const hasFactFilters = Boolean(
+      cleanedFilters.municipality?.trim() ||
+        cleanedFilters.municipalities?.length ||
+        cleanedFilters.municipalitiesExclude?.length ||
+        cleanedFilters.channels?.length ||
+        cleanedFilters.channelsExclude?.length ||
+        cleanedFilters.brands?.length ||
+        cleanedFilters.brandsExclude?.length ||
+        cleanedFilters.category?.trim() ||
+        cleanedFilters.categoriesInclude?.length ||
+        cleanedFilters.categoriesExclude?.length ||
+        cleanedFilters.product?.trim() ||
+        cleanedFilters.products?.length ||
+        cleanedFilters.productsExclude?.length,
+    );
+
+    if (hasFactFilters) {
+      if (curFrom > curTo) return { items: [], truncated: false };
+      const resolvedGeo = needsRegionDimFilter(cleanedFilters)
+        ? resolveGeoStateKeys(cleanedFilters, await loadRegionStates(e, batchId))
+        : undefined;
+      const w = buildFactWhere(
+        "s",
+        batchId,
+        cleanedFilters,
+        acl,
+        hasCalendar,
+        hasDenormMacro,
+        "client",
+        "single_range",
+        curFrom,
+        curTo,
+        undefined,
+        undefined,
+        false,
+        false,
+        resolvedGeo,
+      );
+      if (w.emptyIntersection) return { items: [], truncated: false };
+      const custJoin = w.joins.includes("ci_dim_customers")
+        ? ""
+        : "LEFT JOIN ci_dim_customers c ON c.batch_id = s.batch_id AND c.client_key = s.client_key";
+      const clientSearchFactSql = `(COALESCE(c.client_key, s.client_key) LIKE ? ESCAPE '\\' OR COALESCE(c.client_raw, s.client_raw, s.client_key) LIKE ? ESCAPE '\\' OR COALESCE(c.name,'') LIKE ? ESCAPE '\\' OR ${sqlUpperPt("COALESCE(c.name,'')")} LIKE ? ESCAPE '\\' OR ${sqlFoldAscii("COALESCE(c.name,'')")} LIKE ? ESCAPE '\\')`;
+      const rows = (
+        await stmt(
+          e,
+          `SELECT DISTINCT COALESCE(c.client_key, s.client_key) AS client_key,
+             COALESCE(c.client_raw, s.client_raw, s.client_key) AS client_raw,
+             c.name
+           FROM ci_fact_sales s ${w.joins} ${custJoin}
+           WHERE ${w.clause} AND COALESCE(c.client_key, s.client_key) IS NOT NULL AND ${clientSearchFactSql}
+           ORDER BY client_key LIMIT 41`,
+          ...w.args,
+          ...clientSearchArgs,
+        ).all<{ client_key: string; client_raw: string; name: string | null }>()
+      ).results;
+      const sliced = rows.slice(0, 40);
+      return {
+        items: sliced.map((r) => {
+          const code = r.client_raw || r.client_key;
+          return {
+            key: r.client_key,
+            name: r.name ? `${code} — ${r.name}` : code,
+            hasSalesInPeriod: true,
+          };
+        }),
+        truncated: rows.length > 40,
+      };
+    }
+
+    const clauses = ["c.batch_id=?"];
+    const args: (string | number | null)[] = [batchId];
+    let joinRegions = false;
+    if (acl.allowedRegions.length) {
+      clauses.push(inlineInExpr("c.representative_key", acl.allowedRegions, budget, args));
+    }
+    if (acl.allowedClients.length) {
+      clauses.push(inlineInExpr("c.client_key", acl.allowedClients, budget, args));
+    }
     if (reqReps.length) clauses.push(inlineInExpr("c.representative_key", reqReps, budget, args));
     if (reqRepsExc.length) clauses.push(inlineInExpr("c.representative_key", reqRepsExc, budget, args, true));
     if (reqStates.length) clauses.push(inlineInExpr("c.state_key", reqStates, budget, args));
@@ -1002,17 +1085,17 @@ export async function searchCsvDimension(
       if (reqManagers.length) clauses.push(inlineInExpr("rg.manager_key", reqManagers, budget, args));
       if (reqManagersExc.length) clauses.push(inlineInExpr("rg.manager_key", reqManagersExc, budget, args, true));
     }
-    clauses.push("(c.client_key LIKE ? ESCAPE '\\' OR c.client_raw LIKE ? ESCAPE '\\' OR COALESCE(c.name,'') LIKE ? ESCAPE '\\')");
-    args.push(upperPattern, pattern, pattern);
+    clauses.push(clientSearchDimSql);
+    args.push(...clientSearchArgs);
     const regJoin = joinRegions ? "LEFT JOIN ci_dim_regions rg ON rg.batch_id=c.batch_id AND rg.state_key=c.state_key" : "";
     const rows = (
       await stmt(
         e,
-        `SELECT c.client_key, c.client_raw, c.name FROM ci_dim_customers c ${regJoin} WHERE ${clauses.join(" AND ")} ORDER BY c.client_key LIMIT 21`,
+        `SELECT c.client_key, c.client_raw, c.name FROM ci_dim_customers c ${regJoin} WHERE ${clauses.join(" AND ")} ORDER BY c.client_key LIMIT 41`,
         ...args,
       ).all<{ client_key: string; client_raw: string; name: string | null }>()
     ).results;
-    const sliced = rows.slice(0, 20);
+    const sliced = rows.slice(0, 40);
     const activeSet = new Set<string>();
     if (sliced.length && curFrom <= curTo) {
       const w = buildFactWhere(
@@ -1034,16 +1117,21 @@ export async function searchCsvDimension(
         for (const h of hits) activeSet.add(h.k);
       }
     }
-    return {
-      items: sliced.map((r) => {
+    const items = sliced
+      .map((r) => {
         const code = r.client_raw || r.client_key;
         return {
           key: r.client_key,
           name: r.name ? `${code} — ${r.name}` : code,
           hasSalesInPeriod: activeSet.has(r.client_key),
         };
-      }),
-      truncated: rows.length > 20,
+      })
+      .sort(
+        (a, b) => Number(b.hasSalesInPeriod) - Number(a.hasSalesInPeriod) || a.key.localeCompare(b.key, "pt-BR"),
+      );
+    return {
+      items,
+      truncated: rows.length > 40,
     };
   }
 
@@ -1062,8 +1150,10 @@ export async function searchCsvDimension(
   if (exc.macros.length) prodClauses.push(inlineInExpr("p.macro_category_key", exc.macros, budget, prodArgs, true));
   if (reqBrands.length) prodClauses.push(inlineInExpr(sqlUpperPt("p.brand"), reqBrands, budget, prodArgs));
   if (reqBrandsExc.length) prodClauses.push(inlineInExpr(sqlUpperPt("p.brand"), reqBrandsExc, budget, prodArgs, true));
-  prodClauses.push("(p.product_key LIKE ? ESCAPE '\\' OR p.product_raw LIKE ? ESCAPE '\\' OR COALESCE(p.description,'') LIKE ? ESCAPE '\\')");
-  prodArgs.push(upperPattern, pattern, pattern);
+  prodClauses.push(
+    `(p.product_key LIKE ? ESCAPE '\\' OR p.product_raw LIKE ? ESCAPE '\\' OR COALESCE(p.description,'') LIKE ? ESCAPE '\\' OR ${sqlUpperPt("COALESCE(p.description,'')")} LIKE ? ESCAPE '\\' OR ${sqlFoldAscii("COALESCE(p.description,'')")} LIKE ? ESCAPE '\\')`,
+  );
+  prodArgs.push(upperPattern, pattern, pattern, upperPattern, foldedUpperPattern);
 
   const rows = (
     await stmt(
