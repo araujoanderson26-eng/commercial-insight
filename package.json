@@ -11,10 +11,13 @@
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.worker.json",
     "lint": "oxlint src worker shared scripts tests --deny-warnings",
     "build": "npm run typecheck && vite build && node scripts/package-preparer.mjs && node scripts/sw.mjs",
-    "build:mobile": "vite build --mode mobile && node scripts/sw.mjs",
+    "build:mobile": "npm run typecheck && node scripts/build-mobile.mjs --env=production",
+    "build:mobile:hml": "npm run typecheck && node scripts/build-mobile.mjs --env=hml",
     "mobile:sync": "npm run build:mobile && npx cap sync",
+    "mobile:sync:hml": "npm run build:mobile:hml && npx cap sync",
     "mobile:android": "npm run mobile:sync && npx cap open android",
     "mobile:ios": "npm run mobile:sync && npx cap open ios",
+    "mobile:apk": "npm run build:mobile && npx cap sync android && node scripts/build-android.mjs --task=assembleDebug",
     "test": "node --import tsx --test tests/*.test.ts",
     "test:ui": "node --import tsx tests/ui-smoke.ts",
     "test:executive": "node --import tsx tests/executive-ui-smoke.ts",
@@ -26,7 +29,12 @@
     "deploy": "node scripts/check-release.mjs && npm run build && wrangler deploy"
   },
   "dependencies": {
+    "@capacitor/app": "^8.1.2",
     "@capacitor/core": "^8.6.2",
+    "@capacitor/filesystem": "^8.1.5",
+    "@capacitor/keyboard": "^8.0.6",
+    "@capacitor/network": "^8.0.1",
+    "@capacitor/share": "^8.0.3",
     "@capacitor/splash-screen": "^8.0.2",
     "@capacitor/status-bar": "^8.0.4",
     "@fontsource-variable/inter": "^5.2.5",
@@ -39,7 +47,10 @@
     "zod": "^4.1.12"
   },
   "devDependencies": {
+    "@capacitor/android": "^8.6.2",
+    "@capacitor/assets": "^4.0.0",
     "@capacitor/cli": "^8.6.2",
+    "@capacitor/ios": "^8.6.2",
     "@cloudflare/workers-types": "5.20261117.1",
     "@playwright/test": "^1.65.1",
     "@tailwindcss/vite": "^4.1.0",

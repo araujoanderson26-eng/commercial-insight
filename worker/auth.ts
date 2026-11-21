@@ -66,6 +66,12 @@ export async function authenticate(e: Env, req: Request, ctx?: ExecutionContext)
   }
   return { user, hash };
 }
+function isCapacitorMobileRequest(e: Env, req: Request) {
+  return (
+    !!allowedMobileOrigin(e, req.headers.get("origin")) &&
+    req.headers.get("x-client-platform") === "capacitor"
+  );
+}
 export async function authRoute(e: Env, req: Request, path: string, ctx: ExecutionContext) {
   const ip = req.headers.get("CF-Connecting-IP") || "local";
   if (path === "login") {
@@ -95,9 +101,11 @@ export async function authRoute(e: Env, req: Request, path: string, ctx: Executi
       ),
       audit(e, u.id, "login"),
     ]);
-    const isCapacitorMobile = !!allowedMobileOrigin(e, req.headers.get("origin"))
-      && req.headers.get("x-client-platform") === "capacitor";
-    return json(isCapacitorMobile ? { ok: true, token: id } : { ok: true }, 200, { "Set-Cookie": cookie(e, id, 8 * 3600) });
+    return json(
+      isCapacitorMobileRequest(e, req) ? { ok: true, token: id, expires } : { ok: true, expires },
+      200,
+      { "Set-Cookie": cookie(e, id, 8 * 3600) },
+    );
   }
   if (path === "forgot") {
     const { email } = z.object({ email: emailSchema }).parse(await body(req));
@@ -180,6 +188,30 @@ export async function authRoute(e: Env, req: Request, path: string, ctx: Executi
     return json({ ok: true });
   }
   const { user, hash } = await authenticate(e, req);
+  if (path === "refresh") {
+    await limit(e, "refresh:" + user.id, 20, 3600);
+    const id = token(),
+      expires = now() + 8 * 3600,
+      ts = now();
+    await e.DB.batch([
+      stmt(
+        e,
+        "INSERT INTO sessions(hash,user_id,version,expires,seen) VALUES(?,?,?,?,?)",
+        await digest(id),
+        user.id,
+        user.version,
+        expires,
+        ts,
+      ),
+      stmt(e, "DELETE FROM sessions WHERE hash=?", hash),
+      audit(e, user.id, "sessao_renovada"),
+    ]);
+    return json(
+      isCapacitorMobileRequest(e, req) ? { ok: true, token: id, expires } : { ok: true, expires },
+      200,
+      { "Set-Cookie": cookie(e, id, 8 * 3600) },
+    );
+  }
   if (path === "password") {
     await limit(e, "password:" + user.id, 6, 900);
     const v = z

@@ -113,7 +113,7 @@ export async function api<T>(
   });
   if (!response.ok) {
     if (response.status === 401 && !["auth/login", "me"].includes(path)) {
-      clearNativeToken();
+      void clearNativeToken();
       void purgeClientCache();
       window.dispatchEvent(new Event("session-ended"));
     }
@@ -228,6 +228,20 @@ export function useReport(plan: Plan, enabled: boolean, refresh = 0, sourceKey =
       };
     }
 
+    if (isNativeApp() && typeof navigator !== "undefined" && !navigator.onLine) {
+      set({
+        data: undefined,
+        error: "Sem conexão com a internet. Os dados comerciais exigem conexão ativa.",
+        loading: false,
+        refreshing: false,
+        fromCache: false,
+      });
+      return () => {
+        alive = false;
+        controller.abort();
+      };
+    }
+
     const syncHit =
       getCachedSync<Report>(scope, key) ??
       projectCompatibleReport(targetPlan, listCachedReportsSync(scope));
@@ -267,8 +281,17 @@ export function useReport(plan: Plan, enabled: boolean, refresh = 0, sourceKey =
       .catch((e) => {
         if (!alive || isAbortError(e)) return;
         set((prev) => {
-          if (prev.data && typeof navigator !== "undefined" && !navigator.onLine) {
+          if (!isNativeApp() && prev.data && typeof navigator !== "undefined" && !navigator.onLine) {
             return { data: prev.data, loading: false, refreshing: false, fromCache: true };
+          }
+          if (isNativeApp() && typeof navigator !== "undefined" && !navigator.onLine) {
+            return {
+              data: undefined,
+              error: "Sem conexão com a internet. Os dados comerciais exigem conexão ativa.",
+              loading: false,
+              refreshing: false,
+              fromCache: false,
+            };
           }
           return {
             data: sameQuery ? prev.data : undefined,

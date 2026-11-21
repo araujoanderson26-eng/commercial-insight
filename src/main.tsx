@@ -4,7 +4,7 @@ import {
   LayoutGrid,
   WifiOff,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import { createRoot } from "react-dom/client";
 import {
   defaultFilters,
@@ -28,7 +28,13 @@ import {
   persistFilters,
   sanitizeFiltersForCapabilities,
 } from "./lib/filter-state";
-import { clearNativeToken, initMobileRuntime } from "./lib/runtime";
+import {
+  clearNativeToken,
+  hydrateNativeSession,
+  initMobileRuntime,
+  isNativeApp,
+  setNativeToken,
+} from "./lib/runtime";
 import Profile from "./Profile";
 import "./style.css";
 import { api, Brand, Credit, Empty, ErrorBox, message, sessionCapabilities } from "./ui";
@@ -40,7 +46,17 @@ const cleanPath = () =>
     ? "atualizacao-dados"
     : location.pathname.split("/")[1] || "inicio";
 
-function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: () => void }) {
+function Shell({
+  s,
+  reload,
+  logout,
+  backHandlerRef,
+}: {
+  s: Session;
+  reload: () => void;
+  logout: () => void;
+  backHandlerRef: MutableRefObject<() => boolean>;
+}) {
   const capabilities = sessionCapabilities(s);
   const [page, V] = useState(cleanPath),
     [filters, F] = useState<Filters>(() => loadInitialFilters(s.user.id, capabilities.filters)),
@@ -50,6 +66,20 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
     [reportGroup, G] = useState<Group>("month"),
     [restoredPlan, RP] = useState<Plan | undefined>();
   const previousPeriodRef = useRef<{ from: string; to: string } | null>(null);
+
+  useEffect(() => {
+    backHandlerRef.current = () => {
+      if (modal) {
+        W("");
+        return true;
+      }
+      if (page !== "inicio") {
+        go("inicio");
+        return true;
+      }
+      return false;
+    };
+  }, [backHandlerRef, modal, page]);
 
   const ready =
       s.data?.ready ?? (s.integrations.configured && (s.integrations.mode === "application" || s.integrations.linked)),
@@ -268,6 +298,7 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
               initialId={null}
               clearSeed={() => S(null)}
               filters={filters}
+              go={go}
             />
           ) : page === "visitas" ? (
             <Visits filters={filters} s={s} />
@@ -388,21 +419,30 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
 }
 
 function App() {
+  const nativeMode = isNativeApp();
   const [s, S] = useState<Session | null>(null),
     [wait, B] = useState(true),
     [err, E] = useState(""),
     [net, N] = useState(navigator.onLine),
     [update, U] = useState<ServiceWorker | null>(null);
   const lastValidatedRef = useRef(0);
+  const backHandlerRef = useRef<() => boolean>(() => false);
+  const refreshInFlightRef = useRef(false);
 
   const clear = (resetCache = true) => {
     S(null);
-    clearNativeToken();
+    void clearNativeToken();
     if (resetCache) void purgeClientCache();
     if (location.pathname !== "/redefinir") history.replaceState({}, "", "/");
   };
 
   async function reload() {
+    if (nativeMode && typeof navigator !== "undefined" && !navigator.onLine) {
+      E("Sem conexão com a internet. Conecte-se para consultar os dados comerciais.");
+      void purgeClientCache();
+      B(false);
+      return;
+    }
     try {
       const v = await api<Session>("me");
       lastValidatedRef.current = Date.now();
@@ -410,7 +450,7 @@ function App() {
       E("");
       S(v);
     } catch (e) {
-      if (!navigator.onLine) {
+      if (!nativeMode && !navigator.onLine) {
         const snap = loadSessionSnapshot();
         if (snap) {
           S(snap);
@@ -422,7 +462,11 @@ function App() {
         !["Entre para continuar.", "Sua sessão terminou. Entre novamente."].includes(message(e))
       ) {
         E(message(e));
-        clear(false);
+        if (nativeMode && !navigator.onLine) {
+          void purgeClientCache();
+        } else {
+          clear(false);
+        }
       } else {
         clear(true);
       }
@@ -432,11 +476,49 @@ function App() {
   }
 
   useEffect(() => {
-    void initMobileRuntime();
-    void reload();
+    let alive = true;
+    let disposeMobile: (() => void) | undefined;
+
+    void (async () => {
+      await hydrateNativeSession();
+      if (!alive) return;
+      disposeMobile = await initMobileRuntime({
+        onNetworkChange: (connected) => {
+          if (!alive) return;
+          N(connected);
+          if (!connected) {
+            if (nativeMode) {
+              void purgeClientCache();
+              E("Sem conexão com a internet. Os dados comerciais exigem conexão ativa.");
+            } else {
+              E("Sem conexão. Exibindo últimos dados em cache quando disponíveis.");
+            }
+          } else {
+            void reload();
+          }
+        },
+        onAppResume: () => {
+          if (alive && Date.now() - lastValidatedRef.current > 15_000) {
+            void reload();
+          }
+        },
+        onBackButton: () => backHandlerRef.current(),
+      });
+      if (!alive) {
+        disposeMobile();
+        return;
+      }
+      void reload();
+    })();
+
     const offline = () => {
       N(false);
-      E("Sem conexão. Exibindo últimos dados em cache quando disponíveis.");
+      if (nativeMode) {
+        void purgeClientCache();
+        E("Sem conexão com a internet. Os dados comerciais exigem conexão ativa.");
+      } else {
+        E("Sem conexão. Exibindo últimos dados em cache quando disponíveis.");
+      }
     };
     const online = () => {
       N(true);
@@ -456,6 +538,8 @@ function App() {
     };
     document.addEventListener("visibilitychange", focus);
     return () => {
+      alive = false;
+      disposeMobile?.();
       window.removeEventListener("offline", offline);
       window.removeEventListener("online", online);
       window.removeEventListener("session-ended", sessionEnded);
@@ -465,12 +549,38 @@ function App() {
 
   useEffect(() => {
     if (!s) return;
-    const t = setTimeout(() => clear(true), Math.max(1, s.expires * 1000 - Date.now()));
-    return () => clearTimeout(t);
-  }, [s]);
+    const msLeft = s.expires * 1000 - Date.now();
+    const t = setTimeout(() => clear(true), Math.max(1, msLeft));
+    const checkRefresh = () => {
+      if (
+        refreshInFlightRef.current ||
+        !navigator.onLine ||
+        s.expires * 1000 - Date.now() > 90 * 60 * 1000
+      ) {
+        return;
+      }
+      refreshInFlightRef.current = true;
+      void api<{ ok: boolean; token?: string; expires?: number }>("auth/refresh", "POST", {})
+        .then(async (res) => {
+          if (nativeMode && res.token) await setNativeToken(res.token);
+          if (res.expires) {
+            S((prev) => (prev ? { ...prev, expires: res.expires! } : prev));
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          refreshInFlightRef.current = false;
+        });
+    };
+    const interval = setInterval(checkRefresh, 60_000);
+    return () => {
+      clearTimeout(t);
+      clearInterval(interval);
+    };
+  }, [nativeMode, s]);
 
   useEffect(() => {
-    if (!("serviceWorker" in navigator) || !import.meta.env.PROD) return;
+    if (nativeMode || !("serviceWorker" in navigator) || !import.meta.env.PROD) return;
     let accepting = false;
     const change = () => {
       if (accepting) location.reload();
@@ -496,17 +606,19 @@ function App() {
       navigator.serviceWorker.removeEventListener("controllerchange", change);
       window.removeEventListener("ci-update", accept);
     };
-  }, []);
+  }, [nativeMode]);
 
   return (
     <>
       {!net && (
-        <div className="net">
+        <div className="net" role="status">
           <WifiOff size={15} />
-          Sem conexão · modo offline limitado ao cache
+          {nativeMode
+            ? "Sem conexão · reconecte-se para consultar os dados"
+            : "Sem conexão · modo offline limitado ao cache"}
         </div>
       )}
-      {update && (
+      {update && !nativeMode && (
         <div className="net">
           Nova versão disponível.{" "}
           <button
@@ -519,7 +631,7 @@ function App() {
           </button>
         </div>
       )}
-      {err && (
+      {err && !(nativeMode && !net) && (
         <ErrorBox>
           {err}{" "}
           <button className="textlink" onClick={reload}>
@@ -529,12 +641,44 @@ function App() {
       )}
       {wait ? (
         <AppBootSkeleton />
+      ) : nativeMode && !net ? (
+        <main className="offline-screen">
+          <section className="panel offline-state" role="status" aria-label="Sem conexão">
+            <div className="mini">
+              <WifiOff size={16} /> Conectividade necessária
+            </div>
+            <h1>Você está sem conexão com a internet</h1>
+            <p>
+              Para proteger as informações comerciais e evitar o uso de números financeiros
+              desatualizados, o Comercial Insight consulta os indicadores online e não mantém base
+              comercial offline no aparelho.
+            </p>
+            <div className="row">
+              <button type="button" className="primary" onClick={() => void reload()}>
+                Tentar reconectar
+              </button>
+              {s && (
+                <button
+                  type="button"
+                  className="soft"
+                  onClick={() => {
+                    void api("auth/logout", "POST", {}).catch(() => {});
+                    clear(true);
+                  }}
+                >
+                  Encerrar sessão
+                </button>
+              )}
+            </div>
+          </section>
+        </main>
       ) : s ? (
         <Shell
           key={s.user.id + "|" + s.policyVersion + "|" + JSON.stringify(s.user)}
           s={s}
           reload={reload}
           logout={() => clear(true)}
+          backHandlerRef={backHandlerRef}
         />
       ) : (
         <Auth done={reload} />

@@ -1,4 +1,5 @@
 import type { Filters, Plan, Report, Session } from "../../shared/domain";
+import { isNativeApp } from "./runtime";
 
 export type CacheKind = "report" | "options";
 
@@ -37,6 +38,7 @@ function touchMemory(record: CacheRecord): void {
 }
 
 function openDb(): Promise<IDBDatabase | null> {
+  if (isNativeApp()) return Promise.resolve(null);
   if (typeof indexedDB === "undefined") return Promise.resolve(null);
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve) => {
@@ -257,6 +259,7 @@ export async function listCachedReports(scope: string): Promise<Report[]> {
 }
 
 export function saveSessionSnapshot(session: Session): void {
+  if (isNativeApp()) return;
   try {
     if (typeof sessionStorage !== "undefined")
       sessionStorage.setItem(SESSION_SNAPSHOT_KEY, JSON.stringify(session));
@@ -266,6 +269,7 @@ export function saveSessionSnapshot(session: Session): void {
 }
 
 export function loadSessionSnapshot(): Session | null {
+  if (isNativeApp()) return null;
   try {
     if (typeof sessionStorage === "undefined") return null;
     const raw = sessionStorage.getItem(SESSION_SNAPSHOT_KEY);
@@ -288,6 +292,13 @@ export async function purgeClientCache(): Promise<void> {
     if (typeof sessionStorage !== "undefined") sessionStorage.removeItem(SESSION_SNAPSHOT_KEY);
   } catch {
     // Ignore storage errors.
+  }
+  if (isNativeApp() && typeof indexedDB !== "undefined") {
+    try {
+      indexedDB.deleteDatabase(DB_NAME);
+    } catch {
+      // Ignore cleanup failures.
+    }
   }
   const db = await openDb();
   if (!db) return;

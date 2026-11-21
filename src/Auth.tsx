@@ -22,7 +22,7 @@ export default function Auth({ done }: { done: () => void }) {
           email,
           password: pw,
         });
-        if (isNativeApp() && loginRes?.token) setNativeToken(loginRes.token);
+        if (isNativeApp() && loginRes?.token) await setNativeToken(loginRes.token);
         if (location.pathname === "/redefinir") history.replaceState({}, "", "/");
         done();
       } else if (mode === "forgot") {
@@ -91,8 +91,10 @@ export default function Auth({ done }: { done: () => void }) {
                 E-mail corporativo
                 <input
                   type="email"
+                  inputMode="email"
                   required
                   autoComplete="username"
+                  enterKeyHint={mode === "login" ? "next" : "go"}
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="voce@empresa.com.br"

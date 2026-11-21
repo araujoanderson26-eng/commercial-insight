@@ -2,6 +2,8 @@ import { change, pretty, metrics, type Metric, type Report } from '../shared/dom
 import type { VisitBriefing } from '../shared/commercial';
 import { availableMetrics, dateLabel, filterLabel, metricLabel, reportContext } from './export-model';
 import { escapeXml as e } from './xlsx-layout';
+import { isNativeApp } from './lib/runtime';
+import { isUserShareCancel, printOrShareNativeHtml } from './lib/native-files';
 const text = (v: string) => e(v);
 const pct = (r: Report, m: Metric, row = r.total) => { const p = row.values[m], v = change(p, m); return v === null ? (p.current === null || p.previous === null ? 'Indisponível' : 'Não comparável') : (v > 0 ? '+' : '') + v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + (m === 'margin' ? ' p.p.' : '%'); };
 const tone = (m: Metric, current: number | null, previous: number | null) => current === null || previous === null || current === previous ? '' : (current > previous) === metrics[m].up ? 'good' : 'bad';
@@ -32,6 +34,20 @@ export function executivePrintHtml(r: Report, visit?: VisitBriefing) {
     return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Commercial Insight · Relatório Comercial</title><style>${css}</style></head><body>${cover}${charts}${reports.map(([title, report]) => detail(report, title)).join('')}${pauta}</body></html>`;
 }
 export function printReport(r: Report, visit?: VisitBriefing) {
+    const html = executivePrintHtml(r, visit);
+    if (isNativeApp()) {
+        const suffix = visit ? 'visita-' + visit.client.code : r.plan.filters.to;
+        void printOrShareNativeHtml({
+            html,
+            filename: 'commercial-insight-' + suffix,
+            jobName: 'Comercial Insight · Relatório Comercial',
+        }).catch((err) => {
+            if (!isUserShareCancel(err)) {
+                window.alert(err instanceof Error ? err.message : 'Não foi possível gerar a visualização em PDF.');
+            }
+        });
+        return;
+    }
     const popup = window.open('about:blank', '_blank');
     if (!popup) {
         window.alert('Permita a janela de impressão deste site para gerar o PDF.');
@@ -39,7 +55,7 @@ export function printReport(r: Report, visit?: VisitBriefing) {
     }
     popup.opener = null;
     popup.document.open();
-    popup.document.write(executivePrintHtml(r, visit));
+    popup.document.write(html);
     popup.document.close();
     void popup.document.fonts.ready.then(() => { popup.focus(); popup.print(); });
 }

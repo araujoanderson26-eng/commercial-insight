@@ -2279,12 +2279,61 @@ dialog.filter-sheet {
   color: #6a7890;
   margin-top: 6px;
 }
+.offline-screen {
+  min-height: 100svh;
+  display: grid;
+  place-items: center;
+  padding: calc(24px + var(--sat)) calc(18px + var(--sar)) calc(24px + var(--sab)) calc(18px + var(--sal));
+  background: #f3f5fa;
+}
+.offline-state {
+  max-width: 460px;
+  width: 100%;
+  display: grid;
+  gap: 14px;
+  text-align: left;
+  border-top: 4px solid #091c36;
+}
+.offline-state h1 {
+  font-size: 24px;
+  color: #091c36;
+  margin: 0;
+}
+.offline-state p {
+  margin: 0;
+  color: #4f5e75;
+  line-height: 1.65;
+}
+html.native-app body.keyboard-open .mobilebar,
+html.native-app body.keyboard-open .filter-fab {
+  display: none !important;
+}
+html.native-app body.keyboard-open .composer {
+  bottom: calc(8px + var(--sab));
+}
 
 @media (max-width: 760px) {
   .net {
     padding-top: calc(10px + var(--sat));
     padding-left: calc(15px + var(--sal));
     padding-right: calc(15px + var(--sar));
+  }
+  .topbar {
+    padding-top: calc(10px + var(--sat));
+    padding-left: calc(12px + var(--sal));
+    padding-right: calc(12px + var(--sar));
+  }
+  .mobilebar button {
+    min-height: 44px;
+  }
+  .kpis,
+  .cards,
+  .analytics,
+  .chartwrap,
+  .panel,
+  .answer {
+    min-width: 0;
+    max-width: 100%;
   }
   .filterbar-open-btn,
   .quick-search-wrap {

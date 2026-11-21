@@ -51,7 +51,8 @@
     "PRODUCTION_AI_BUDGET": "true",
     "RETENTION_DAYS": "90",
     "MANUAL_MAX_BYTES": "536870912",
-    "MANUAL_D1_CAPACITY_BYTES": "9663676416"
+    "MANUAL_D1_CAPACITY_BYTES": "9663676416",
+    "MOBILE_ORIGINS": "capacitor://localhost,https://localhost"
   },
 
   "observability": {

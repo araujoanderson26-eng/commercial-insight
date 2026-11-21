@@ -150,11 +150,13 @@ export default function Chat({
   seed,
   initialId,
   clearSeed,
+  go,
 }: {
   filters: Filters;
   seed: Seed | null;
   initialId: string | null;
   clearSeed: () => void;
+  go?: (page: string) => void;
 }) {
   const [id, I] = useState<string | null>(initialId),
     [turns, T] = useState<Turn[]>([]),
@@ -345,8 +347,30 @@ export default function Chat({
                     : "Você pode consultar os relatórios e preparar uma visita com os dados autorizados."}
                 </p>
                 <div className="report-actions">
-                  <a className="soft compact" href="/relatorios">Abrir relatórios</a>
-                  <a className="soft compact" href="/visitas">Preparar visita</a>
+                  <a
+                    className="soft compact"
+                    href="/relatorios"
+                    onClick={(ev) => {
+                      if (go) {
+                        ev.preventDefault();
+                        go("relatorios");
+                      }
+                    }}
+                  >
+                    Abrir relatórios
+                  </a>
+                  <a
+                    className="soft compact"
+                    href="/visitas"
+                    onClick={(ev) => {
+                      if (go) {
+                        ev.preventDefault();
+                        go("visitas");
+                      }
+                    }}
+                  >
+                    Preparar visita
+                  </a>
                 </div>
               </>
             )}

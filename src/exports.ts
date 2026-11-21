@@ -2,6 +2,8 @@ import type { Report } from "../shared/domain";
 import { workbookParts } from "./xlsx-layout";
 import type { ExportSheet } from "./export-model";
 import { reportSheet } from "./export-model";
+import { isNativeApp } from "./lib/runtime";
+import { isUserShareCancel, shareNativeFile } from "./lib/native-files";
 export { reportSheet } from "./export-model";
 const encoder = new TextEncoder();
 function crc32(bytes: Uint8Array) {
@@ -59,5 +61,29 @@ function zip(files: Record<string, string>): Uint8Array {
 }
 /** Pure browser-compatible Open XML writer, with no runtime library or network calls. */
 export function makeWorkbook(sheets: ExportSheet[]): Uint8Array { return zip(workbookParts(sheets)); }
-export function downloadWorkbook(sheets: ExportSheet[], filename: string) { const bytes = makeWorkbook(sheets), buffer = new ArrayBuffer(bytes.length); new Uint8Array(buffer).set(bytes); const url = URL.createObjectURL(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })); const link = document.createElement('a'); link.href = url; link.download = filename + '.xlsx'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
+export function downloadWorkbook(sheets: ExportSheet[], filename: string) {
+  const bytes = makeWorkbook(sheets);
+  if (isNativeApp()) {
+    void shareNativeFile({
+      filename: filename + ".xlsx",
+      bytes,
+      title: "Relatório Excel · Comercial Insight",
+    }).catch((err) => {
+      if (!isUserShareCancel(err)) {
+        window.alert(err instanceof Error ? err.message : "Não foi possível compartilhar a planilha.");
+      }
+    });
+    return;
+  }
+  const buffer = new ArrayBuffer(bytes.length);
+  new Uint8Array(buffer).set(bytes);
+  const url = URL.createObjectURL(
+    new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
+  );
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename + ".xlsx";
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 export function exportReport(report: Report) { downloadWorkbook([reportSheet(report), { name: 'Contexto', rows: [['Fonte', report.source], ['Período', report.plan.filters.from + ' a ' + report.plan.filters.to], ['Extração', report.sourceInfo?.extractedAt ?? report.asOf], ['Versão', report.sourceInfo?.versionId ?? 'Consulta online'], ['Filtros', JSON.stringify(report.plan.filters)], ['Limites', report.truncated ? 'Ranking limitado; total oficial do recorte autorizado.' : 'Registros retornados pela consulta.'], ['Indisponíveis', 'Células vazias não equivalem a zero. Percentual exige base anterior positiva.']] }], 'commercial-insight-' + report.plan.filters.to); }

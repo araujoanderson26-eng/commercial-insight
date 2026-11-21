@@ -2,6 +2,7 @@ import { KeyRound, Link2, LogOut, ShieldCheck, UserCircle } from "lucide-react";
 import { useState } from "react";
 import { roles, type Session } from "../shared/domain";
 import { api, ErrorBox, message } from "./ui";
+import { appEnvironmentLabel, isNativeApp } from "./lib/runtime";
 export default function Profile({
   s,
   logout,
@@ -65,6 +66,11 @@ export default function Profile({
           <Link2 size={14} /> Fonte de dados
         </div>
         <h2>{s.data?.source === "manual" ? "Arquivo manual no D1" : "Microsoft Power BI"}</h2>
+        {isNativeApp() && (
+          <p className="sub">
+            Aplicativo móvel conectado em HTTPS · ambiente: <b>{appEnvironmentLabel()}</b>.
+          </p>
+        )}
         {s.data?.source === "manual" && <p className="sub">A consulta usa o login deste aplicativo. O vínculo Microsoft fica disponível para uso futuro do conector online.</p>}
         <p className="sub">
           {!s.integrations.configured
@@ -75,7 +81,7 @@ export default function Profile({
                 ? "Sua conta Microsoft está vinculada."
                 : "Vincule sua conta corporativa para consultar o modelo."}
         </p>
-        {s.integrations.configured && s.integrations.mode === "delegated" && (
+        {s.integrations.configured && s.integrations.mode === "delegated" && !isNativeApp() && (
           <button
             className="soft"
             disabled={busy}
