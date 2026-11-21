@@ -92,9 +92,35 @@ export function canonicalFiltersKey(filters: Filters): string {
     regional: filters.regional ?? "",
     state: filters.state ?? "",
     manager: filters.manager ?? "",
+    municipality: filters.municipality ?? "",
     category: filters.category ?? "",
     categoriesInclude: sortedArray(filters.categoriesInclude),
     categoriesExclude: sortedArray(filters.categoriesExclude),
+    regions: sortedArray(filters.regions),
+    regionsExclude: sortedArray(filters.regionsExclude),
+    regionals: sortedArray(filters.regionals),
+    regionalsExclude: sortedArray(filters.regionalsExclude),
+    states: sortedArray(filters.states),
+    statesExclude: sortedArray(filters.statesExclude),
+    managers: sortedArray(filters.managers),
+    managersExclude: sortedArray(filters.managersExclude),
+    municipalities: sortedArray(filters.municipalities),
+    municipalitiesExclude: sortedArray(filters.municipalitiesExclude),
+    clients: sortedArray(filters.clients),
+    clientsExclude: sortedArray(filters.clientsExclude),
+    products: sortedArray(filters.products),
+    productsExclude: sortedArray(filters.productsExclude),
+    channels: sortedArray(filters.channels),
+    channelsExclude: sortedArray(filters.channelsExclude),
+    segments: sortedArray(filters.segments),
+    segmentsExclude: sortedArray(filters.segmentsExclude),
+    brands: sortedArray(filters.brands),
+    brandsExclude: sortedArray(filters.brandsExclude),
+    revenueMin: filters.revenueMin ?? null,
+    revenueMax: filters.revenueMax ?? null,
+    ticketMin: filters.ticketMin ?? null,
+    ticketMax: filters.ticketMax ?? null,
+    variationDirection: filters.variationDirection ?? "all",
   });
 }
 
@@ -103,12 +129,7 @@ export function canonicalPlanKey(plan: Plan): string {
 }
 
 export function optionsCacheKey(filters: Filters): string {
-  return `options:${canonicalFiltersKey({
-    ...filters,
-    category: "",
-    categoriesInclude: [],
-    categoriesExclude: [],
-  })}`;
+  return `options:v2:${canonicalFiltersKey(filters)}`;
 }
 
 export function getCachedSync<T>(scope: string, key: string): T | null {

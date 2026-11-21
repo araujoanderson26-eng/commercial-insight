@@ -28,13 +28,70 @@ export const groups = {
 export type Group = keyof typeof groups;
 export const filterDimensions = ["region", "client", "product", "category", "regional", "state", "manager"] as const;
 export type FilterDimension = typeof filterDimensions[number];
+export const extendedFilterDimensions = [
+  "regional",
+  "manager",
+  "region",
+  "state",
+  "municipality",
+  "client",
+  "product",
+  "macroCategory",
+  "itemGroup",
+  "channel",
+  "brand",
+  "segment",
+] as const;
+export type ExtendedFilterDimension = typeof extendedFilterDimensions[number];
+export type ExtraFilterCapability = "municipality" | "channel" | "brand" | "segment" | "macroCategory" | "itemGroup";
 export type DataCapabilities = {
   metrics: Metric[];
   groups: Group[];
   filters: FilterDimension[];
-  labels?: Partial<Record<FilterDimension | Group | Metric, string>>;
+  extraFilters?: ExtraFilterCapability[];
+  labels?: Partial<Record<FilterDimension | ExtendedFilterDimension | Group | Metric, string>>;
   unavailable?: Partial<Record<FilterDimension | Group, string>>;
 };
+export const OFFICIAL_REGIONAL_LABELS: Record<string, string> = {
+  SP: "São Paulo",
+  "SUDESTE 1": "Sudeste 1",
+  "SUDESTE 2": "Sudeste 2",
+  "SUL 1": "Sul 1",
+  "SUL 2": "Sul 2",
+  "CENTRO OESTE 1": "Centro-Oeste 1",
+  "CENTRO OESTE 2": "Centro-Oeste 2",
+  NORTE: "Norte",
+  NORDESTE: "Nordeste",
+  EX: "Exportação (EX)",
+};
+export function normalizeRegionalKey(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  const trimmed = value.normalize("NFC").trim();
+  if (!trimmed) return null;
+  const ascii = trimmed
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toUpperCase();
+  if (ascii === "SP" || ascii === "SAO PAULO") return "SP";
+  if (ascii === "CENTRO OESTE 1") return "CENTRO OESTE 1";
+  if (ascii === "CENTRO OESTE 2") return "CENTRO OESTE 2";
+  if (ascii === "EX" || ascii === "EXPORTACAO" || ascii === "EXPORTACAO (EX)") return "EX";
+  if (ascii === "SUDESTE 1" || ascii === "SUDESTE 2" || ascii === "SUL 1" || ascii === "SUL 2" || ascii === "NORTE" || ascii === "NORDESTE") {
+    return ascii;
+  }
+  return trimmed.toLocaleUpperCase("pt-BR");
+}
+export function formatOfficialRegionalName(keyOrRaw: string | null | undefined): string {
+  if (keyOrRaw == null) return "";
+  const trimmed = keyOrRaw.normalize("NFC").trim();
+  if (!trimmed) return "";
+  const key = normalizeRegionalKey(trimmed);
+  if (key && OFFICIAL_REGIONAL_LABELS[key]) return OFFICIAL_REGIONAL_LABELS[key];
+  return trimmed;
+}
 export const metricKeys = Object.keys(metrics) as Metric[];
 export const dateRE = /^\d{4}-(0[1-9]|1[0-2])$/;
 const month = z
@@ -53,18 +110,30 @@ export const filtersSchema = z
     regional: z.string().trim().max(140).optional(),
     state: z.string().trim().max(140).optional(),
     manager: z.string().trim().max(140).optional(),
+    municipality: z.string().trim().max(140).optional(),
     category: z.string().trim().max(140).optional(),
     categoriesInclude: multiVal,
     categoriesExclude: multiVal,
     regions: multiVal,
+    regionsExclude: multiVal,
     regionals: multiVal,
+    regionalsExclude: multiVal,
     states: multiVal,
+    statesExclude: multiVal,
     managers: multiVal,
+    managersExclude: multiVal,
+    municipalities: multiVal,
+    municipalitiesExclude: multiVal,
     clients: multiVal,
+    clientsExclude: multiVal,
     products: multiVal,
+    productsExclude: multiVal,
     channels: multiVal,
+    channelsExclude: multiVal,
     segments: multiVal,
+    segmentsExclude: multiVal,
     brands: multiVal,
+    brandsExclude: multiVal,
     revenueMin: z.number().finite().optional(),
     revenueMax: z.number().finite().optional(),
     ticketMin: z.number().finite().optional(),
@@ -92,8 +161,11 @@ export function detectFilterConflicts(filters: Filters): string[] {
   const exc = new Set((filters.categoriesExclude ?? []).map(fold));
   const overlap = [...inc].filter((v) => exc.has(v));
   if (overlap.length) {
+    const prettyOverlap = overlap.map((v) =>
+      v.startsWith("MACRO CATEGORIA: ") ? `Macrocategoria: ${v.slice(17)}` : v,
+    );
     conflicts.push(
-      `Categoria selecionada para incluir e excluir simultaneamente (${overlap.join(", ")}): a exclusão prevalece no resultado.`,
+      `Categoria selecionada para incluir e excluir simultaneamente (${prettyOverlap.join(", ")}): a exclusão prevalece no resultado.`,
     );
   }
   if (filters.category && exc.has(fold(filters.category))) {
@@ -101,6 +173,48 @@ export function detectFilterConflicts(filters: Filters): string[] {
       `A categoria selecionada (${filters.category}) está também marcada para exclusão: a exclusão prevalece.`,
     );
   }
+  const checkOverlap = (
+    label: string,
+    singleVal: string | undefined,
+    incList: string[] | undefined,
+    excList: string[] | undefined,
+    norm: (v: string) => string = fold,
+    fmt: (v: string) => string = (v) => v,
+  ) => {
+    const excSet = new Set((excList ?? []).map(norm).filter(Boolean));
+    if (!excSet.size) return;
+    const matched: string[] = [];
+    const seen = new Set<string>();
+    for (const raw of [...(singleVal ? [singleVal] : []), ...(incList ?? [])]) {
+      const k = norm(raw);
+      if (k && excSet.has(k) && !seen.has(k)) {
+        seen.add(k);
+        matched.push(fmt(raw));
+      }
+    }
+    if (matched.length) {
+      conflicts.push(
+        `${label} com item selecionado para incluir e excluir simultaneamente (${matched.join(", ")}): a exclusão prevalece no resultado.`,
+      );
+    }
+  };
+  checkOverlap(
+    "Regional",
+    filters.regional,
+    filters.regionals,
+    filters.regionalsExclude,
+    (v) => normalizeRegionalKey(v) ?? fold(v),
+    (v) => formatOfficialRegionalName(v),
+  );
+  checkOverlap("Gerente Regional", filters.manager, filters.managers, filters.managersExclude);
+  checkOverlap("Representante", filters.region, filters.regions, filters.regionsExclude);
+  checkOverlap("UF", filters.state, filters.states, filters.statesExclude);
+  checkOverlap("Município", filters.municipality, filters.municipalities, filters.municipalitiesExclude);
+  checkOverlap("Cliente", filters.client, filters.clients, filters.clientsExclude);
+  checkOverlap("Produto", filters.product, filters.products, filters.productsExclude);
+  checkOverlap("Canal comercial", undefined, filters.channels, filters.channelsExclude);
+  checkOverlap("Marca", undefined, filters.brands, filters.brandsExclude);
+  checkOverlap("Segmento", undefined, filters.segments, filters.segmentsExclude);
   if (filters.revenueMin !== undefined && filters.revenueMax !== undefined && filters.revenueMin > filters.revenueMax) {
     conflicts.push("Faixa de faturamento conflitante: valor mínimo maior que o máximo.");
   }

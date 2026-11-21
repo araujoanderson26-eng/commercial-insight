@@ -42,8 +42,9 @@ const cleanPath = () =>
 
 function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: () => void }) {
   const capabilities = sessionCapabilities(s);
+  const supportedExtraJson = JSON.stringify(capabilities.extraFilters ?? null);
   const [page, V] = useState(cleanPath),
-    [filters, F] = useState<Filters>(() => loadInitialFilters(s.user.id, capabilities.filters)),
+    [filters, F] = useState<Filters>(() => loadInitialFilters(s.user.id, capabilities.filters, capabilities.extraFilters)),
     [modal, W] = useState(""),
     [seed, S] = useState<Seed | null>(null),
     [chatKey, K] = useState(0),
@@ -64,16 +65,18 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
   const sourceFilters = JSON.stringify(capabilities.filters);
   useEffect(() => {
     const supported = JSON.parse(sourceFilters) as FilterDimension[];
+    const supportedExtra = JSON.parse(supportedExtraJson) as typeof capabilities.extraFilters;
     F((current) => {
-      const next = sanitizeFiltersForCapabilities(current, supported);
+      const next = sanitizeFiltersForCapabilities(current, supported, supportedExtra);
       return JSON.stringify(next) === JSON.stringify(current) ? current : next;
     });
-  }, [sourceFilters]);
+  }, [sourceFilters, supportedExtraJson]);
 
   useEffect(() => {
     const supported = JSON.parse(sourceFilters) as FilterDimension[];
-    persistFilters(s.user.id, filters, supported);
-  }, [s.user.id, filters, sourceFilters]);
+    const supportedExtra = JSON.parse(supportedExtraJson) as typeof capabilities.extraFilters;
+    persistFilters(s.user.id, filters, supported, supportedExtra);
+  }, [s.user.id, filters, sourceFilters, supportedExtraJson]);
 
   function go(p: string) {
     W("");
@@ -120,10 +123,27 @@ function Shell({ s, reload, logout }: { s: Session; reload: () => void; logout: 
       });
       return;
     }
-    F((current) => ({
-      ...current,
-      [dimension]: current[dimension] === value ? "" : value,
-    }));
+    const multiKeyMap: Partial<
+      Record<FilterDimension, keyof Pick<Filters, "regions" | "clients" | "products" | "regionals" | "states" | "managers">>
+    > = {
+      region: "regions",
+      client: "clients",
+      product: "products",
+      regional: "regionals",
+      state: "states",
+      manager: "managers",
+    };
+    const multiKey = multiKeyMap[dimension];
+    F((current) => {
+      const existingSingle = current[dimension] || "";
+      const existingMulti = multiKey ? current[multiKey] ?? [] : [];
+      const isSame = existingSingle === value || (existingMulti.length === 1 && existingMulti[0] === value);
+      return {
+        ...current,
+        [dimension]: isSame ? "" : value,
+        ...(multiKey ? { [multiKey]: undefined } : {}),
+      };
+    });
   }
 
   function chat(question: string, send: boolean) {

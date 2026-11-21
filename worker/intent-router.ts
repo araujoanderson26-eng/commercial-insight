@@ -1,4 +1,4 @@
-import type { DataCapabilities, Filters, Group, Metric, Plan } from "../shared/domain";
+import { normalizeRegionalKey, type DataCapabilities, type Filters, type Group, type Metric, type Plan } from "../shared/domain";
 import { canonicalState } from "./assistant";
 import { isVisitRequest } from "./commercial";
 import { fail } from "./core";
@@ -164,6 +164,30 @@ function extractCategories(question: string): {
   return { include, exclude };
 }
 
+function detectRegional(question: string, capabilities?: DataCapabilities): string | undefined {
+  const f = fold(question);
+  const candidates: [RegExp, string][] = [
+    [/\bcentro[-\s]?oeste\s*1\b/u, "CENTRO OESTE 1"],
+    [/\bcentro[-\s]?oeste\s*2\b/u, "CENTRO OESTE 2"],
+    [/\bsudeste\s*1\b/u, "SUDESTE 1"],
+    [/\bsudeste\s*2\b/u, "SUDESTE 2"],
+    [/\bsul\s*1\b/u, "SUL 1"],
+    [/\bsul\s*2\b/u, "SUL 2"],
+    [/\bregional\s+sao\s+paulo\b|\bregional\s+sp\b/u, "SP"],
+    [/\bregional\s+nordeste\b/u, "NORDESTE"],
+    [/\bregional\s+norte\b/u, "NORTE"],
+  ];
+  const matched = candidates.filter(([re]) => re.test(f)).map(([, key]) => key);
+  if (!matched.length) return undefined;
+  if (matched.length > 1) {
+    fail(422, "A pergunta menciona mais de uma regional. Selecione as regionais nos filtros para combiná-las.");
+  }
+  if (capabilities && !capabilities.filters.includes("regional")) {
+    fail(422, "Esta fonte não tem filtro por Regional validado.");
+  }
+  return matched[0];
+}
+
 function mergeFiltersWithQuestion(
   question: string,
   active: Filters,
@@ -173,9 +197,13 @@ function mergeFiltersWithQuestion(
 ): Filters {
   const period = extractPeriod(question, active);
   const mentionedState = detectState(question, capabilities);
+  const mentionedRegional = detectRegional(question, capabilities);
 
-  if (mentionedState && active.state && canonicalState(active.state) !== mentionedState) {
+  if (mentionedState && ((active.state && canonicalState(active.state) !== mentionedState) || (active.states?.length && !active.states.some((s) => canonicalState(s) === mentionedState)))) {
     fail(422, "Altere o filtro ativo de UF para analisar outro estado.");
+  }
+  if (mentionedRegional && ((active.regional && normalizeRegionalKey(active.regional) !== mentionedRegional) || (active.regionals?.length && !active.regionals.some((r) => normalizeRegionalKey(r) === mentionedRegional)))) {
+    fail(422, "Altere o filtro ativo de Regional para analisar outra regional.");
   }
 
   const next: Filters = {
@@ -183,6 +211,7 @@ function mergeFiltersWithQuestion(
     from: period.from,
     to: period.to,
     ...(mentionedState ? { state: mentionedState } : {}),
+    ...(mentionedRegional ? { regional: mentionedRegional } : {}),
     ...(explicitClient ? { client: explicitClient } : {}),
   };
 

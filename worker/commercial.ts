@@ -77,11 +77,13 @@ export function assistantStatus(env: Env, provider: DataProvider): AssistantStat
 }
 
 export async function prepareVisit(provider: DataProvider, filters: Filters): Promise<VisitBriefing> {
-  if (!filters.client) fail(422, "Selecione um cliente pelo código para preparar a visita. Se houver nomes semelhantes, escolha o cadastro correto.");
+  const effectiveClient = filters.client.trim() || (filters.clients?.length === 1 ? filters.clients[0].trim() : "");
+  if (!effectiveClient) fail(422, "Selecione um cliente pelo código para preparar a visita. Se houver nomes semelhantes, escolha o cadastro correto.");
+  const activeFilters: Filters = { ...filters, client: effectiveClient };
   if (!provider.semantics.measures.revenue) fail(422, "Faturamento líquido ainda não conciliado para esta fonte.");
   const supported = (group: Group) => !provider.semantics.capabilities || provider.semantics.capabilities.groups.includes(group);
   if (!supported("client") || !supported("product")) fail(422, "Esta fonte não disponibiliza cliente e produto para preparar a visita.");
-  const plan = (group: Group, order: Plan["order"] = "current"): Plan => ({ group, metric: "revenue", order, filters: { ...filters } });
+  const plan = (group: Group, order: Plan["order"] = "current"): Plan => ({ group, metric: "revenue", order, filters: { ...activeFilters } });
   // The first read warms summaryCache for all parallel dimensional queries in this visit briefing.
   const timeline = await provider.query(plan("month"));
   const [products, productLosses, identity] = await Promise.all([
@@ -90,8 +92,8 @@ export async function prepareVisit(provider: DataProvider, filters: Filters): Pr
   if (identity.rows.length > 1) fail(422, "O código selecionado identifica mais de um cadastro. Selecione um único cliente.");
   let clientName = identity.rows[0]?.name;
   if (!clientName && provider.search) {
-    const found = await provider.search(filters, "client", filters.client);
-    const exact = found.items.filter(item => item.key.trim().toLocaleLowerCase("pt-BR") === filters.client.trim().toLocaleLowerCase("pt-BR"));
+    const found = await provider.search(activeFilters, "client", effectiveClient);
+    const exact = found.items.filter(item => item.key.trim().toLocaleLowerCase("pt-BR") === effectiveClient.toLocaleLowerCase("pt-BR"));
     if (exact.length === 1) clientName = exact[0].name;
   }
   if (!clientName) fail(422, "O código selecionado não identifica um cliente no histórico autorizado. Ajuste o período ou selecione outro cadastro.");
@@ -99,7 +101,7 @@ export async function prepareVisit(provider: DataProvider, filters: Filters): Pr
   const optionalGroups = (["category", "region", "state", "regional"] as const).filter(supported);
   const optionalReports = await Promise.all(optionalGroups.map(group => provider.query(plan(group))));
   const optional = Object.fromEntries(optionalGroups.map((group, index) => [group, optionalReports[index]])) as Partial<Record<Group, Report>>;
-  const customerDetails = provider.customerDetails ? await provider.customerDetails(filters) : null;
+  const customerDetails = provider.customerDetails ? await provider.customerDetails(activeFilters) : null;
   const salesMetric = provider.semantics.measures.gross ? "gross" : "revenue";
   const purchaseMonths = timeline.rows.filter(row => (row.values[salesMetric].current ?? 0) > 0).map(row => row.name).sort();
   const pair = timeline.total.values.revenue;
@@ -133,11 +135,11 @@ export async function prepareVisit(provider: DataProvider, filters: Filters): Pr
   const losses = productLosses.rows.filter(row => row.values.revenue.current !== null && row.values.revenue.previous !== null && row.values.revenue.current < row.values.revenue.previous);
   const lossNames = losses.slice(0, 3).map(row => row.name);
   return {
-    client: { code: filters.client, name: clientName, municipality: customerDetails?.municipality ?? null,
+    client: { code: effectiveClient, name: clientName, municipality: customerDetails?.municipality ?? null,
       states: optional.state?.rows.map(row => row.name) ?? [], representatives: optional.region?.rows.map(row => row.name) ?? [],
       regionals: optional.regional?.rows.map(row => row.name) ?? [] },
-    filters: { ...filters }, timeline, products, productLosses, categories: optional.category ?? null, insights,
-    summary: `${clientName}: ${noRecentIdentity ? "sem movimentos observados nos períodos consultados" : "faturamento líquido de " + net}. Período atual: ${timeline.comparison?.current.from ?? filters.from} a ${timeline.comparison?.current.to ?? filters.to}; anterior: ${timeline.comparison?.previous.from ?? (Number(filters.from.slice(0,4))-1)+filters.from.slice(4)} a ${timeline.comparison?.previous.to ?? (Number(filters.to.slice(0,4))-1)+filters.to.slice(4)}. ${deltaTitle(percent, "revenue")}. As causas das variações devem ser confirmadas na reunião.`,
+    filters: { ...activeFilters }, timeline, products, productLosses, categories: optional.category ?? null, insights,
+    summary: `${clientName}: ${noRecentIdentity ? "sem movimentos observados nos períodos consultados" : "faturamento líquido de " + net}. Período atual: ${timeline.comparison?.current.from ?? activeFilters.from} a ${timeline.comparison?.current.to ?? activeFilters.to}; anterior: ${timeline.comparison?.previous.from ?? (Number(activeFilters.from.slice(0,4))-1)+activeFilters.from.slice(4)} a ${timeline.comparison?.previous.to ?? (Number(activeFilters.to.slice(0,4))-1)+activeFilters.to.slice(4)}. ${deltaTitle(percent, "revenue")}. As causas das variações devem ser confirmadas na reunião.`,
     objectives: ["Validar com o cliente a evolução de compras e as devoluções do período.", ...(lossNames.length ? [`Revisar a recuperação de mix em: ${lossNames.join("; ")}.`] : ["Revisar a continuidade do mix observado e a programação das próximas compras."])],
     questions: ["Que mudanças na operação ou no consumo ajudam a explicar a evolução observada?", ...(lossNames.length ? [`O que mudou nas compras de ${lossNames.join("; ")}?`] : []), "Quais produtos do histórico podem voltar à programação?", "Quais próximos passos, responsáveis e datas podemos combinar?"],
     recommendations: [...new Set(insights.filter(value => value.severity === "warning").map(value => value.action))].slice(0, 3),

@@ -2,12 +2,15 @@ import {
   change,
   deltaTitle,
   detectFilterConflicts,
+  formatOfficialRegionalName,
   groups,
   metricKeys,
   metrics,
+  normalizeRegionalKey,
   pretty,
   type Commentary,
   type DataCapabilities,
+  type ExtendedFilterDimension,
   type FilterDimension,
   type Filters,
   type Group,
@@ -43,17 +46,25 @@ type BatchMetaRow = {
   validation_json: string | null;
   has_cal: number;
   has_macro: number;
+  has_agg: number;
 };
 
 export const CSV_CAPABILITIES: DataCapabilities = {
   metrics: ["gross", "revenue", "returns", "buyers"],
   groups: ["month", "client", "region", "product", "category", "state", "regional", "manager"],
   filters: ["region", "client", "product", "category", "state", "regional", "manager"],
+  extraFilters: ["municipality", "channel", "brand", "segment", "macroCategory", "itemGroup"],
   labels: {
     region: "Representante",
     regional: "Regional",
     state: "UF",
-    manager: "Gerente",
+    manager: "Gerente Regional",
+    municipality: "Município",
+    channel: "Canal comercial",
+    brand: "Marca",
+    segment: "Segmento",
+    macroCategory: "Macrocategoria",
+    itemGroup: "Grupo do item",
     revenue: "Faturamento líquido",
   },
 };
@@ -130,16 +141,29 @@ function needsCustomerFilter(filters: Filters, acl: { allowedRegions: string[] }
   return Boolean(
     acl.allowedRegions.length ||
       mergeNormalizedKeys(filters.region, filters.regions).length ||
-      mergeNormalizedKeys(undefined, filters.segments).length,
+      mergeNormalizedKeys(undefined, filters.regionsExclude).length ||
+      mergeNormalizedKeys(undefined, filters.segments).length ||
+      mergeNormalizedKeys(undefined, filters.segmentsExclude).length,
   );
 }
 
 function needsProductFilter(filters: Filters, hasDenormMacro: boolean): boolean {
-  if (mergeNormalizedKeys(undefined, filters.brands).length) return true;
+  if (mergeNormalizedKeys(undefined, filters.brands).length || mergeNormalizedKeys(undefined, filters.brandsExclude).length) {
+    return true;
+  }
   if (hasDenormMacro) return false;
   const inc = splitCategories(filters.category, filters.categoriesInclude);
   const exc = splitCategories(undefined, filters.categoriesExclude);
   return inc.macros.length > 0 || exc.macros.length > 0;
+}
+
+function needsRegionDimFilter(filters: Filters): boolean {
+  return Boolean(
+    mergeRegionalKeys(filters.regional, filters.regionals).length ||
+      mergeRegionalKeys(undefined, filters.regionalsExclude).length ||
+      mergeNormalizedKeys(filters.manager, filters.managers).length ||
+      mergeNormalizedKeys(undefined, filters.managersExclude).length,
+  );
 }
 
 function buildSummaryCacheKey(
@@ -151,6 +175,7 @@ function buildSummaryCacheKey(
   f: Filters,
 ): string {
   const sortList = (single?: string, list?: string[]) => mergeNormalizedKeys(single, list).sort();
+  const sortReg = (single?: string, list?: string[]) => mergeRegionalKeys(single, list).sort();
   const inc = splitCategories(f.category, f.categoriesInclude);
   const exc = splitCategories(undefined, f.categoriesExclude);
   return JSON.stringify([
@@ -169,14 +194,25 @@ function buildSummaryCacheKey(
     comp.previous.from,
     comp.previous.to,
     sortList(f.region, f.regions),
+    sortList(undefined, f.regionsExclude),
     sortList(f.client, f.clients),
+    sortList(undefined, f.clientsExclude),
     sortList(f.product, f.products),
+    sortList(undefined, f.productsExclude),
     sortList(f.state, f.states),
-    sortList(f.regional, f.regionals),
+    sortList(undefined, f.statesExclude),
+    sortReg(f.regional, f.regionals),
+    sortReg(undefined, f.regionalsExclude),
     sortList(f.manager, f.managers),
+    sortList(undefined, f.managersExclude),
+    sortList(f.municipality, f.municipalities),
+    sortList(undefined, f.municipalitiesExclude),
     sortList(undefined, f.segments),
+    sortList(undefined, f.segmentsExclude),
     sortList(undefined, f.brands),
+    sortList(undefined, f.brandsExclude),
     sortList(undefined, f.channels),
+    sortList(undefined, f.channelsExclude),
     [...inc.macros].sort(),
     [...inc.groups].sort(),
     [...exc.macros].sort(),
@@ -222,6 +258,81 @@ function mergeNormalizedKeys(single?: string, list?: string[]): string[] {
   add(single);
   for (const item of list ?? []) add(item);
   return [...out];
+}
+
+const PT_LOWER_UPPER_PAIRS: [string, string][] = [
+  ["á", "Á"],
+  ["à", "À"],
+  ["â", "Â"],
+  ["ã", "Ã"],
+  ["ä", "Ä"],
+  ["é", "É"],
+  ["è", "È"],
+  ["ê", "Ê"],
+  ["í", "Í"],
+  ["ó", "Ó"],
+  ["ò", "Ò"],
+  ["ô", "Ô"],
+  ["õ", "Õ"],
+  ["ö", "Ö"],
+  ["ú", "Ú"],
+  ["ù", "Ù"],
+  ["ü", "Ü"],
+  ["ç", "Ç"],
+  ["ñ", "Ñ"],
+];
+
+const PT_ASCII_PAIRS: [string, string][] = [
+  ["Á", "A"],
+  ["À", "A"],
+  ["Â", "A"],
+  ["Ã", "A"],
+  ["Ä", "A"],
+  ["É", "E"],
+  ["È", "E"],
+  ["Ê", "E"],
+  ["Í", "I"],
+  ["Ó", "O"],
+  ["Ò", "O"],
+  ["Ô", "O"],
+  ["Õ", "O"],
+  ["Ö", "O"],
+  ["Ú", "U"],
+  ["Ù", "U"],
+  ["Ü", "U"],
+  ["Ç", "C"],
+  ["Ñ", "N"],
+];
+
+function sqlUpperPt(expr: string): string {
+  let out = `UPPER(TRIM(${expr}))`;
+  for (const [low, up] of PT_LOWER_UPPER_PAIRS) {
+    out = `REPLACE(${out},'${low}','${up}')`;
+  }
+  return out;
+}
+
+function sqlFoldAscii(expr: string): string {
+  let out = sqlUpperPt(expr);
+  for (const [acc, asc] of PT_ASCII_PAIRS) {
+    out = `REPLACE(${out},'${acc}','${asc}')`;
+  }
+  return out;
+}
+
+function mergeRegionalKeys(single?: string, list?: string[]): string[] {
+  const out = new Set<string>();
+  const add = (val?: string) => {
+    const k = normalizeRegionalKey(val);
+    if (k) out.add(k);
+  };
+  add(single);
+  for (const item of list ?? []) add(item);
+  return [...out];
+}
+
+function allExcluded(inc: string[], exc: string[]): boolean {
+  return inc.length > 0 && inc.every((v) => exc.includes(v));
 }
 
 function splitCategories(single?: string, list?: string[]): { macros: string[]; groups: string[] } {
@@ -308,6 +419,108 @@ function inlineInExpr(
     : `${col} IN (SELECT value FROM json_each(?))`;
 }
 
+type RegionStateRow = {
+  stateKey: string;
+  regionalKey: string | null;
+  managerKey: string | null;
+};
+
+type ResolvedGeo = {
+  incStates: string[];
+  excStates: string[];
+  emptyIntersection: boolean;
+};
+
+function expandMonthRange(fromDate: string, toDate: string): string[] {
+  const start = fromDate.slice(0, 7);
+  const end = toDate.slice(0, 7);
+  if (!start || !end || start > end) return [];
+  const out: string[] = [];
+  let y = Number(start.slice(0, 4));
+  let m = Number(start.slice(5, 7));
+  const endY = Number(end.slice(0, 4));
+  const endM = Number(end.slice(5, 7));
+  while (y < endY || (y === endY && m <= endM)) {
+    out.push(`${y}-${String(m).padStart(2, "0")}`);
+    if (out.length > 48) break;
+    m++;
+    if (m > 12) {
+      m = 1;
+      y++;
+    }
+  }
+  return out;
+}
+
+async function loadRegionStates(e: Env, batchId: string): Promise<RegionStateRow[]> {
+  return (
+    await stmt(
+      e,
+      "SELECT state_key AS stateKey, regional_key AS regionalKey, manager_key AS managerKey FROM ci_dim_regions WHERE batch_id = ?",
+      batchId,
+    ).all<RegionStateRow>()
+  ).results;
+}
+
+function resolveGeoStateKeys(filters: Filters, regions: RegionStateRow[]): ResolvedGeo {
+  const reqStates = mergeNormalizedKeys(filters.state, filters.states);
+  const reqStatesExc = mergeNormalizedKeys(undefined, filters.statesExclude);
+  const reqRegionals = mergeRegionalKeys(filters.regional, filters.regionals);
+  const reqRegionalsExc = mergeRegionalKeys(undefined, filters.regionalsExclude);
+  const reqManagers = mergeNormalizedKeys(filters.manager, filters.managers);
+  const reqManagersExc = mergeNormalizedKeys(undefined, filters.managersExclude);
+
+  const hasConflict =
+    allExcluded(reqStates, reqStatesExc) ||
+    allExcluded(reqRegionals, reqRegionalsExc) ||
+    allExcluded(reqManagers, reqManagersExc);
+
+  const positiveSets: string[][] = [];
+  if (reqStates.length) positiveSets.push(reqStates);
+  if (reqRegionals.length) {
+    positiveSets.push(
+      regions.filter((r) => r.regionalKey && reqRegionals.includes(r.regionalKey)).map((r) => r.stateKey),
+    );
+  }
+  if (reqManagers.length) {
+    positiveSets.push(
+      regions.filter((r) => r.managerKey && reqManagers.includes(r.managerKey)).map((r) => r.stateKey),
+    );
+  }
+
+  const excSet = new Set(reqStatesExc);
+  if (reqRegionalsExc.length) {
+    for (const r of regions) {
+      if (r.regionalKey && reqRegionalsExc.includes(r.regionalKey)) excSet.add(r.stateKey);
+    }
+  }
+  if (reqManagersExc.length) {
+    for (const r of regions) {
+      if (r.managerKey && reqManagersExc.includes(r.managerKey)) excSet.add(r.stateKey);
+    }
+  }
+
+  if (hasConflict) {
+    return { incStates: [], excStates: [...excSet], emptyIntersection: true };
+  }
+  if (!positiveSets.length) {
+    return { incStates: [], excStates: [...excSet], emptyIntersection: false };
+  }
+
+  let current = [...new Set(positiveSets[0])];
+  for (const setArr of positiveSets.slice(1)) {
+    const allowed = new Set(setArr);
+    current = current.filter((st) => allowed.has(st));
+  }
+  current = current.filter((st) => !excSet.has(st));
+
+  return {
+    incStates: current,
+    excStates: [...excSet],
+    emptyIntersection: current.length === 0,
+  };
+}
+
 function buildFactWhere(
   alias: "s" | "r",
   batchId: string,
@@ -323,15 +536,69 @@ function buildFactWhere(
   disjointPrevTo?: string,
   omitClientDimJoin = false,
   omitProductDimJoin = false,
+  resolvedGeo?: ResolvedGeo,
 ): WhereSpec {
-  const clauses: string[] =
-    periodMode === "periods_join"
+  const reqRegions = mergeNormalizedKeys(filters.region, filters.regions);
+  const reqRegionsExc = mergeNormalizedKeys(undefined, filters.regionsExclude);
+  const reqClients = mergeNormalizedKeys(filters.client, filters.clients);
+  const reqClientsExc = mergeNormalizedKeys(undefined, filters.clientsExclude);
+  const reqProducts = mergeNormalizedKeys(filters.product, filters.products);
+  const reqProductsExc = mergeNormalizedKeys(undefined, filters.productsExclude);
+  const reqStates = mergeNormalizedKeys(filters.state, filters.states);
+  const reqStatesExc = mergeNormalizedKeys(undefined, filters.statesExclude);
+  const reqRegionals = mergeRegionalKeys(filters.regional, filters.regionals);
+  const reqRegionalsExc = mergeRegionalKeys(undefined, filters.regionalsExclude);
+  const reqManagers = mergeNormalizedKeys(filters.manager, filters.managers);
+  const reqManagersExc = mergeNormalizedKeys(undefined, filters.managersExclude);
+  const reqMunis = mergeNormalizedKeys(filters.municipality, filters.municipalities);
+  const reqMunisExc = mergeNormalizedKeys(undefined, filters.municipalitiesExclude);
+  const reqSegments = mergeNormalizedKeys(undefined, filters.segments);
+  const reqSegmentsExc = mergeNormalizedKeys(undefined, filters.segmentsExclude);
+  const reqBrands = mergeNormalizedKeys(undefined, filters.brands);
+  const reqBrandsExc = mergeNormalizedKeys(undefined, filters.brandsExclude);
+  const reqChannels = mergeNormalizedKeys(undefined, filters.channels);
+  const reqChannelsExc = mergeNormalizedKeys(undefined, filters.channelsExclude);
+  const inc = splitCategories(filters.category, filters.categoriesInclude);
+  const exc = splitCategories(undefined, filters.categoriesExclude);
+
+  const seekStates = resolvedGeo ? resolvedGeo.incStates : reqStates;
+  const canSeekMonthState =
+    alias === "s" &&
+    seekStates.length >= 1 &&
+    seekStates.length <= 12 &&
+    !reqClients.length &&
+    !reqProducts.length &&
+    !acl.allowedClients.length &&
+    (periodMode === "single_range" || periodMode === "disjoint_dual");
+  const monthKeys = canSeekMonthState
+    ? periodMode === "disjoint_dual"
+      ? [...new Set([...expandMonthRange(dateFrom!, disjointPrevTo!), ...expandMonthRange(disjointCurFrom!, dateTo!)])]
+      : expandMonthRange(dateFrom!, dateTo!)
+    : [];
+  const useMonthStateSeek = canSeekMonthState && monthKeys.length >= 1 && monthKeys.length <= 36;
+
+  const clauses: string[] = useMonthStateSeek
+    ? [
+        "s.batch_id = ?",
+        monthKeys.length === 1 ? "s.month_key = ?" : `s.month_key IN (${monthKeys.map(() => "?").join(",")})`,
+        seekStates.length === 1 ? "s.state_key = ?" : `s.state_key IN (${seekStates.map(() => "?").join(",")})`,
+        "+s.date >= ?",
+        "+s.date <= ?",
+        ...(periodMode === "disjoint_dual" ? ["(+s.date >= ? OR +s.date <= ?)"] : []),
+      ]
+    : periodMode === "periods_join"
       ? [`${alias}.batch_id = ?`, `${alias}.date >= pd.pf`, `${alias}.date <= pd.pt`]
       : periodMode === "disjoint_dual"
         ? [`${alias}.batch_id = ?`, `${alias}.date >= ?`, `${alias}.date <= ?`, `(${alias}.date >= ? OR ${alias}.date <= ?)`]
         : [`${alias}.batch_id = ?`, `${alias}.date >= ?`, `${alias}.date <= ?`];
-  const args: (string | number | null)[] =
-    periodMode === "periods_join"
+  const args: (string | number | null)[] = useMonthStateSeek
+    ? [
+        batchId,
+        ...monthKeys,
+        ...seekStates,
+        ...(periodMode === "disjoint_dual" ? [dateFrom!, dateTo!, disjointCurFrom!, disjointPrevTo!] : [dateFrom!, dateTo!]),
+      ]
+    : periodMode === "periods_join"
       ? [batchId]
       : periodMode === "disjoint_dual"
         ? [batchId, dateFrom!, dateTo!, disjointCurFrom!, disjointPrevTo!]
@@ -343,23 +610,20 @@ function buildFactWhere(
     );
   }
 
-  const reqRegions = mergeNormalizedKeys(filters.region, filters.regions);
-  const reqClients = mergeNormalizedKeys(filters.client, filters.clients);
-  const reqProducts = mergeNormalizedKeys(filters.product, filters.products);
-  const reqStates = mergeNormalizedKeys(filters.state, filters.states);
-  const reqRegionals = mergeNormalizedKeys(filters.regional, filters.regionals);
-  const reqManagers = mergeNormalizedKeys(filters.manager, filters.managers);
-  const reqSegments = mergeNormalizedKeys(undefined, filters.segments);
-  const reqBrands = mergeNormalizedKeys(undefined, filters.brands);
-  const reqChannels = mergeNormalizedKeys(undefined, filters.channels);
-  const inc = splitCategories(filters.category, filters.categoriesInclude);
-  const exc = splitCategories(undefined, filters.categoriesExclude);
-
-  const emptyIntersection = Boolean(
-    (inc.macros.length > 0 || inc.groups.length > 0) &&
-      inc.macros.every((m) => exc.macros.includes(m)) &&
-      inc.groups.every((g) => exc.groups.includes(g)),
-  );
+  const emptyIntersection =
+    Boolean(resolvedGeo?.emptyIntersection) ||
+    allExcluded(inc.macros, exc.macros) ||
+    allExcluded(inc.groups, exc.groups) ||
+    allExcluded(reqRegions, reqRegionsExc) ||
+    allExcluded(reqClients, reqClientsExc) ||
+    allExcluded(reqProducts, reqProductsExc) ||
+    allExcluded(reqStates, reqStatesExc) ||
+    allExcluded(reqRegionals, reqRegionalsExc) ||
+    allExcluded(reqManagers, reqManagersExc) ||
+    allExcluded(reqMunis, reqMunisExc) ||
+    allExcluded(reqSegments, reqSegmentsExc) ||
+    allExcluded(reqBrands, reqBrandsExc) ||
+    allExcluded(reqChannels, reqChannelsExc);
 
   const needCustomers = Boolean(
     needsCustomerFilter(filters, acl) ||
@@ -370,7 +634,7 @@ function buildFactWhere(
       (!omitProductDimJoin && (group === "product" || group === "category")),
   );
   const needRegions = Boolean(
-    reqRegionals.length || reqManagers.length || group === "regional" || group === "manager",
+    (!resolvedGeo && needsRegionDimFilter(filters)) || group === "regional" || group === "manager",
   );
 
   const joins = [
@@ -391,30 +655,99 @@ function buildFactWhere(
   if (reqRegions.length) {
     clauses.push(inlineInExpr("c.representative_key", reqRegions, budget, args));
   }
+  if (reqRegionsExc.length) {
+    clauses.push(inlineInExpr("c.representative_key", reqRegionsExc, budget, args, true));
+  }
   if (reqClients.length) {
     clauses.push(inlineInExpr(`${alias}.client_key`, reqClients, budget, args));
+  }
+  if (reqClientsExc.length) {
+    clauses.push(inlineInExpr(`${alias}.client_key`, reqClientsExc, budget, args, true));
   }
   if (reqProducts.length) {
     clauses.push(inlineInExpr(`${alias}.product_key`, reqProducts, budget, args));
   }
-  if (reqStates.length) {
-    clauses.push(inlineInExpr(`${alias}.state_key`, reqStates, budget, args));
+  if (reqProductsExc.length) {
+    clauses.push(inlineInExpr(`${alias}.product_key`, reqProductsExc, budget, args, true));
   }
-  if (reqRegionals.length) {
-    clauses.push(inlineInExpr("rg.regional_key", reqRegionals, budget, args));
+  if (resolvedGeo) {
+    if (resolvedGeo.incStates.length && !useMonthStateSeek) {
+      clauses.push(inlineInExpr(`${alias}.state_key`, resolvedGeo.incStates, budget, args));
+    }
+    if (!resolvedGeo.incStates.length && resolvedGeo.excStates.length) {
+      clauses.push(inlineInExpr(`${alias}.state_key`, resolvedGeo.excStates, budget, args, true));
+    }
+  } else {
+    if (reqStates.length && !useMonthStateSeek) {
+      clauses.push(inlineInExpr(`${alias}.state_key`, reqStates, budget, args));
+    }
+    if (reqStatesExc.length) {
+      clauses.push(inlineInExpr(`${alias}.state_key`, reqStatesExc, budget, args, true));
+    }
+    if (reqRegionals.length) {
+      clauses.push(inlineInExpr("rg.regional_key", reqRegionals, budget, args));
+    }
+    if (reqRegionalsExc.length) {
+      clauses.push(inlineInExpr("rg.regional_key", reqRegionalsExc, budget, args, true));
+    }
+    if (reqManagers.length) {
+      clauses.push(inlineInExpr("rg.manager_key", reqManagers, budget, args));
+    }
+    if (reqManagersExc.length) {
+      clauses.push(inlineInExpr("rg.manager_key", reqManagersExc, budget, args, true));
+    }
   }
-  if (reqManagers.length) {
-    clauses.push(inlineInExpr("rg.manager_key", reqManagers, budget, args));
+  if (reqMunis.length) {
+    if (alias === "s") {
+      clauses.push(inlineInExpr(sqlUpperPt("s.municipality"), reqMunis, budget, args));
+    } else {
+      const mDate =
+        periodMode === "periods_join"
+          ? "fs.date BETWEEN pd.pf AND pd.pt"
+          : periodMode === "disjoint_dual"
+            ? "fs.date BETWEEN ? AND ? AND (fs.date >= ? OR fs.date <= ?)"
+            : "fs.date BETWEEN ? AND ?";
+      if (periodMode === "disjoint_dual") args.push(dateFrom!, dateTo!, disjointCurFrom!, disjointPrevTo!);
+      else if (periodMode === "single_range") args.push(dateFrom!, dateTo!);
+      const mCond = inlineInExpr(sqlUpperPt("fs.municipality"), reqMunis, budget, args);
+      clauses.push(
+        `EXISTS(SELECT 1 FROM ci_fact_sales fs WHERE fs.batch_id = r.batch_id AND ${mDate} AND fs.client_key = r.client_key AND ${mCond})`,
+      );
+    }
+  }
+  if (reqMunisExc.length) {
+    if (alias === "s") {
+      clauses.push(inlineInExpr(sqlUpperPt("s.municipality"), reqMunisExc, budget, args, true));
+    } else {
+      const mDate =
+        periodMode === "periods_join"
+          ? "fs.date BETWEEN pd.pf AND pd.pt"
+          : periodMode === "disjoint_dual"
+            ? "fs.date BETWEEN ? AND ? AND (fs.date >= ? OR fs.date <= ?)"
+            : "fs.date BETWEEN ? AND ?";
+      if (periodMode === "disjoint_dual") args.push(dateFrom!, dateTo!, disjointCurFrom!, disjointPrevTo!);
+      else if (periodMode === "single_range") args.push(dateFrom!, dateTo!);
+      const mCond = inlineInExpr(sqlUpperPt("fs.municipality"), reqMunisExc, budget, args);
+      clauses.push(
+        `NOT EXISTS(SELECT 1 FROM ci_fact_sales fs WHERE fs.batch_id = r.batch_id AND ${mDate} AND fs.client_key = r.client_key AND ${mCond})`,
+      );
+    }
   }
   if (reqSegments.length) {
-    clauses.push(inlineInExpr("UPPER(TRIM(c.segment))", reqSegments, budget, args));
+    clauses.push(inlineInExpr(sqlUpperPt("c.segment"), reqSegments, budget, args));
+  }
+  if (reqSegmentsExc.length) {
+    clauses.push(inlineInExpr(sqlUpperPt("c.segment"), reqSegmentsExc, budget, args, true));
   }
   if (reqBrands.length) {
-    clauses.push(inlineInExpr("UPPER(TRIM(p.brand))", reqBrands, budget, args));
+    clauses.push(inlineInExpr(sqlUpperPt("p.brand"), reqBrands, budget, args));
+  }
+  if (reqBrandsExc.length) {
+    clauses.push(inlineInExpr(sqlUpperPt("p.brand"), reqBrandsExc, budget, args, true));
   }
   if (reqChannels.length) {
     if (alias === "s") {
-      clauses.push(inlineInExpr("UPPER(TRIM(s.channel))", reqChannels, budget, args));
+      clauses.push(inlineInExpr(sqlUpperPt("s.channel"), reqChannels, budget, args));
     } else {
       const chDate =
         periodMode === "periods_join"
@@ -424,24 +757,38 @@ function buildFactWhere(
             : "fs.date BETWEEN ? AND ?";
       if (periodMode === "disjoint_dual") args.push(dateFrom!, dateTo!, disjointCurFrom!, disjointPrevTo!);
       else if (periodMode === "single_range") args.push(dateFrom!, dateTo!);
-      const chCond = inlineInExpr("UPPER(TRIM(fs.channel))", reqChannels, budget, args);
+      const chCond = inlineInExpr(sqlUpperPt("fs.channel"), reqChannels, budget, args);
       clauses.push(
         `EXISTS(SELECT 1 FROM ci_fact_sales fs WHERE fs.batch_id = r.batch_id AND ${chDate} AND fs.client_key = r.client_key AND ${chCond})`,
       );
     }
   }
+  if (reqChannelsExc.length) {
+    if (alias === "s") {
+      clauses.push(inlineInExpr(sqlUpperPt("s.channel"), reqChannelsExc, budget, args, true));
+    } else {
+      const chDate =
+        periodMode === "periods_join"
+          ? "fs.date BETWEEN pd.pf AND pd.pt"
+          : periodMode === "disjoint_dual"
+            ? "fs.date BETWEEN ? AND ? AND (fs.date >= ? OR fs.date <= ?)"
+            : "fs.date BETWEEN ? AND ?";
+      if (periodMode === "disjoint_dual") args.push(dateFrom!, dateTo!, disjointCurFrom!, disjointPrevTo!);
+      else if (periodMode === "single_range") args.push(dateFrom!, dateTo!);
+      const chCond = inlineInExpr(sqlUpperPt("fs.channel"), reqChannelsExc, budget, args);
+      clauses.push(
+        `NOT EXISTS(SELECT 1 FROM ci_fact_sales fs WHERE fs.batch_id = r.batch_id AND ${chDate} AND fs.client_key = r.client_key AND ${chCond})`,
+      );
+    }
+  }
 
-  // Strictly independent commercial categories: NEVER auto-group SUCO with SUCO CONCENTRADO*
-  // or VINHO with VINHO IMPORTADO / VINHO GRANEL or VINAGRE with VINAGRE GRANEL.
+  // Strictly independent commercial categories + Power BI slicer intersection between Macro Categoria and Grupo Item.
   const macroExpr = hasDenormMacro ? `${alias}.macro_key` : `COALESCE(p.macro_category_key, ${alias}.macro_key)`;
 
-  if (inc.macros.length && inc.groups.length) {
-    const mCond = inlineInExpr(macroExpr, inc.macros, budget, args);
-    const gCond = inlineInExpr(`${alias}.group_key`, inc.groups, budget, args);
-    clauses.push(`(${mCond} OR ${gCond})`);
-  } else if (inc.macros.length) {
+  if (inc.macros.length) {
     clauses.push(inlineInExpr(macroExpr, inc.macros, budget, args));
-  } else if (inc.groups.length) {
+  }
+  if (inc.groups.length) {
     clauses.push(inlineInExpr(`${alias}.group_key`, inc.groups, budget, args));
   }
 
@@ -498,14 +845,16 @@ function groupExpressions(alias: "s" | "r", group: Exclude<Group, "month">): { k
 async function loadBatchMeta(
   e: Env,
   batchId: string,
-): Promise<{ batch: BatchMetaRow; hasCalendar: boolean; hasDenormMacro: boolean }> {
+): Promise<{ batch: BatchMetaRow; hasCalendar: boolean; hasDenormMacro: boolean; hasAggCube: boolean }> {
   const batch = await stmt(
     e,
     `SELECT id,status,source_label,reference_date,coverage_from,coverage_to,file_count,
        sales_rows,return_rows,customer_rows,product_rows,created,updated,activated_at,summary_json,validation_json,
        EXISTS(SELECT 1 FROM ci_dim_calendar WHERE batch_id=? LIMIT 1) AS has_cal,
-       EXISTS(SELECT 1 FROM ci_fact_sales WHERE batch_id=? AND macro_key IS NOT NULL LIMIT 1) AS has_macro
+       EXISTS(SELECT 1 FROM ci_fact_sales WHERE batch_id=? AND macro_key IS NOT NULL LIMIT 1) AS has_macro,
+       EXISTS(SELECT 1 FROM ci_agg_monthly WHERE batch_id=? LIMIT 1) AS has_agg
      FROM ci_csv_batches WHERE id=?`,
+    batchId,
     batchId,
     batchId,
     batchId,
@@ -524,6 +873,7 @@ async function loadBatchMeta(
     batch,
     hasCalendar: !calVerified && !!batch.has_cal,
     hasDenormMacro: !!batch.has_macro,
+    hasAggCube: !!batch.has_agg,
   };
 }
 
@@ -559,58 +909,199 @@ export async function searchCsvDimension(
   u: DbUser,
   batchId: string,
   filters: Filters,
-  dimension: "client" | "product" | "category",
+  dimension: "client" | "product" | "category" | "municipality",
   query: string,
-): Promise<{ items: { key: string; name: string }[]; truncated: boolean }> {
-  if (!["client", "product", "category"].includes(dimension) || !query.trim() || query.length > 100) {
+): Promise<{ items: { key: string; name: string; hasSalesInPeriod?: boolean }[]; truncated: boolean }> {
+  if (!["client", "product", "category", "municipality"].includes(dimension) || !query.trim() || query.length > 100) {
     fail(422, "Informe de 1 a 100 caracteres para a pesquisa.");
   }
+  const cleanedFilters: Filters =
+    dimension === "client"
+      ? { ...filters, client: "", clients: undefined, clientsExclude: undefined }
+      : dimension === "product"
+        ? { ...filters, product: "", products: undefined, productsExclude: undefined }
+        : dimension === "municipality"
+          ? { ...filters, municipality: "", municipalities: undefined, municipalitiesExclude: undefined }
+          : filters;
+  const acl = scopeForUser(u, cleanedFilters);
   if (dimension === "category") return searchCsvCategory(e, batchId, query);
-  const acl = scopeForUser(u, { ...filters, client: "", product: "", category: "", categoriesInclude: [], categoriesExclude: [] });
+  const { batch, hasCalendar, hasDenormMacro } = await loadBatchMeta(e, batchId);
+  const comp = csvComparisonPeriod(cleanedFilters, batch.coverage_from, batch.coverage_to, batch.reference_date);
+  const curFrom = comp.current.from;
+  const curTo = comp.current.to;
   const pattern = "%" + query.trim().replace(/[\\%_]/g, "\\$&") + "%";
+  const upperPattern = "%" + query.trim().normalize("NFC").toLocaleUpperCase("pt-BR").replace(/[\\%_]/g, "\\$&") + "%";
+  const foldedUpperPattern =
+    "%" +
+    query
+      .trim()
+      .normalize("NFD")
+      .replace(/\p{M}/gu, "")
+      .toUpperCase()
+      .replace(/[\\%_]/g, "\\$&") +
+    "%";
   const budget = { rem: 60 };
+
+  if (dimension === "municipality") {
+    if (curFrom > curTo) return { items: [], truncated: false };
+    const w = buildFactWhere("s", batchId, cleanedFilters, acl, hasCalendar, hasDenormMacro, undefined, "single_range", curFrom, curTo);
+    if (w.emptyIntersection) return { items: [], truncated: false };
+    const muniKeyExpr = sqlUpperPt("s.municipality");
+    const muniFoldExpr = sqlFoldAscii("s.municipality");
+    const rows = (
+      await stmt(
+        e,
+        `SELECT ${muniKeyExpr} AS k, MIN(TRIM(s.municipality)) AS name
+         FROM ci_fact_sales s ${w.joins}
+         WHERE ${w.clause} AND s.municipality IS NOT NULL AND TRIM(s.municipality) <> ''
+           AND (${muniKeyExpr} LIKE ? ESCAPE '\\' OR ${muniFoldExpr} LIKE ? ESCAPE '\\' OR s.municipality LIKE ? ESCAPE '\\')
+         GROUP BY ${muniKeyExpr}
+         ORDER BY name LIMIT 21`,
+        ...w.args,
+        upperPattern,
+        foldedUpperPattern,
+        pattern,
+      ).all<{ k: string; name: string }>()
+    ).results;
+    return {
+      items: rows.slice(0, 20).map((r) => ({ key: r.name, name: r.name, hasSalesInPeriod: true })),
+      truncated: rows.length > 20,
+    };
+  }
 
   if (dimension === "client") {
     const clauses = ["c.batch_id=?"];
     const args: (string | number | null)[] = [batchId];
+    let joinRegions = false;
     if (acl.allowedRegions.length) {
       clauses.push(inlineInExpr("c.representative_key", acl.allowedRegions, budget, args));
     }
     if (acl.allowedClients.length) {
       clauses.push(inlineInExpr("c.client_key", acl.allowedClients, budget, args));
     }
+    const reqReps = mergeNormalizedKeys(cleanedFilters.region, cleanedFilters.regions);
+    const reqRepsExc = mergeNormalizedKeys(undefined, cleanedFilters.regionsExclude);
+    const reqStates = mergeNormalizedKeys(cleanedFilters.state, cleanedFilters.states);
+    const reqStatesExc = mergeNormalizedKeys(undefined, cleanedFilters.statesExclude);
+    const reqRegionals = mergeRegionalKeys(cleanedFilters.regional, cleanedFilters.regionals);
+    const reqRegionalsExc = mergeRegionalKeys(undefined, cleanedFilters.regionalsExclude);
+    const reqManagers = mergeNormalizedKeys(cleanedFilters.manager, cleanedFilters.managers);
+    const reqManagersExc = mergeNormalizedKeys(undefined, cleanedFilters.managersExclude);
+    const reqSegments = mergeNormalizedKeys(undefined, cleanedFilters.segments);
+    const reqSegmentsExc = mergeNormalizedKeys(undefined, cleanedFilters.segmentsExclude);
+    if (reqReps.length) clauses.push(inlineInExpr("c.representative_key", reqReps, budget, args));
+    if (reqRepsExc.length) clauses.push(inlineInExpr("c.representative_key", reqRepsExc, budget, args, true));
+    if (reqStates.length) clauses.push(inlineInExpr("c.state_key", reqStates, budget, args));
+    if (reqStatesExc.length) clauses.push(inlineInExpr("c.state_key", reqStatesExc, budget, args, true));
+    if (reqSegments.length) clauses.push(inlineInExpr(sqlUpperPt("c.segment"), reqSegments, budget, args));
+    if (reqSegmentsExc.length) clauses.push(inlineInExpr(sqlUpperPt("c.segment"), reqSegmentsExc, budget, args, true));
+    if (reqRegionals.length || reqRegionalsExc.length || reqManagers.length || reqManagersExc.length) {
+      joinRegions = true;
+      if (reqRegionals.length) clauses.push(inlineInExpr("rg.regional_key", reqRegionals, budget, args));
+      if (reqRegionalsExc.length) clauses.push(inlineInExpr("rg.regional_key", reqRegionalsExc, budget, args, true));
+      if (reqManagers.length) clauses.push(inlineInExpr("rg.manager_key", reqManagers, budget, args));
+      if (reqManagersExc.length) clauses.push(inlineInExpr("rg.manager_key", reqManagersExc, budget, args, true));
+    }
     clauses.push("(c.client_key LIKE ? ESCAPE '\\' OR c.client_raw LIKE ? ESCAPE '\\' OR COALESCE(c.name,'') LIKE ? ESCAPE '\\')");
-    args.push(pattern, pattern, pattern);
+    args.push(upperPattern, pattern, pattern);
+    const regJoin = joinRegions ? "LEFT JOIN ci_dim_regions rg ON rg.batch_id=c.batch_id AND rg.state_key=c.state_key" : "";
     const rows = (
       await stmt(
         e,
-        `SELECT client_key, client_raw, name FROM ci_dim_customers c WHERE ${clauses.join(" AND ")} ORDER BY c.client_key LIMIT 21`,
+        `SELECT c.client_key, c.client_raw, c.name FROM ci_dim_customers c ${regJoin} WHERE ${clauses.join(" AND ")} ORDER BY c.client_key LIMIT 21`,
         ...args,
       ).all<{ client_key: string; client_raw: string; name: string | null }>()
     ).results;
+    const sliced = rows.slice(0, 20);
+    const activeSet = new Set<string>();
+    if (sliced.length && curFrom <= curTo) {
+      const w = buildFactWhere(
+        "s",
+        batchId,
+        { ...cleanedFilters, clients: sliced.map((r) => r.client_key) },
+        acl,
+        hasCalendar,
+        hasDenormMacro,
+        undefined,
+        "single_range",
+        curFrom,
+        curTo,
+      );
+      if (!w.emptyIntersection) {
+        const hits = (
+          await stmt(e, `SELECT DISTINCT s.client_key AS k FROM ci_fact_sales s ${w.joins} WHERE ${w.clause}`, ...w.args).all<{ k: string }>()
+        ).results;
+        for (const h of hits) activeSet.add(h.k);
+      }
+    }
     return {
-      items: rows.slice(0, 20).map((r) => {
+      items: sliced.map((r) => {
         const code = r.client_raw || r.client_key;
-        return { key: r.client_key, name: r.name ? `${code} — ${r.name}` : code };
+        return {
+          key: r.client_key,
+          name: r.name ? `${code} — ${r.name}` : code,
+          hasSalesInPeriod: activeSet.has(r.client_key),
+        };
       }),
       truncated: rows.length > 20,
     };
   }
 
+  // Product search preserves registered catalog products matching Macro Categoria / Marca
+  // and annotates whether each item had sales in the active period & cascaded filters.
+  const prodClauses = ["p.batch_id=?"];
+  const prodArgs: (string | number | null)[] = [batchId];
+  const inc = splitCategories(cleanedFilters.category, cleanedFilters.categoriesInclude);
+  const exc = splitCategories(undefined, cleanedFilters.categoriesExclude);
+  const reqBrands = mergeNormalizedKeys(undefined, cleanedFilters.brands);
+  const reqBrandsExc = mergeNormalizedKeys(undefined, cleanedFilters.brandsExclude);
+  if (allExcluded(inc.macros, exc.macros) || allExcluded(reqBrands, reqBrandsExc)) {
+    return { items: [], truncated: false };
+  }
+  if (inc.macros.length) prodClauses.push(inlineInExpr("p.macro_category_key", inc.macros, budget, prodArgs));
+  if (exc.macros.length) prodClauses.push(inlineInExpr("p.macro_category_key", exc.macros, budget, prodArgs, true));
+  if (reqBrands.length) prodClauses.push(inlineInExpr(sqlUpperPt("p.brand"), reqBrands, budget, prodArgs));
+  if (reqBrandsExc.length) prodClauses.push(inlineInExpr(sqlUpperPt("p.brand"), reqBrandsExc, budget, prodArgs, true));
+  prodClauses.push("(p.product_key LIKE ? ESCAPE '\\' OR p.product_raw LIKE ? ESCAPE '\\' OR COALESCE(p.description,'') LIKE ? ESCAPE '\\')");
+  prodArgs.push(upperPattern, pattern, pattern);
+
   const rows = (
     await stmt(
       e,
-      "SELECT product_key, product_raw, description FROM ci_dim_products p WHERE p.batch_id=? AND (p.product_key LIKE ? ESCAPE '\\' OR p.product_raw LIKE ? ESCAPE '\\' OR COALESCE(p.description,'') LIKE ? ESCAPE '\\') ORDER BY p.product_key LIMIT 21",
-      batchId,
-      pattern,
-      pattern,
-      pattern,
+      `SELECT product_key, product_raw, description FROM ci_dim_products p WHERE ${prodClauses.join(" AND ")} ORDER BY p.product_key LIMIT 21`,
+      ...prodArgs,
     ).all<{ product_key: string; product_raw: string; description: string | null }>()
   ).results;
+  const sliced = rows.slice(0, 20);
+  const activeSet = new Set<string>();
+  if (sliced.length && curFrom <= curTo) {
+    const w = buildFactWhere(
+      "s",
+      batchId,
+      { ...cleanedFilters, products: sliced.map((r) => r.product_key) },
+      acl,
+      hasCalendar,
+      hasDenormMacro,
+      "product",
+      "single_range",
+      curFrom,
+      curTo,
+    );
+    if (!w.emptyIntersection) {
+      const hits = (
+        await stmt(e, `SELECT DISTINCT s.product_key AS k FROM ci_fact_sales s ${w.joins} WHERE ${w.clause}`, ...w.args).all<{ k: string }>()
+      ).results;
+      for (const h of hits) activeSet.add(h.k);
+    }
+  }
   return {
-    items: rows.slice(0, 20).map((r) => {
+    items: sliced.map((r) => {
       const code = r.product_raw || r.product_key;
-      return { key: r.product_key, name: r.description ? `${code} — ${r.description}` : code };
+      return {
+        key: r.product_key,
+        name: r.description ? `${code} — ${r.description}` : code,
+        hasSalesInPeriod: activeSet.has(r.product_key),
+      };
     }),
     truncated: rows.length > 20,
   };
@@ -677,63 +1168,899 @@ export async function csvCustomerDetails(
   };
 }
 
+export type IncompatibleSelection = {
+  dimension: ExtendedFilterDimension;
+  values: string[];
+  labels: string[];
+  message: string;
+};
+
+export type CsvOptionsResult = {
+  values: Partial<Record<FilterDimension | ExtendedFilterDimension | "channel" | "segment" | "brand", string[]>>;
+  labels: Partial<Record<FilterDimension | ExtendedFilterDimension | "channel" | "segment" | "brand", Record<string, string>>>;
+  registeredProducts: string[];
+  meta: {
+    productActiveCount: number;
+    productRegisteredCount: number;
+    productHasMoreRegistered: boolean;
+  };
+  incompatible: IncompatibleSelection[];
+  truncated: Record<string, boolean>;
+  batchId: string;
+};
+
+function stripMacroFromCategoryList(list: string[] | undefined, removeMacro: boolean): string[] | undefined {
+  if (!list?.length) return undefined;
+  const kept = list.filter((raw) => {
+    const isMacro = raw.normalize("NFC").trim().toLocaleLowerCase("pt-BR").startsWith("macro categoria:");
+    return removeMacro ? !isMacro : isMacro;
+  });
+  return kept.length ? kept : undefined;
+}
+
+function withoutDimFilters(f: Filters, dim: ExtendedFilterDimension): Filters {
+  switch (dim) {
+    case "regional":
+      return { ...f, regional: "", regionals: undefined, regionalsExclude: undefined };
+    case "manager":
+      return { ...f, manager: "", managers: undefined, managersExclude: undefined };
+    case "region":
+      return { ...f, region: "", regions: undefined, regionsExclude: undefined };
+    case "state":
+      return { ...f, state: "", states: undefined, statesExclude: undefined };
+    case "municipality":
+      return { ...f, municipality: "", municipalities: undefined, municipalitiesExclude: undefined };
+    case "client":
+      return { ...f, client: "", clients: undefined, clientsExclude: undefined };
+    case "product":
+      return { ...f, product: "", products: undefined, productsExclude: undefined };
+    case "brand":
+      return { ...f, brands: undefined, brandsExclude: undefined };
+    case "channel":
+      return { ...f, channels: undefined, channelsExclude: undefined };
+    case "segment":
+      return { ...f, segments: undefined, segmentsExclude: undefined };
+    case "macroCategory":
+      return {
+        ...f,
+        categoriesInclude: stripMacroFromCategoryList(f.categoriesInclude, true),
+        categoriesExclude: stripMacroFromCategoryList(f.categoriesExclude, true),
+      };
+    case "itemGroup":
+      return {
+        ...f,
+        category: "",
+        categoriesInclude: stripMacroFromCategoryList(f.categoriesInclude, false),
+        categoriesExclude: stripMacroFromCategoryList(f.categoriesExclude, false),
+      };
+  }
+}
+
+function buildAggWhere(
+  batchId: string,
+  fromMonth: string,
+  toMonth: string,
+  filters: Filters,
+  acl: { allowedRegions: string[]; allowedClients: string[] },
+): { clause: string; args: (string | number | null)[]; emptyIntersection: boolean } {
+  const reqRegions = mergeNormalizedKeys(filters.region, filters.regions);
+  const reqRegionsExc = mergeNormalizedKeys(undefined, filters.regionsExclude);
+  const reqStates = mergeNormalizedKeys(filters.state, filters.states);
+  const reqStatesExc = mergeNormalizedKeys(undefined, filters.statesExclude);
+  const reqRegionals = mergeRegionalKeys(filters.regional, filters.regionals);
+  const reqRegionalsExc = mergeRegionalKeys(undefined, filters.regionalsExclude);
+  const reqManagers = mergeNormalizedKeys(filters.manager, filters.managers);
+  const reqManagersExc = mergeNormalizedKeys(undefined, filters.managersExclude);
+  const reqSegments = mergeNormalizedKeys(undefined, filters.segments);
+  const reqSegmentsExc = mergeNormalizedKeys(undefined, filters.segmentsExclude);
+  const reqBrands = mergeNormalizedKeys(undefined, filters.brands);
+  const reqBrandsExc = mergeNormalizedKeys(undefined, filters.brandsExclude);
+  const reqChannels = mergeNormalizedKeys(undefined, filters.channels);
+  const reqChannelsExc = mergeNormalizedKeys(undefined, filters.channelsExclude);
+  const inc = splitCategories(filters.category, filters.categoriesInclude);
+  const exc = splitCategories(undefined, filters.categoriesExclude);
+
+  const emptyIntersection =
+    allExcluded(inc.macros, exc.macros) ||
+    allExcluded(inc.groups, exc.groups) ||
+    allExcluded(reqRegions, reqRegionsExc) ||
+    allExcluded(reqStates, reqStatesExc) ||
+    allExcluded(reqRegionals, reqRegionalsExc) ||
+    allExcluded(reqManagers, reqManagersExc) ||
+    allExcluded(reqSegments, reqSegmentsExc) ||
+    allExcluded(reqBrands, reqBrandsExc) ||
+    allExcluded(reqChannels, reqChannelsExc);
+
+  const clauses: string[] = [
+    "a.batch_id = ?",
+    "a.month_key BETWEEN ? AND ?",
+    reqChannels.length || reqChannelsExc.length ? "a.sales_rows > 0" : "(a.sales_rows > 0 OR a.return_rows > 0)",
+  ];
+  const args: (string | number | null)[] = [batchId, fromMonth, toMonth];
+  const budget = { rem: 60 };
+
+  if (acl.allowedRegions.length) clauses.push(inlineInExpr("a.representative_key", acl.allowedRegions, budget, args));
+  if (reqRegions.length) clauses.push(inlineInExpr("a.representative_key", reqRegions, budget, args));
+  if (reqRegionsExc.length) clauses.push(inlineInExpr("a.representative_key", reqRegionsExc, budget, args, true));
+  if (reqStates.length) clauses.push(inlineInExpr("a.state_key", reqStates, budget, args));
+  if (reqStatesExc.length) clauses.push(inlineInExpr("a.state_key", reqStatesExc, budget, args, true));
+  if (reqRegionals.length) clauses.push(inlineInExpr("a.regional_key", reqRegionals, budget, args));
+  if (reqRegionalsExc.length) clauses.push(inlineInExpr("a.regional_key", reqRegionalsExc, budget, args, true));
+  if (reqManagers.length) clauses.push(inlineInExpr("a.manager_key", reqManagers, budget, args));
+  if (reqManagersExc.length) clauses.push(inlineInExpr("a.manager_key", reqManagersExc, budget, args, true));
+  if (reqSegments.length) clauses.push(inlineInExpr(sqlUpperPt("a.segment"), reqSegments, budget, args));
+  if (reqSegmentsExc.length) clauses.push(inlineInExpr(sqlUpperPt("a.segment"), reqSegmentsExc, budget, args, true));
+  if (reqBrands.length) clauses.push(inlineInExpr(sqlUpperPt("a.brand"), reqBrands, budget, args));
+  if (reqBrandsExc.length) clauses.push(inlineInExpr(sqlUpperPt("a.brand"), reqBrandsExc, budget, args, true));
+  if (reqChannels.length) clauses.push(inlineInExpr(sqlUpperPt("a.channel"), reqChannels, budget, args));
+  if (reqChannelsExc.length) clauses.push(inlineInExpr(sqlUpperPt("a.channel"), reqChannelsExc, budget, args, true));
+  if (inc.macros.length) clauses.push(inlineInExpr("a.macro_key", inc.macros, budget, args));
+  if (inc.groups.length) clauses.push(inlineInExpr("a.group_key", inc.groups, budget, args));
+  if (exc.macros.length) clauses.push(inlineInExpr("a.macro_key", exc.macros, budget, args, true));
+  if (exc.groups.length) clauses.push(inlineInExpr("a.group_key", exc.groups, budget, args, true));
+
+  return { clause: clauses.join(" AND "), args, emptyIntersection };
+}
+
 export async function queryCsvOptions(
   e: Env,
   u: DbUser,
   batchId: string,
   filters?: Filters,
-): Promise<{
-  values: Partial<Record<FilterDimension | "channel" | "segment" | "brand", string[]>>;
-  truncated: Record<string, boolean>;
-  batchId: string;
-}> {
+): Promise<CsvOptionsResult> {
   const acl = scopeForUser(u, filters);
-  await loadBatchMeta(e, batchId);
+  const { batch, hasCalendar, hasDenormMacro, hasAggCube } = await loadBatchMeta(e, batchId);
 
-  const catalog = (
-    await stmt(
-      e,
-      "SELECT dimension, value_key, display FROM ci_dim_catalog WHERE batch_id=? ORDER BY dimension, display",
+  const defaultFrom = (batch.coverage_from ?? "2026-01").slice(0, 7);
+  const defaultTo = (batch.reference_date ?? batch.coverage_to ?? "2026-12").slice(0, 7);
+  const f: Filters = filters ?? { from: defaultFrom, to: defaultTo, region: "", client: "", product: "" };
+  const comp = csvComparisonPeriod(f, batch.coverage_from, batch.coverage_to, batch.reference_date);
+  const curFrom = comp.current.from;
+  const curTo = comp.current.to;
+
+  if (curFrom > curTo) {
+    return {
       batchId,
-    ).all<{ dimension: string; value_key: string; display: string }>()
+      values: {
+        regional: [],
+        manager: [],
+        region: [],
+        state: [],
+        municipality: [],
+        client: [],
+        product: [],
+        macroCategory: [],
+        itemGroup: [],
+        category: [],
+        channel: [],
+        segment: [],
+        brand: [],
+      },
+      labels: {},
+      registeredProducts: [],
+      meta: { productActiveCount: 0, productRegisteredCount: 0, productHasMoreRegistered: false },
+      incompatible: [],
+      truncated: {},
+    };
+  }
+
+  const catalogRows = (
+    await stmt(e, "SELECT dimension, value_key, display FROM ci_dim_catalog WHERE batch_id=?", batchId).all<{
+      dimension: string;
+      value_key: string;
+      display: string;
+    }>()
   ).results;
+  const catDisplay = new Map<string, string>();
+  for (const r of catalogRows) {
+    if (r.display) catDisplay.set(`${r.dimension}\u0000${r.value_key}`, r.display);
+  }
+  const getCat = (dim: string, key: string, fallback?: string | null) =>
+    catDisplay.get(`${dim}\u0000${key}`) || fallback || key;
 
-  const pick = (dim: string) => catalog.filter((r) => r.dimension === dim);
-  const filterReps = pick("representative")
-    .filter((r) => !acl.allowedRegions.length || acl.allowedRegions.includes(r.value_key))
-    .map((r) => r.display || r.value_key);
+  const monthEnd = new Date(Date.UTC(Number(f.to.slice(0, 4)), Number(f.to.slice(5, 7)), 0))
+    .toISOString()
+    .slice(0, 10);
+  const curToMonth = curTo.slice(0, 7);
+  const aggPeriodExact = hasAggCube && (curTo >= monthEnd || !batch.coverage_to || curTo >= batch.coverage_to);
 
-  const macroCats = pick("macro_category").map((r) => `Macro Categoria: ${r.value_key}`);
-  const groupCats = pick("group").map((r) => r.display || r.value_key);
-  const categories = [...new Set([...macroCats, ...groupCats])].sort((a, b) => a.localeCompare(b, "pt-BR"));
+  const canUseAgg = (sub: Filters) =>
+    aggPeriodExact &&
+    !acl.allowedClients.length &&
+    !mergeNormalizedKeys(sub.client, sub.clients).length &&
+    !mergeNormalizedKeys(undefined, sub.clientsExclude).length &&
+    !mergeNormalizedKeys(sub.product, sub.products).length &&
+    !mergeNormalizedKeys(undefined, sub.productsExclude).length &&
+    !mergeNormalizedKeys(sub.municipality, sub.municipalities).length &&
+    !mergeNormalizedKeys(undefined, sub.municipalitiesExclude).length;
 
-  const states = pick("state").map((r) => r.value_key).sort((a, b) => a.localeCompare(b, "pt-BR"));
-  const regionals = pick("regional").map((r) => r.display || r.value_key);
-  const managers = pick("manager").map((r) => r.display || r.value_key);
-  const channels = pick("channel").map((r) => r.display || r.value_key);
-  const segments = pick("segment").map((r) => r.display || r.value_key);
-  const brands = pick("brand").map((r) => r.display || r.value_key);
+  const macroFactExpr = hasDenormMacro ? "s.macro_key" : "COALESCE(p.macro_category_key, s.macro_key)";
+  type DimItem = { k: string; lbl: string };
+  type DimResult = { items: DimItem[]; truncated: boolean };
+
+  const compoundUnion = (parts: string[]): string =>
+    parts.length === 1
+      ? parts[0]
+      : `SELECT * FROM (${compoundUnion(parts.slice(0, Math.ceil(parts.length / 2)))}) UNION ALL SELECT * FROM (${compoundUnion(parts.slice(Math.ceil(parts.length / 2)))})`;
+
+  const ALL_OPT_DIMS: ExtendedFilterDimension[] = [
+    "regional",
+    "manager",
+    "state",
+    "region",
+    "macroCategory",
+    "itemGroup",
+    "channel",
+    "segment",
+    "brand",
+    "municipality",
+    "client",
+    "product",
+  ];
+
+  const AGG_COL_BY_DIM: Partial<Record<ExtendedFilterDimension, { expr: string; alias: string; jsDedup?: boolean }>> = {
+    regional: { expr: "a.regional_key", alias: "regional_key" },
+    manager: { expr: "a.manager_key", alias: "manager_key" },
+    state: { expr: "a.state_key", alias: "state_key" },
+    region: { expr: "a.representative_key", alias: "representative_key" },
+    macroCategory: { expr: "a.macro_key", alias: "macro_key" },
+    itemGroup: { expr: "a.group_key", alias: "group_key" },
+    channel: { expr: "TRIM(a.channel)", alias: "channel", jsDedup: true },
+    segment: { expr: "TRIM(a.segment)", alias: "segment", jsDedup: true },
+    brand: { expr: "TRIM(a.brand)", alias: "brand", jsDedup: true },
+  };
+
+  const FACT_COL_BY_DIM: Record<
+    ExtendedFilterDimension,
+    { expr: string; alias: string; extraJoin?: "customers" | "products" | "regions"; jsDedup?: boolean }
+  > = {
+    regional: { expr: "rg.regional_key", alias: "regional_key", extraJoin: "regions" },
+    manager: { expr: "rg.manager_key", alias: "manager_key", extraJoin: "regions" },
+    state: { expr: "s.state_key", alias: "state_key" },
+    region: { expr: "c.representative_key", alias: "representative_key", extraJoin: "customers" },
+    macroCategory: {
+      expr: macroFactExpr,
+      alias: "macro_key",
+      extraJoin: hasDenormMacro ? undefined : "products",
+    },
+    itemGroup: { expr: "s.group_key", alias: "group_key" },
+    channel: { expr: "TRIM(s.channel)", alias: "channel", jsDedup: true },
+    segment: { expr: "TRIM(c.segment)", alias: "segment", extraJoin: "customers", jsDedup: true },
+    brand: { expr: "TRIM(p.brand)", alias: "brand", extraJoin: "products", jsDedup: true },
+    municipality: { expr: "TRIM(s.municipality)", alias: "muni", jsDedup: true },
+    client: { expr: "s.client_key", alias: "client_key" },
+    product: { expr: "s.product_key", alias: "product_key" },
+  };
+
+  const toDimResult = (rawVals: string[], jsDedup?: boolean): DimResult => {
+    const rawLimit = jsDedup ? 300 : 250;
+    const rawTruncated = rawVals.length > rawLimit;
+    if (!jsDedup) {
+      return {
+        items: rawVals.slice(0, 250).map((v) => ({ k: v, lbl: v })),
+        truncated: rawTruncated,
+      };
+    }
+    const deduped = new Map<string, string>();
+    for (const v of rawVals.slice(0, rawLimit)) {
+      const k = normalizeCsvKey(v) ?? v;
+      if (k && !deduped.has(k)) deduped.set(k, v);
+    }
+    const items = [...deduped.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([k, lbl]) => ({ k, lbl }));
+    return {
+      items: items.slice(0, 250),
+      truncated: rawTruncated || items.length > 250,
+    };
+  };
+
+  type Bucket = { kind: "agg" | "fact"; sub: Filters; dims: ExtendedFilterDimension[] };
+  const aggBuckets = new Map<string, Bucket>();
+  const factBuckets = new Map<string, Bucket>();
+
+  for (const dim of ALL_OPT_DIMS) {
+    const sub = withoutDimFilters(f, dim);
+    const subKey = JSON.stringify(sub);
+    const isAggEligible = Boolean(AGG_COL_BY_DIM[dim]) && canUseAgg(sub);
+    const targetMap = isAggEligible ? aggBuckets : factBuckets;
+    const existing = targetMap.get(subKey);
+    if (existing) existing.dims.push(dim);
+    else targetMap.set(subKey, { kind: isAggEligible ? "agg" : "fact", sub, dims: [dim] });
+  }
+
+  const dimResults: Partial<Record<ExtendedFilterDimension, DimResult>> = {};
+
+  const runAggBucket = async (bucket: Bucket) => {
+    const aw = buildAggWhere(batchId, f.from, curToMonth, bucket.sub, acl);
+    if (aw.emptyIntersection) {
+      for (const dim of bucket.dims) dimResults[dim] = { items: [], truncated: false };
+      return;
+    }
+    if (bucket.dims.length === 1) {
+      const dim = bucket.dims[0];
+      const spec = AGG_COL_BY_DIM[dim]!;
+      const limit = spec.jsDedup ? 301 : 251;
+      const rows = (
+        await stmt(
+          e,
+          `SELECT DISTINCT ${spec.expr} AS v FROM ci_agg_monthly a WHERE ${aw.clause} AND ${spec.expr} <> '' ORDER BY v LIMIT ${limit}`,
+          ...aw.args,
+        ).all<{ v: string }>()
+      ).results;
+      dimResults[dim] = toDimResult(
+        rows.map((r) => r.v),
+        spec.jsDedup,
+      );
+      return;
+    }
+    const selectCols = [...new Set(bucket.dims.map((dim) => `${AGG_COL_BY_DIM[dim]!.expr} AS ${AGG_COL_BY_DIM[dim]!.alias}`))];
+    const parts = bucket.dims.map((dim) => {
+      const spec = AGG_COL_BY_DIM[dim]!;
+      const limit = spec.jsDedup ? 301 : 251;
+      return `SELECT '${dim}' AS d, v FROM (SELECT DISTINCT ${spec.alias} AS v FROM agg_base WHERE ${spec.alias} <> '' ORDER BY v LIMIT ${limit})`;
+    });
+    const rows = (
+      await stmt(
+        e,
+        `WITH agg_base AS MATERIALIZED (SELECT ${selectCols.join(", ")} FROM ci_agg_monthly a WHERE ${aw.clause}) ${compoundUnion(parts)}`,
+        ...aw.args,
+      ).all<{ d: ExtendedFilterDimension; v: string }>()
+    ).results;
+    const grouped = new Map<ExtendedFilterDimension, string[]>();
+    for (const r of rows) {
+      const list = grouped.get(r.d) ?? [];
+      list.push(r.v);
+      grouped.set(r.d, list);
+    }
+    for (const dim of bucket.dims) {
+      dimResults[dim] = toDimResult(grouped.get(dim) ?? [], AGG_COL_BY_DIM[dim]!.jsDedup);
+    }
+  };
+
+  const needsAnyRegionGeo =
+    needsRegionDimFilter(f) || Boolean(f.regional || f.regionals?.length || f.regionalsExclude?.length || f.manager || f.managers?.length || f.managersExclude?.length);
+  const regionStatesCache = needsAnyRegionGeo ? await loadRegionStates(e, batchId) : null;
+
+  const runFactBucket = async (bucket: Bucket) => {
+    const subGeo = regionStatesCache ? resolveGeoStateKeys(bucket.sub, regionStatesCache) : undefined;
+    const w = buildFactWhere(
+      "s",
+      batchId,
+      bucket.sub,
+      acl,
+      hasCalendar,
+      hasDenormMacro,
+      undefined,
+      "single_range",
+      curFrom,
+      curTo,
+      undefined,
+      undefined,
+      false,
+      false,
+      subGeo,
+    );
+    if (w.emptyIntersection) {
+      for (const dim of bucket.dims) dimResults[dim] = { items: [], truncated: false };
+      return;
+    }
+
+    const canFastUnfilteredFact =
+      !acl.allowedRegions.length &&
+      !acl.allowedClients.length &&
+      !hasCalendar &&
+      !w.joins &&
+      bucket.dims.every(
+        (d) => d === "client" || (d === "product" && batch.product_rows > 0) || d === "municipality",
+      ) &&
+      Object.entries(bucket.sub).every(([k, v]) => {
+        if (k === "from" || k === "to") return true;
+        if (k === "variationDirection") return !v || v === "all";
+        return Array.isArray(v) ? v.length === 0 : v === undefined || v === "";
+      });
+
+    if (canFastUnfilteredFact) {
+      await Promise.all(
+        bucket.dims.map(async (dim) => {
+          if (dim === "client") {
+            const rows = (
+              await stmt(
+                e,
+                "SELECT DISTINCT s.client_key AS v FROM ci_fact_sales s WHERE s.batch_id=? AND s.date>=? AND s.date<=? AND s.client_key IS NOT NULL AND s.client_key<>'' ORDER BY v LIMIT 251",
+                batchId,
+                curFrom,
+                curTo,
+              ).all<{ v: string }>()
+            ).results;
+            dimResults.client = toDimResult(rows.map((r) => r.v));
+          } else if (dim === "product") {
+            const rows = (
+              await stmt(
+                e,
+                "SELECT p.product_key AS v FROM ci_dim_products p WHERE p.batch_id=? AND EXISTS(SELECT 1 FROM ci_fact_sales s WHERE s.batch_id=p.batch_id AND s.product_key=p.product_key AND s.date>=? AND s.date<=?) ORDER BY p.product_key LIMIT 251",
+                batchId,
+                curFrom,
+                curTo,
+              ).all<{ v: string }>()
+            ).results;
+            dimResults.product = toDimResult(rows.map((r) => r.v));
+          } else if (dim === "municipality") {
+            const rows = (
+              await stmt(
+                e,
+                "SELECT DISTINCT TRIM(s.municipality) AS v FROM ci_fact_sales s WHERE s.batch_id=? AND s.date>=? AND s.date<=? AND s.municipality IS NOT NULL AND TRIM(s.municipality)<>'' ORDER BY v LIMIT 301",
+                batchId,
+                curFrom,
+                curTo,
+              ).all<{ v: string }>()
+            ).results;
+            dimResults.municipality = toDimResult(rows.map((r) => r.v), true);
+          }
+        }),
+      );
+      return;
+    }
+    let joins = w.joins;
+    const neededJoins = new Set(bucket.dims.map((dim) => FACT_COL_BY_DIM[dim].extraJoin).filter(Boolean));
+    if (neededJoins.has("customers") && !joins.includes("ci_dim_customers")) {
+      joins += " LEFT JOIN ci_dim_customers c ON c.batch_id = s.batch_id AND c.client_key = s.client_key";
+    }
+    if (neededJoins.has("products") && !joins.includes("ci_dim_products")) {
+      joins += " LEFT JOIN ci_dim_products p ON p.batch_id = s.batch_id AND p.product_key = s.product_key";
+    }
+    if (neededJoins.has("regions") && !joins.includes("ci_dim_regions")) {
+      joins += " LEFT JOIN ci_dim_regions rg ON rg.batch_id = s.batch_id AND rg.state_key = s.state_key";
+    }
+    if (bucket.dims.length === 1) {
+      const dim = bucket.dims[0];
+      const spec = FACT_COL_BY_DIM[dim];
+      const limit = spec.jsDedup ? 301 : 251;
+      const rows = (
+        await stmt(
+          e,
+          `SELECT DISTINCT ${spec.expr} AS v FROM ci_fact_sales s ${joins} WHERE ${w.clause} AND ${spec.expr} IS NOT NULL AND ${spec.expr} <> '' ORDER BY v LIMIT ${limit}`,
+          ...w.args,
+        ).all<{ v: string }>()
+      ).results;
+      dimResults[dim] = toDimResult(
+        rows.map((r) => r.v),
+        spec.jsDedup,
+      );
+      return;
+    }
+    const selectCols = [...new Set(bucket.dims.map((dim) => `${FACT_COL_BY_DIM[dim].expr} AS ${FACT_COL_BY_DIM[dim].alias}`))];
+    const parts = bucket.dims.map((dim) => {
+      const spec = FACT_COL_BY_DIM[dim];
+      const limit = spec.jsDedup ? 301 : 251;
+      return `SELECT '${dim}' AS d, v FROM (SELECT DISTINCT ${spec.alias} AS v FROM fact_base WHERE ${spec.alias} IS NOT NULL AND ${spec.alias} <> '' ORDER BY v LIMIT ${limit})`;
+    });
+    const rows = (
+      await stmt(
+        e,
+        `WITH fact_base AS MATERIALIZED (SELECT ${selectCols.join(", ")} FROM ci_fact_sales s ${joins} WHERE ${w.clause}) ${compoundUnion(parts)}`,
+        ...w.args,
+      ).all<{ d: ExtendedFilterDimension; v: string }>()
+    ).results;
+    const grouped = new Map<ExtendedFilterDimension, string[]>();
+    for (const r of rows) {
+      const list = grouped.get(r.d) ?? [];
+      list.push(r.v);
+      grouped.set(r.d, list);
+    }
+    for (const dim of bucket.dims) {
+      dimResults[dim] = toDimResult(grouped.get(dim) ?? [], FACT_COL_BY_DIM[dim].jsDedup);
+    }
+  };
+
+  const queryRegisteredProducts = async () => {
+    const sub = withoutDimFilters(f, "product");
+    const inc = splitCategories(sub.category, sub.categoriesInclude);
+    const exc = splitCategories(undefined, sub.categoriesExclude);
+    const reqBrands = mergeNormalizedKeys(undefined, sub.brands);
+    const reqBrandsExc = mergeNormalizedKeys(undefined, sub.brandsExclude);
+    if (allExcluded(inc.macros, exc.macros) || allExcluded(reqBrands, reqBrandsExc)) {
+      return [] as { product_key: string; product_raw: string; description: string | null }[];
+    }
+    const clauses = ["p.batch_id = ?"];
+    const args: (string | number | null)[] = [batchId];
+    const budget = { rem: 60 };
+    if (inc.macros.length) clauses.push(inlineInExpr("p.macro_category_key", inc.macros, budget, args));
+    if (exc.macros.length) clauses.push(inlineInExpr("p.macro_category_key", exc.macros, budget, args, true));
+    if (reqBrands.length) clauses.push(inlineInExpr(sqlUpperPt("p.brand"), reqBrands, budget, args));
+    if (reqBrandsExc.length) clauses.push(inlineInExpr(sqlUpperPt("p.brand"), reqBrandsExc, budget, args, true));
+    return (
+      await stmt(
+        e,
+        `SELECT p.product_key, p.product_raw, p.description FROM ci_dim_products p WHERE ${clauses.join(" AND ")} ORDER BY p.product_key`,
+        ...args,
+      ).all<{ product_key: string; product_raw: string; description: string | null }>()
+    ).results;
+  };
+
+  const [regProdsAll] = await Promise.all([
+    queryRegisteredProducts(),
+    ...[...aggBuckets.values()].map(runAggBucket),
+    ...[...factBuckets.values()].map(runFactBucket),
+  ]);
+
+  const emptyRes: DimResult = { items: [], truncated: false };
+  const regRes = dimResults.regional ?? emptyRes;
+  const mgrRes = dimResults.manager ?? emptyRes;
+  const stateRes = dimResults.state ?? emptyRes;
+  const repRes = dimResults.region ?? emptyRes;
+  const muniRes = dimResults.municipality ?? emptyRes;
+  const cliRes = dimResults.client ?? emptyRes;
+  const prodRes = dimResults.product ?? emptyRes;
+  const macroRes = dimResults.macroCategory ?? emptyRes;
+  const grpRes = dimResults.itemGroup ?? emptyRes;
+  const chanRes = dimResults.channel ?? emptyRes;
+  const segRes = dimResults.segment ?? emptyRes;
+  const brandRes = dimResults.brand ?? emptyRes;
+
+  // Format official regional names cleanly (never manager names)
+  const regionalLabels: Record<string, string> = {};
+  const regionalKeys = regRes.items
+    .map((r) => normalizeRegionalKey(r.k) ?? r.k)
+    .filter(Boolean);
+  for (const k of regionalKeys) {
+    regionalLabels[k] = formatOfficialRegionalName(k);
+  }
+  const regionalsSorted = [...new Set(regionalKeys)].sort((a, b) =>
+    (regionalLabels[a] ?? a).localeCompare(regionalLabels[b] ?? b, "pt-BR"),
+  );
+
+  // Manager names (separate filter only)
+  const managerLabels: Record<string, string> = {};
+  const managersSorted = mgrRes.items
+    .map((r) => {
+      const disp = getCat("manager", r.k, r.lbl);
+      managerLabels[disp] = disp;
+      return disp;
+    })
+    .sort((a, b) => a.localeCompare(b, "pt-BR"));
+
+  // States (keep 2-letter UF codes as keys; put state name in labels.state)
+  const stateLabels: Record<string, string> = {};
+  const statesSorted = stateRes.items
+    .map((r) => {
+      const fullName = getCat("state", r.k, null);
+      if (fullName && fullName !== r.k) stateLabels[r.k] = `${r.k} — ${fullName}`;
+      else stateLabels[r.k] = r.k;
+      return r.k;
+    })
+    .sort((a, b) => a.localeCompare(b, "pt-BR"));
+
+  // Representatives
+  const regionLabels: Record<string, string> = {};
+  const regionsSorted = repRes.items
+    .filter((r) => !acl.allowedRegions.length || acl.allowedRegions.includes(r.k))
+    .map((r) => {
+      const disp = getCat("representative", r.k, r.lbl);
+      regionLabels[disp] = disp;
+      return disp;
+    })
+    .sort((a, b) => a.localeCompare(b, "pt-BR"));
+
+  // Municipalities (key = clean display name)
+  const muniLabels: Record<string, string> = {};
+  const municipalitiesSorted = muniRes.items
+    .map((r) => {
+      const disp = r.lbl || r.k;
+      muniLabels[disp] = disp;
+      return disp;
+    })
+    .sort((a, b) => a.localeCompare(b, "pt-BR"));
+
+  // Channels, Segments, Brands
+  const channelsSorted = chanRes.items
+    .map((r) => {
+      for (const [ck, cv] of catDisplay.entries()) {
+        if (ck.startsWith("channel\u0000") && cv.toLocaleUpperCase("pt-BR") === r.k) return cv;
+      }
+      return r.lbl || r.k;
+    })
+    .sort((a, b) => a.localeCompare(b, "pt-BR"));
+
+  const segmentsSorted = segRes.items
+    .map((r) => {
+      for (const [ck, cv] of catDisplay.entries()) {
+        if (ck.startsWith("segment\u0000") && cv.toLocaleUpperCase("pt-BR") === r.k) return cv;
+      }
+      return r.lbl || r.k;
+    })
+    .sort((a, b) => a.localeCompare(b, "pt-BR"));
+
+  const brandsSorted = brandRes.items
+    .map((r) => {
+      for (const [ck, cv] of catDisplay.entries()) {
+        if (ck.startsWith("brand\u0000") && cv.toLocaleUpperCase("pt-BR") === r.k) return cv;
+      }
+      return r.lbl || r.k;
+    })
+    .sort((a, b) => a.localeCompare(b, "pt-BR"));
+
+  // Macro Categories ("Macro Categoria: <KEY>") and Item Groups (<GROUP>)
+  const macroLabels: Record<string, string> = {};
+  const macroCatsSorted = macroRes.items
+    .map((r) => {
+      const key = `Macro Categoria: ${r.k}`;
+      const disp = getCat("macro_category", r.k, r.lbl);
+      macroLabels[key] = disp;
+      return key;
+    })
+    .sort((a, b) => (macroLabels[a] ?? a).localeCompare(macroLabels[b] ?? b, "pt-BR"));
+
+  const groupLabels: Record<string, string> = {};
+  const itemGroupsSorted = grpRes.items
+    .map((r) => {
+      const disp = getCat("group", r.k, r.lbl);
+      groupLabels[disp] = disp;
+      return disp;
+    })
+    .sort((a, b) => a.localeCompare(b, "pt-BR"));
+
+  const categoriesSorted = [...new Set([...macroCatsSorted, ...itemGroupsSorted])].sort((a, b) =>
+    a.localeCompare(b, "pt-BR"),
+  );
+
+  // Hydrate client and product labels (plus selected ones)
+  const activeClientKeys = cliRes.items.map((r) => r.k);
+  const selectedClientKeys = mergeNormalizedKeys(f.client, f.clients).concat(mergeNormalizedKeys(undefined, f.clientsExclude));
+  const clientsToHydrate = [...new Set([...activeClientKeys, ...selectedClientKeys])].filter(
+    (k) => !acl.allowedClients.length || acl.allowedClients.includes(k),
+  );
+
+  const activeProdKeys = prodRes.items.map((r) => r.k);
+  const activeProdSet = new Set(activeProdKeys);
+  const inactiveRegProds = regProdsAll.filter((p) => !activeProdSet.has(p.product_key));
+  const registeredProductsSlice = inactiveRegProds.slice(0, 250).map((p) => p.product_key);
+
+  const selectedProdKeys = mergeNormalizedKeys(f.product, f.products).concat(mergeNormalizedKeys(undefined, f.productsExclude));
+  const prodsToHydrate = [...new Set([...activeProdKeys, ...registeredProductsSlice, ...selectedProdKeys])];
+
+  const [clientHydrated, prodHydrated] = await Promise.all([
+    hydrateDimNames(e, batchId, "client", clientsToHydrate.map((key) => ({ key, name: key, values: {} as Row["values"] }))),
+    hydrateDimNames(e, batchId, "product", prodsToHydrate.map((key) => ({ key, name: key, values: {} as Row["values"] }))),
+  ]);
+
+  const clientLabels: Record<string, string> = Object.fromEntries(
+    clientHydrated.filter((r) => r.key).map((r) => [r.key!, r.name]),
+  );
+  const productLabels: Record<string, string> = Object.fromEntries(
+    prodHydrated.filter((r) => r.key).map((r) => [r.key!, r.name]),
+  );
+
+  // Incompatible selection checks across all 12 dimensions
+  const incompatible: IncompatibleSelection[] = [];
+  const checkCompat = (
+    dim: ExtendedFilterDimension,
+    dimLabel: string,
+    selectedRaw: string[],
+    availableKeys: Set<string>,
+    norm: (v: string) => string = (v) => normalizeCsvKey(v) ?? "",
+    fmt: (v: string) => string = (v) => v,
+    extraReason?: string,
+  ) => {
+    if (!selectedRaw.length) return;
+    const missing: string[] = [];
+    const missingLabels: string[] = [];
+    const seen = new Set<string>();
+    for (const raw of selectedRaw) {
+      const k = norm(raw);
+      if (!k || seen.has(k)) continue;
+      seen.add(k);
+      if (!availableKeys.has(k)) {
+        missing.push(raw);
+        missingLabels.push(fmt(raw));
+      }
+    }
+    if (missing.length) {
+      incompatible.push({
+        dimension: dim,
+        values: missing,
+        labels: missingLabels,
+        message: `${dimLabel}: ${missingLabels.join(", ")} ${missing.length > 1 ? "não pertencem" : "não pertence"} ${extraReason || "ao recorte selecionado"}.`,
+      });
+    }
+  };
+
+  const toKeySet = (arr: string[], norm: (v: string) => string = (v) => normalizeCsvKey(v) ?? "") =>
+    new Set(arr.map(norm).filter(Boolean));
+
+  const singleOrMulti = (single?: string, multi?: string[]) => [
+    ...(single?.trim() ? [single.trim()] : []),
+    ...(multi ?? []),
+  ];
+
+  const reqRegionalRaw = singleOrMulti(f.regional, f.regionals);
+  const reqManagerRaw = singleOrMulti(f.manager, f.managers);
+  const reqRepRaw = singleOrMulti(f.region, f.regions);
+  const reqStateRaw = singleOrMulti(f.state, f.states);
+  const reqMuniRaw = singleOrMulti(f.municipality, f.municipalities);
+  const reqClientRaw = singleOrMulti(f.client, f.clients);
+  const reqProdRaw = singleOrMulti(f.product, f.products);
+  const reqIncMacros = (f.categoriesInclude ?? []).filter((v) =>
+    v.normalize("NFC").trim().toLocaleLowerCase("pt-BR").startsWith("macro categoria:"),
+  );
+  const reqIncGroups = [
+    ...(f.category?.trim() ? [f.category.trim()] : []),
+    ...(f.categoriesInclude ?? []).filter(
+      (v) => !v.normalize("NFC").trim().toLocaleLowerCase("pt-BR").startsWith("macro categoria:"),
+    ),
+  ];
+
+  if (!mgrRes.truncated) {
+    checkCompat("manager", "Gerente Regional", reqManagerRaw, toKeySet(managersSorted), undefined, (v) => managerLabels[v] ?? v);
+  }
+  if (!repRes.truncated) {
+    checkCompat("region", "Representante", reqRepRaw, toKeySet(regionsSorted), undefined, (v) => regionLabels[v] ?? v);
+  }
+  if (!stateRes.truncated) {
+    checkCompat("state", "UF", reqStateRaw, toKeySet(statesSorted), undefined, (v) => stateLabels[normalizeCsvKey(v) ?? v] ?? v);
+  }
+  if (!macroRes.truncated) {
+    checkCompat(
+      "macroCategory",
+      "Macrocategoria",
+      reqIncMacros,
+      toKeySet(macroCatsSorted, (v) => normalizeCsvKey(v.replace(/^macro categoria:\s*/iu, "")) ?? ""),
+      (v) => normalizeCsvKey(v.replace(/^macro categoria:\s*/iu, "")) ?? "",
+      (v) => v.replace(/^macro categoria:\s*/iu, ""),
+    );
+  }
+  if (!grpRes.truncated) {
+    checkCompat("itemGroup", "Grupo do item", reqIncGroups, toKeySet(itemGroupsSorted));
+  }
+  if (!chanRes.truncated) checkCompat("channel", "Canal comercial", f.channels ?? [], toKeySet(channelsSorted));
+  if (!segRes.truncated) checkCompat("segment", "Segmento", f.segments ?? [], toKeySet(segmentsSorted));
+  if (!brandRes.truncated) checkCompat("brand", "Marca", f.brands ?? [], toKeySet(brandsSorted));
+
+  // For Regional: avoid falsely blaming parent regional when ONLY a lower geo child (UF/manager/municipality) caused empty cascade
+  if (!regRes.truncated && reqRegionalRaw.length) {
+    const regSet = toKeySet(regionalsSorted, (v) => normalizeRegionalKey(v) ?? "");
+    const childGeoConflict = incompatible.some((x) => ["state", "manager", "municipality", "region"].includes(x.dimension));
+    if (!childGeoConflict) {
+      checkCompat(
+        "regional",
+        "Regional",
+        reqRegionalRaw,
+        regSet,
+        (v) => normalizeRegionalKey(v) ?? "",
+        (v) => formatOfficialRegionalName(v),
+      );
+    }
+  }
+
+  // Targeted checks for potentially truncated high-cardinality selections (client, product, municipality)
+  const checkHighCard = async (
+    dim: "client" | "product" | "municipality",
+    label: string,
+    selectedRaw: string[],
+    alreadyFound: Set<string>,
+    colExpr: string,
+    isTruncated: boolean,
+    registeredFallbackSet?: Set<string>,
+  ) => {
+    if (!selectedRaw.length) return;
+    const normMap = new Map<string, string>();
+    for (const raw of selectedRaw) {
+      const k = normalizeCsvKey(raw);
+      if (!k) continue;
+      if (!alreadyFound.has(k) && (!registeredFallbackSet || !registeredFallbackSet.has(k))) {
+        normMap.set(k, raw);
+      }
+    }
+    if (!normMap.size) return;
+    if (isTruncated) {
+      const sub = withoutDimFilters(f, dim);
+      const subGeo = regionStatesCache ? resolveGeoStateKeys(sub, regionStatesCache) : undefined;
+      const w = buildFactWhere(
+        "s",
+        batchId,
+        sub,
+        acl,
+        hasCalendar,
+        hasDenormMacro,
+        dim === "client" ? "client" : dim === "product" ? "product" : undefined,
+        "single_range",
+        curFrom,
+        curTo,
+        undefined,
+        undefined,
+        false,
+        false,
+        subGeo,
+      );
+      if (!w.emptyIntersection) {
+        const missingKeys = [...normMap.keys()];
+        const argsCopy = [...w.args];
+        const cond = inlineInExpr(colExpr, missingKeys, { rem: 60 }, argsCopy);
+        const foundRows = (
+          await stmt(e, `SELECT DISTINCT ${colExpr} AS k FROM ci_fact_sales s ${w.joins} WHERE ${w.clause} AND ${cond}`, ...argsCopy).all<{
+            k: string;
+          }>()
+        ).results;
+        for (const r of foundRows) normMap.delete(r.k);
+      }
+    }
+    if (normMap.size) {
+      const missingRaw = [...normMap.values()];
+      const lblMap = dim === "client" ? clientLabels : dim === "product" ? productLabels : muniLabels;
+      const missingLbls = missingRaw.map((v) => lblMap[normalizeCsvKey(v) ?? v] ?? v);
+      incompatible.push({
+        dimension: dim,
+        values: missingRaw,
+        labels: missingLbls,
+        message: `${label}: ${missingLbls.join(", ")} ${missingRaw.length > 1 ? "não possuem" : "não possui"} compatibilidade com o recorte atual.`,
+      });
+    }
+  };
+
+  const regProdKeySet = new Set(regProdsAll.map((p) => p.product_key));
+  await Promise.all([
+    checkHighCard("client", "Cliente", reqClientRaw, activeClientKeys.reduce((s, k) => s.add(k), new Set<string>()), "s.client_key", cliRes.truncated),
+    checkHighCard("product", "Produto", reqProdRaw, activeProdSet, "s.product_key", prodRes.truncated, regProdKeySet),
+    checkHighCard(
+      "municipality",
+      "Município",
+      reqMuniRaw,
+      toKeySet(municipalitiesSorted),
+      sqlUpperPt("s.municipality"),
+      muniRes.truncated,
+    ),
+  ]);
 
   return {
     batchId,
     values: {
-      state: states.slice(0, 250),
-      regional: regionals.slice(0, 250),
-      manager: managers.slice(0, 250),
-      region: filterReps.slice(0, 250),
-      category: categories.slice(0, 250),
-      client: acl.allowedClients.slice(0, 250),
-      product: [],
-      channel: channels.slice(0, 250),
-      segment: segments.slice(0, 250),
-      brand: brands.slice(0, 250),
+      regional: regionalsSorted,
+      manager: managersSorted,
+      region: regionsSorted,
+      state: statesSorted,
+      municipality: municipalitiesSorted,
+      client: activeClientKeys,
+      product: activeProdKeys,
+      macroCategory: macroCatsSorted,
+      itemGroup: itemGroupsSorted,
+      category: categoriesSorted,
+      channel: channelsSorted,
+      segment: segmentsSorted,
+      brand: brandsSorted,
     },
+    labels: {
+      regional: regionalLabels,
+      manager: managerLabels,
+      region: regionLabels,
+      state: stateLabels,
+      municipality: muniLabels,
+      client: clientLabels,
+      product: productLabels,
+      macroCategory: macroLabels,
+      itemGroup: groupLabels,
+      category: { ...macroLabels, ...groupLabels },
+    },
+    registeredProducts: registeredProductsSlice,
+    meta: {
+      productActiveCount: activeProdKeys.length,
+      productRegisteredCount: regProdsAll.length,
+      productHasMoreRegistered: inactiveRegProds.length > 250,
+    },
+    incompatible,
     truncated: {
-      state: states.length > 250,
-      regional: regionals.length > 250,
-      manager: managers.length > 250,
-      region: filterReps.length > 250,
-      category: categories.length > 250,
+      regional: regRes.truncated,
+      manager: mgrRes.truncated,
+      region: repRes.truncated,
+      state: stateRes.truncated,
+      municipality: muniRes.truncated,
+      client: cliRes.truncated,
+      product: prodRes.truncated,
+      macroCategory: macroRes.truncated,
+      itemGroup: grpRes.truncated,
+      category: macroRes.truncated || grpRes.truncated,
+      channel: chanRes.truncated,
+      segment: segRes.truncated,
+      brand: brandRes.truncated,
     },
   };
 }
@@ -825,6 +2152,9 @@ export async function queryCsvReport(
   const omitCustJoin = canFastClient || canFastRegion;
   const omitProdJoin = canFastProduct || canFastCategory;
   const periodMode: PeriodMode = disjointPeriods ? "disjoint_dual" : "periods_join";
+  const resolvedGeo = needsRegionDimFilter(f)
+    ? resolveGeoStateKeys(f, await loadRegionStates(e, batchId))
+    : undefined;
 
   const salesW = buildFactWhere(
     "s",
@@ -841,6 +2171,7 @@ export async function queryCsvReport(
     comp.previous.to,
     omitCustJoin,
     omitProdJoin,
+    resolvedGeo,
   );
   const retW = buildFactWhere(
     "r",
@@ -857,6 +2188,7 @@ export async function queryCsvReport(
     comp.previous.to,
     omitCustJoin,
     omitProdJoin,
+    resolvedGeo,
   );
 
   if (salesW.emptyIntersection) {
@@ -912,6 +2244,11 @@ export async function queryCsvReport(
           "single_range",
           comp.current.from,
           comp.current.to,
+          undefined,
+          undefined,
+          false,
+          false,
+          resolvedGeo,
         );
         return stmt(
           e,
@@ -934,6 +2271,11 @@ export async function queryCsvReport(
           "single_range",
           comp.current.from,
           comp.current.to,
+          undefined,
+          undefined,
+          false,
+          false,
+          resolvedGeo,
         );
         if (!hasCustFilter) {
           return stmt(
@@ -966,6 +2308,9 @@ export async function queryCsvReport(
           comp.current.to,
           comp.current.from,
           comp.previous.to,
+          false,
+          false,
+          resolvedGeo,
         );
         if (disjointPeriods) {
           return stmt(
@@ -1504,7 +2849,12 @@ export async function queryCsvReport(
     }
 
     rows = [...gMap.values()].map((v) => ({
-      name: v.name,
+      name:
+        plan.group === "regional" && v.key !== null
+          ? formatOfficialRegionalName(v.key) !== v.key || v.key === "EX"
+            ? formatOfficialRegionalName(v.key)
+            : v.name
+          : v.name,
       ...(v.key === null ? { canDrill: false } : { key: v.key }),
       values: {
         gross: toPair(v.cg, v.pg),
@@ -1780,25 +3130,47 @@ export async function queryCsvCustomerRegistryCounts(
   filters?: Filters,
 ): Promise<{ registeredClients: number; registeredReps: number }> {
   const acl = scopeForUser(u, filters);
-  const clauses = ["batch_id=?"];
+  const clauses = ["c.batch_id=?"];
   const args: (string | number | null)[] = [batchId];
   const budget = { rem: 60 };
   if (acl.allowedRegions.length) {
-    clauses.push(inlineInExpr("representative_key", acl.allowedRegions, budget, args));
+    clauses.push(inlineInExpr("c.representative_key", acl.allowedRegions, budget, args));
   }
   if (acl.allowedClients.length) {
-    clauses.push(inlineInExpr("client_key", acl.allowedClients, budget, args));
+    clauses.push(inlineInExpr("c.client_key", acl.allowedClients, budget, args));
   }
   const reqReps = filters ? mergeNormalizedKeys(filters.region, filters.regions) : [];
+  const reqRepsExc = filters ? mergeNormalizedKeys(undefined, filters.regionsExclude) : [];
   const reqClients = filters ? mergeNormalizedKeys(filters.client, filters.clients) : [];
+  const reqClientsExc = filters ? mergeNormalizedKeys(undefined, filters.clientsExclude) : [];
   const reqStates = filters ? mergeNormalizedKeys(filters.state, filters.states) : [];
-  if (reqReps.length) clauses.push(inlineInExpr("representative_key", reqReps, budget, args));
-  if (reqClients.length) clauses.push(inlineInExpr("client_key", reqClients, budget, args));
-  if (reqStates.length) clauses.push(inlineInExpr("state_key", reqStates, budget, args));
+  const reqStatesExc = filters ? mergeNormalizedKeys(undefined, filters.statesExclude) : [];
+  const reqRegionals = filters ? mergeRegionalKeys(filters.regional, filters.regionals) : [];
+  const reqRegionalsExc = filters ? mergeRegionalKeys(undefined, filters.regionalsExclude) : [];
+  const reqManagers = filters ? mergeNormalizedKeys(filters.manager, filters.managers) : [];
+  const reqManagersExc = filters ? mergeNormalizedKeys(undefined, filters.managersExclude) : [];
+  const reqSegments = filters ? mergeNormalizedKeys(undefined, filters.segments) : [];
+  const reqSegmentsExc = filters ? mergeNormalizedKeys(undefined, filters.segmentsExclude) : [];
+
+  if (reqReps.length) clauses.push(inlineInExpr("c.representative_key", reqReps, budget, args));
+  if (reqRepsExc.length) clauses.push(inlineInExpr("c.representative_key", reqRepsExc, budget, args, true));
+  if (reqClients.length) clauses.push(inlineInExpr("c.client_key", reqClients, budget, args));
+  if (reqClientsExc.length) clauses.push(inlineInExpr("c.client_key", reqClientsExc, budget, args, true));
+  if (reqStates.length) clauses.push(inlineInExpr("c.state_key", reqStates, budget, args));
+  if (reqStatesExc.length) clauses.push(inlineInExpr("c.state_key", reqStatesExc, budget, args, true));
+  if (reqSegments.length) clauses.push(inlineInExpr(sqlUpperPt("c.segment"), reqSegments, budget, args));
+  if (reqSegmentsExc.length) clauses.push(inlineInExpr(sqlUpperPt("c.segment"), reqSegmentsExc, budget, args, true));
+
+  const needGeo = reqRegionals.length > 0 || reqRegionalsExc.length > 0 || reqManagers.length > 0 || reqManagersExc.length > 0;
+  const geoJoin = needGeo ? "LEFT JOIN ci_dim_regions rg ON rg.batch_id=c.batch_id AND rg.state_key=c.state_key" : "";
+  if (reqRegionals.length) clauses.push(inlineInExpr("rg.regional_key", reqRegionals, budget, args));
+  if (reqRegionalsExc.length) clauses.push(inlineInExpr("rg.regional_key", reqRegionalsExc, budget, args, true));
+  if (reqManagers.length) clauses.push(inlineInExpr("rg.manager_key", reqManagers, budget, args));
+  if (reqManagersExc.length) clauses.push(inlineInExpr("rg.manager_key", reqManagersExc, budget, args, true));
 
   const regCounts = await stmt(
     e,
-    `SELECT COUNT(DISTINCT client_key) AS clients, COUNT(DISTINCT representative_key) AS reps FROM ci_dim_customers WHERE ${clauses.join(" AND ")}`,
+    `SELECT COUNT(DISTINCT c.client_key) AS clients, COUNT(DISTINCT c.representative_key) AS reps FROM ci_dim_customers c ${geoJoin} WHERE ${clauses.join(" AND ")}`,
     ...args,
   ).first<{ clients: number; reps: number }>();
   return {
@@ -1942,7 +3314,7 @@ export async function askCsvDeterministic(
     intent.kind === "rep_registered_count" ||
     intent.kind === "rep_active_count"
   ) {
-    const regCounts = await queryCsvCustomerRegistryCounts(e, u, batchId);
+    const regCounts = await queryCsvCustomerRegistryCounts(e, u, batchId, plan.filters);
 
     const registeredClients = regCounts.registeredClients;
     const buyingClients = report.total.values.buyers.current ?? 0;

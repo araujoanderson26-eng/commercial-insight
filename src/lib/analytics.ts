@@ -21,17 +21,29 @@ export function sameFilters(a: Filters, b: Filters): boolean {
     (a.regional ?? "") === (b.regional ?? "") &&
     (a.state ?? "") === (b.state ?? "") &&
     (a.manager ?? "") === (b.manager ?? "") &&
+    (a.municipality ?? "") === (b.municipality ?? "") &&
     sameList(a.categoriesInclude, b.categoriesInclude) &&
     sameList(a.categoriesExclude, b.categoriesExclude) &&
     sameList(a.regions, b.regions) &&
+    sameList(a.regionsExclude, b.regionsExclude) &&
     sameList(a.regionals, b.regionals) &&
+    sameList(a.regionalsExclude, b.regionalsExclude) &&
     sameList(a.states, b.states) &&
+    sameList(a.statesExclude, b.statesExclude) &&
     sameList(a.managers, b.managers) &&
+    sameList(a.managersExclude, b.managersExclude) &&
+    sameList(a.municipalities, b.municipalities) &&
+    sameList(a.municipalitiesExclude, b.municipalitiesExclude) &&
     sameList(a.clients, b.clients) &&
+    sameList(a.clientsExclude, b.clientsExclude) &&
     sameList(a.products, b.products) &&
+    sameList(a.productsExclude, b.productsExclude) &&
     sameList(a.channels, b.channels) &&
+    sameList(a.channelsExclude, b.channelsExclude) &&
     sameList(a.segments, b.segments) &&
+    sameList(a.segmentsExclude, b.segmentsExclude) &&
     sameList(a.brands, b.brands) &&
+    sameList(a.brandsExclude, b.brandsExclude) &&
     a.revenueMin === b.revenueMin &&
     a.revenueMax === b.revenueMax &&
     a.ticketMin === b.ticketMin &&

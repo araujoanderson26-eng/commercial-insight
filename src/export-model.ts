@@ -1,4 +1,4 @@
-import { change, metrics, type Metric, type Report } from '../shared/domain';
+import { change, formatOfficialRegionalName, metrics, type Metric, type Report } from '../shared/domain';
 export type Cell = string | number | null;
 export type ExportSheet = {
     name: string;
@@ -12,20 +12,32 @@ export function filterLabel(r: Report) {
     const labels: Record<string, string> = {
         region: 'Representante',
         regions: 'Representantes',
+        regionsExclude: 'Excluir representantes',
         regional: 'Regional',
         regionals: 'Regionais',
+        regionalsExclude: 'Excluir regionais',
         state: 'UF',
         states: 'UFs',
-        manager: 'Gerente',
-        managers: 'Gerentes',
+        statesExclude: 'Excluir UFs',
+        manager: 'Gerente Regional',
+        managers: 'Gerentes regionais',
+        managersExclude: 'Excluir gerentes',
+        municipality: 'Município',
+        municipalities: 'Municípios',
+        municipalitiesExclude: 'Excluir municípios',
         client: 'Cliente',
         clients: 'Clientes',
+        clientsExclude: 'Excluir clientes',
         product: 'Produto',
         products: 'Produtos',
-        channels: 'Canais',
+        productsExclude: 'Excluir produtos',
+        channels: 'Canais comerciais',
+        channelsExclude: 'Excluir canais',
         segments: 'Segmentos',
+        segmentsExclude: 'Excluir segmentos',
         brands: 'Marcas',
-        category: 'Categoria',
+        brandsExclude: 'Excluir marcas',
+        category: 'Grupo do item',
         categoriesInclude: 'Incluir categorias',
         categoriesExclude: 'Excluir categorias',
         revenueMin: 'Faturamento mín.',
@@ -33,6 +45,12 @@ export function filterLabel(r: Report) {
         ticketMin: 'Ticket mín.',
         ticketMax: 'Ticket máx.',
         variationDirection: 'Variação',
+    };
+    const fmtCategory = (raw: string) => {
+        const trimmed = raw.trim();
+        return trimmed.toLocaleLowerCase('pt-BR').startsWith('macro categoria:')
+            ? `Macrocategoria ${trimmed.slice('macro categoria:'.length).trim()}`
+            : trimmed;
     };
     return Object.entries(r.plan.filters)
         .filter(([k, v]) => {
@@ -43,7 +61,17 @@ export function filterLabel(r: Report) {
         .map(([k, v]) => {
             if (k === 'variationDirection') return `${labels[k]}: ${v === 'growth' ? 'Somente crescimento' : 'Somente queda'}`;
             if (typeof v === 'number') return `${labels[k] ?? k}: ${v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}`;
-            return (labels[k] ?? k) + ': ' + (Array.isArray(v) ? v.join(', ') : v);
+            if (Array.isArray(v)) {
+                const formatted =
+                    k === 'regionals' || k === 'regionalsExclude'
+                        ? v.map((item) => formatOfficialRegionalName(item))
+                        : k === 'categoriesInclude' || k === 'categoriesExclude'
+                            ? v.map(fmtCategory)
+                            : v;
+                return `${labels[k] ?? k}: ${formatted.join(', ')}`;
+            }
+            const scalar = k === 'regional' ? formatOfficialRegionalName(v) : v;
+            return `${labels[k] ?? k}: ${scalar}`;
         })
         .join(' · ') || 'Todo o escopo autorizado';
 }

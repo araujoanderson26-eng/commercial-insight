@@ -1,50 +1,98 @@
-import { AlertTriangle, CalendarDays, Check, Plus, RotateCcw, Search, SlidersHorizontal, X } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import {
+  AlertTriangle,
+  CalendarDays,
+  Check,
+  ChevronDown,
+  ChevronUp,
+  LoaderCircle,
+  RotateCcw,
+  Search,
+  SlidersHorizontal,
+  X,
+} from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   defaultFilters,
   detectFilterConflicts,
   filtersSchema,
   type DataCapabilities,
+  type ExtendedFilterDimension,
   type FilterDimension,
   type Filters,
   type Session,
 } from "../../shared/domain";
 import { CategoryFilter } from "../CategoryFilter";
-import { getCached, getCachedSync, makeScope, optionsCacheKey, setCached } from "../lib/cache";
+import {
+  canonicalFiltersKey,
+  getCached,
+  getCachedSync,
+  makeScope,
+  optionsCacheKey,
+  setCached,
+} from "../lib/cache";
 import {
   activeFilterChips,
+  buildCompactFilterSummary,
   hasAnyActiveFilter,
   periodPresets,
+  removeIncompatibleSelections,
+  sanitizeFiltersForCapabilities,
 } from "../lib/filter-state";
 import { api, ErrorBox, isAbortError, message, period, sessionCapabilities } from "../ui";
+import {
+  DimensionMultiFilter,
+  type OptionsPayload,
+} from "./DimensionMultiFilter";
 
-type OptionsMap = Partial<Record<FilterDimension, string[]>>;
-type OptionLabelsMap = Partial<Record<FilterDimension, Record<string, string>>>;
-type OptionsPayload = { values: OptionsMap; labels?: OptionLabelsMap };
-
-const DIMENSION_LABELS: Record<FilterDimension, string> = {
-  region: "Regional",
-  client: "Cliente",
-  product: "Produto",
-  regional: "Regional comercial",
+const DEFAULT_DIM_LABELS: Record<ExtendedFilterDimension, string> = {
+  regional: "Regional",
+  manager: "Gerente Regional",
   state: "UF",
-  manager: "Gerente",
-  category: "Categoria",
+  municipality: "Município",
+  region: "Representante",
+  client: "Cliente",
+  segment: "Segmento",
+  channel: "Canal comercial",
+  macroCategory: "Macrocategoria",
+  itemGroup: "Grupo do item",
+  brand: "Marca",
+  product: "Produto",
 };
 
-const MULTI_KEY_FOR_DIM: Partial<
-  Record<
-    FilterDimension,
-    keyof Pick<Filters, "regions" | "regionals" | "states" | "managers" | "clients" | "products">
-  >
-> = {
-  region: "regions",
-  regional: "regionals",
-  state: "states",
-  manager: "managers",
-  client: "clients",
-  product: "products",
-};
+const DIMENSION_SECTIONS: { title: string; dims: ExtendedFilterDimension[] }[] = [
+  {
+    title: "Geografia e estrutura comercial",
+    dims: ["regional", "manager", "state", "municipality", "region"],
+  },
+  {
+    title: "Carteira e mercado",
+    dims: ["client", "segment", "channel"],
+  },
+  {
+    title: "Portfólio e categorias Power BI",
+    dims: ["macroCategory", "itemGroup", "brand", "product"],
+  },
+];
+
+function isDimensionSupported(dim: ExtendedFilterDimension, capabilities: DataCapabilities): boolean {
+  switch (dim) {
+    case "regional":
+    case "manager":
+    case "region":
+    case "state":
+    case "client":
+    case "product":
+      return capabilities.filters.includes(dim);
+    case "municipality":
+    case "channel":
+    case "brand":
+    case "segment":
+      return Boolean(capabilities.extraFilters?.includes(dim));
+    case "macroCategory":
+    case "itemGroup":
+      return capabilities.filters.includes("category") && Boolean(capabilities.extraFilters?.includes(dim));
+  }
+}
 
 export function FilterBar({
   s,
@@ -62,14 +110,23 @@ export function FilterBar({
   const optKey = optionsCacheKey(filters);
   const cachedOptions = getCachedSync<OptionsPayload>(scope, optKey);
   const chips = activeFilterChips(filters, capabilities, cachedOptions?.labels);
+  const summary = buildCompactFilterSummary(filters, capabilities, cachedOptions?.labels);
+  const conflicts = detectFilterConflicts(filters);
   const presets = periodPresets();
   const hasAny = hasAnyActiveFilter(filters, capabilities);
   const activeCount = chips.length;
 
+  const [detailsExpanded, setDetailsExpanded] = useState(false);
   const [quickQuery, setQuickQuery] = useState("");
-  const [quickItems, setQuickItems] = useState<{ key: string; name: string }[]>([]);
+  const [quickItems, setQuickItems] = useState<{ key: string; name: string; hasSalesInPeriod?: boolean }[]>([]);
   const [quickOpen, setQuickOpen] = useState(false);
   const quickRef = useRef<HTMLDivElement>(null);
+
+  const quickCascadeFilters = useMemo<Filters>(
+    () => ({ ...filters, client: "", clients: undefined, clientsExclude: undefined }),
+    [filters],
+  );
+  const quickCascadeKey = useMemo(() => canonicalFiltersKey(quickCascadeFilters), [quickCascadeFilters]);
 
   useEffect(() => {
     if (s.data?.source !== "manual" || !s.data.ready || !capabilities.filters.includes("client")) {
@@ -84,11 +141,11 @@ export function FilterBar({
     let alive = true;
     const controller = new AbortController();
     const timer = setTimeout(() => {
-      api<{ items: { key: string; name: string }[] }>(
+      api<{ items: { key: string; name: string; hasSalesInPeriod?: boolean }[] }>(
         "data/search",
         "POST",
         {
-          filters: { ...filters, client: "" },
+          filters: quickCascadeFilters,
           dimension: "client",
           query: q,
         },
@@ -114,12 +171,7 @@ export function FilterBar({
     s.data?.source,
     s.data?.ready,
     s.data?.activeVersionId,
-    filters.from,
-    filters.to,
-    filters.region,
-    filters.regional,
-    filters.state,
-    filters.manager,
+    quickCascadeKey,
     capabilities.filters,
   ]);
 
@@ -133,6 +185,14 @@ export function FilterBar({
     document.addEventListener("mousedown", onPointer);
     return () => document.removeEventListener("mousedown", onPointer);
   }, [quickOpen]);
+
+  useEffect(() => {
+    if (chips.length <= 4 && detailsExpanded) {
+      setDetailsExpanded(false);
+    }
+  }, [chips.length, detailsExpanded]);
+
+  const compactMode = chips.length > 4;
 
   return (
     <div className="smart-filterbar">
@@ -186,13 +246,16 @@ export function FilterBar({
                         key={item.key}
                         type="button"
                         onClick={() => {
-                          onChange({ ...filters, client: item.key });
+                          onChange({ ...filters, client: item.key, clients: undefined });
                           setQuickQuery("");
                           setQuickItems([]);
                           setQuickOpen(false);
                         }}
                       >
-                        {item.name}
+                        <span>{item.name}</span>
+                        {item.hasSalesInPeriod === false && (
+                          <small className="muted"> · Sem venda no período</small>
+                        )}
                       </button>
                     ))}
                   </div>
@@ -220,21 +283,69 @@ export function FilterBar({
         </div>
       </div>
 
-      {chips.length > 0 && (
-        <div className="active-chips" aria-label="Filtros ativos">
-          {chips.map((chip) => (
-            <span className="filter-chip" key={chip.id}>
-              <span className="filter-chip-label">{chip.label}:</span>
-              <span className="filter-chip-value">{chip.value}</span>
+      {(chips.length > 0 || conflicts.length > 0) && (
+        <div className="active-filters-area">
+          {compactMode && (
+            <div className="filter-summary-bar" role="status" aria-label="Resumo dos filtros ativos">
+              <span className="filter-summary-text">
+                <strong>{summary.totalCount} filtros ativos:</strong> {summary.summaryText}
+              </span>
+              {conflicts.length > 0 && (
+                <button
+                  type="button"
+                  className="filter-conflict-pill"
+                  onClick={onOpenSheet}
+                  title={conflicts.join(" ")}
+                >
+                  <AlertTriangle size={13} />
+                  <span>{conflicts.length} conflito(s)</span>
+                </button>
+              )}
               <button
                 type="button"
-                aria-label={`Remover filtro ${chip.label} ${chip.value}`}
-                onClick={() => onChange(chip.remove(filters))}
+                className="filter-link-btn"
+                aria-expanded={detailsExpanded}
+                onClick={() => setDetailsExpanded((v) => !v)}
               >
-                <X size={12} />
+                {detailsExpanded ? "Recolher detalhes" : "Expandir detalhes"}
               </button>
-            </span>
-          ))}
+            </div>
+          )}
+
+          {!compactMode && conflicts.length > 0 && (
+            <div className="filter-summary-bar" role="status">
+              <button
+                type="button"
+                className="filter-conflict-pill"
+                onClick={onOpenSheet}
+                title={conflicts.join(" ")}
+              >
+                <AlertTriangle size={13} />
+                <span>{conflicts[0]}</span>
+              </button>
+            </div>
+          )}
+
+          {(!compactMode || detailsExpanded) && chips.length > 0 && (
+            <div className="active-chips" aria-label="Filtros ativos">
+              {chips.map((chip) => (
+                <span
+                  className={chip.mode === "exclude" ? "filter-chip exclude" : "filter-chip"}
+                  key={chip.id}
+                >
+                  <span className="filter-chip-label">{chip.label}:</span>
+                  <span className="filter-chip-value">{chip.value}</span>
+                  <button
+                    type="button"
+                    aria-label={`Remover filtro ${chip.label} ${chip.value}`}
+                    onClick={() => onChange(chip.remove(filters))}
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -249,178 +360,6 @@ export function FilterBar({
         {activeCount > 0 && <span className="filter-badge">{activeCount}</span>}
       </button>
     </div>
-  );
-}
-
-function DimensionField({
-  dimension,
-  title,
-  value,
-  multiValues,
-  options,
-  optionLabels,
-  capabilities,
-  s,
-  filters,
-  focusClient,
-  onChange,
-  onChangeMulti,
-}: {
-  dimension: FilterDimension;
-  title: string;
-  value: string;
-  multiValues: string[];
-  options: string[];
-  optionLabels: Record<string, string>;
-  capabilities: DataCapabilities;
-  s: Session;
-  filters: Filters;
-  focusClient: boolean;
-  onChange: (nextValue: string) => void;
-  onChangeMulti?: (nextMulti: string[]) => void;
-}) {
-  const [matches, setMatches] = useState<{ key: string; name: string }[]>([]);
-  const restrictedList =
-    dimension === "region"
-      ? s.user.regions
-      : dimension === "client"
-        ? s.user.clients
-        : [];
-  const hasRestrictedSelect =
-    restrictedList.length > 0 &&
-    !(s.user.role === "admin" || (s.user.role === "diretoria" && s.user.national));
-  const supportsRemoteSearch =
-    s.data?.source === "manual" &&
-    s.data.ready &&
-    !hasRestrictedSelect &&
-    (dimension === "client" || dimension === "product");
-  const supportsMulti = !!onChangeMulti && s.data?.source === "manual";
-
-  useEffect(() => {
-    if (!supportsRemoteSearch) {
-      setMatches([]);
-      return;
-    }
-    const q = value.trim();
-    if (q.length < 2 || options.includes(q)) {
-      setMatches([]);
-      return;
-    }
-    let alive = true;
-    const controller = new AbortController();
-    const timer = setTimeout(() => {
-      api<{ items: { key: string; name: string }[] }>(
-        "data/search",
-        "POST",
-        {
-          filters: { ...filters, [dimension]: "" },
-          dimension,
-          query: q,
-        },
-        controller.signal,
-      )
-        .then((res) => {
-          if (alive) setMatches(res.items.slice(0, 6));
-        })
-        .catch(() => {
-          if (alive) setMatches([]);
-        });
-    }, 250);
-    return () => {
-      alive = false;
-      clearTimeout(timer);
-      controller.abort();
-    };
-  }, [supportsRemoteSearch, value, options, dimension, filters.from, filters.to]);
-
-  const addToMulti = () => {
-    if (!onChangeMulti) return;
-    const trimmed = value.trim();
-    if (!trimmed) return;
-    if (!multiValues.includes(trimmed)) onChangeMulti([...multiValues, trimmed]);
-    onChange("");
-    setMatches([]);
-  };
-
-  return (
-    <label>
-      {title}
-      <div className="multi-dim-input">
-        {hasRestrictedSelect ? (
-          <select value={value} onChange={(e) => onChange(e.target.value)}>
-            <option value="">Todos no meu escopo</option>
-            {restrictedList.map((v) => (
-              <option key={v} value={v}>
-                {optionLabels[v] ?? v}
-              </option>
-            ))}
-          </select>
-        ) : (
-          <input
-            list={"source-options-" + dimension}
-            autoFocus={focusClient && dimension === "client"}
-            maxLength={140}
-            value={value}
-            onChange={(e) => onChange(e.target.value)}
-            placeholder="Todos · pesquise código ou descrição"
-          />
-        )}
-        {supportsMulti && value.trim().length > 0 && (
-          <button
-            type="button"
-            className="soft compact"
-            title={`Adicionar ${value.trim()} à seleção múltipla de ${title}`}
-            onClick={addToMulti}
-          >
-            <Plus size={13} />
-            Adicionar
-          </button>
-        )}
-      </div>
-      <datalist id={"source-options-" + dimension}>
-        {options.map((v) => (
-          <option key={v} value={v} label={optionLabels[v] ?? v} />
-        ))}
-      </datalist>
-      {matches.length > 0 && (
-        <div className="sheet-suggestions" role="list" aria-label={`Sugestões de ${title}`}>
-          {matches.map((item) => (
-            <button
-              key={item.key}
-              type="button"
-              onClick={() => {
-                onChange(item.key);
-                setMatches([]);
-              }}
-            >
-              {item.name}
-            </button>
-          ))}
-        </div>
-      )}
-      {multiValues.length > 0 && onChangeMulti && (
-        <div className="multi-selected-tags" aria-label={`Múltiplos valores de ${title}`}>
-          {multiValues.map((item) => (
-            <span className="filter-chip" key={item}>
-              <span className="filter-chip-value">{optionLabels[item] ?? item}</span>
-              <button
-                type="button"
-                aria-label={`Remover ${item}`}
-                onClick={() => onChangeMulti(multiValues.filter((v) => v !== item))}
-              >
-                <X size={11} />
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-      {optionLabels[value] && <small className="muted">{optionLabels[value]}</small>}
-      {dimension === "region" && capabilities.labels?.region === "Representante" && (
-        <small className="muted">
-          As permissões cadastradas para este campo continuam aplicadas ao representante autorizado.
-        </small>
-      )}
-    </label>
   );
 }
 
@@ -442,13 +381,24 @@ export function FilterSheetModal({
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [f, setF] = useState<Filters>(value);
   const [err, setErr] = useState("");
-  const [options, setOptions] = useState<OptionsMap>({});
-  const [optionLabels, setOptionLabels] = useState<OptionLabelsMap>({});
+  const [loadingOptions, setLoadingOptions] = useState(false);
+  const [optionsPayload, setOptionsPayload] = useState<OptionsPayload | null>(null);
+  const [openDims, setOpenDims] = useState<Set<ExtendedFilterDimension>>(
+    () => new Set(focusClient ? ["client"] : []),
+  );
+  const [rangeOpen, setRangeOpen] = useState(false);
 
   const capabilities = sessionCapabilities(s);
-  const selectedDimensions = capabilities.filters;
   const scope = makeScope(s);
   const conflicts = detectFilterConflicts(f);
+  const incompatible = optionsPayload?.incompatible ?? [];
+  const isNational = s.user.role === "admin" || (s.user.role === "diretoria" && s.user.national);
+
+  const validFilters = useMemo(() => filtersSchema.safeParse(f), [f]);
+  const validKey = useMemo(
+    () => (validFilters.success ? canonicalFiltersKey(validFilters.data) : null),
+    [validFilters],
+  );
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -457,7 +407,7 @@ export function FilterSheetModal({
   }, []);
 
   useEffect(() => {
-    if (s.data?.source !== "manual" || !s.data.ready) return;
+    if (s.data?.source !== "manual" || !s.data.ready || !validKey) return;
     const valid = filtersSchema.safeParse(f);
     if (!valid.success) return;
     let alive = true;
@@ -465,34 +415,29 @@ export function FilterSheetModal({
     const optKey = optionsCacheKey(valid.data);
     const cached = getCachedSync<OptionsPayload>(scope, optKey);
     if (cached) {
-      setOptions(cached.values);
-      setOptionLabels(cached.labels ?? {});
+      setOptionsPayload(cached);
     } else {
       void getCached<OptionsPayload>(scope, optKey).then((idbHit) => {
-        if (alive && idbHit) {
-          setOptions(idbHit.values);
-          setOptionLabels(idbHit.labels ?? {});
-        }
+        if (alive && idbHit) setOptionsPayload(idbHit);
       });
     }
 
     const timer = setTimeout(() => {
-      api<OptionsPayload>(
-        "data/options",
-        "POST",
-        { ...valid.data, categoriesInclude: [], categoriesExclude: [], category: "" },
-        controller.signal,
-      )
-        .then((v) => {
+      if (alive) setLoadingOptions(true);
+      api<OptionsPayload>("data/options", "POST", valid.data, controller.signal)
+        .then((res) => {
           if (alive) {
-            setCached(scope, optKey, "options", v, 30 * 60 * 1000);
-            setOptions(v.values);
-            setOptionLabels(v.labels ?? {});
+            setCached(scope, optKey, "options", res, 30 * 60 * 1000);
+            setOptionsPayload(res);
+            setLoadingOptions(false);
             setErr("");
           }
         })
-        .catch((e) => {
-          if (alive && !isAbortError(e)) setErr(message(e));
+        .catch((error) => {
+          if (alive) {
+            setLoadingOptions(false);
+            if (!isAbortError(error)) setErr(message(error));
+          }
         });
     }, 300);
 
@@ -501,7 +446,7 @@ export function FilterSheetModal({
       clearTimeout(timer);
       controller.abort();
     };
-  }, [scope, s.data?.source, s.data?.ready, s.data?.activeVersionId, f.from, f.to]);
+  }, [scope, s.data?.source, s.data?.ready, s.data?.activeVersionId, validKey]);
 
   function save(e: FormEvent) {
     e.preventDefault();
@@ -510,20 +455,22 @@ export function FilterSheetModal({
       setErr(parsed.error.issues[0]?.message || "Informe entre 1 e 24 meses completos e confira os filtros.");
       return;
     }
-    const supported = { ...parsed.data };
-    for (const dimension of ["regional", "state", "manager", "category"] as const) {
-      if (!capabilities.filters.includes(dimension)) {
-        delete supported[dimension];
-        const multiKey = MULTI_KEY_FOR_DIM[dimension];
-        if (multiKey) delete supported[multiKey];
-      }
-    }
-    if (!capabilities.filters.includes("category")) {
-      delete supported.categoriesInclude;
-      delete supported.categoriesExclude;
-    }
-    apply(supported);
+    const clean = sanitizeFiltersForCapabilities(
+      parsed.data,
+      capabilities.filters,
+      capabilities.extraFilters,
+    );
+    apply(clean);
   }
+
+  const toggleDim = (dim: ExtendedFilterDimension) => {
+    setOpenDims((prev) => {
+      const next = new Set(prev);
+      if (next.has(dim)) next.delete(dim);
+      else next.add(dim);
+      return next;
+    });
+  };
 
   const setNum = (field: "revenueMin" | "revenueMax" | "ticketMin" | "ticketMax", raw: string) => {
     const trimmed = raw.trim();
@@ -534,6 +481,15 @@ export function FilterSheetModal({
     const n = Number(trimmed);
     if (Number.isFinite(n)) setF({ ...f, [field]: n });
   };
+
+  const rangeCount =
+    (f.variationDirection && f.variationDirection !== "all" ? 1 : 0) +
+    (f.revenueMin !== undefined || f.revenueMax !== undefined ? 1 : 0) +
+    (f.ticketMin !== undefined || f.ticketMax !== undefined ? 1 : 0);
+
+  const hasSplitPowerBiCategories =
+    Boolean(capabilities.extraFilters?.includes("macroCategory")) ||
+    Boolean(capabilities.extraFilters?.includes("itemGroup"));
 
   return (
     <dialog
@@ -547,7 +503,15 @@ export function FilterSheetModal({
       <div className="sheet-handle" aria-hidden="true" />
       <form className="formpanel sheet-form" onSubmit={save}>
         <div className="sectionhead sheet-head">
-          <h2>{title}</h2>
+          <div className="sheet-head-title">
+            <h2>{title}</h2>
+            {loadingOptions && (
+              <span className="sheet-loading-pill" role="status">
+                <LoaderCircle size={13} className="spin" />
+                Atualizando opções…
+              </span>
+            )}
+          </div>
           <button type="button" className="iconbtn" aria-label="Fechar" onClick={close}>
             <X size={19} />
           </button>
@@ -579,110 +543,183 @@ export function FilterSheetModal({
             </div>
           )}
 
-          {capabilities.filters.includes("category") && s.data?.source === "manual" && (
-            <CategoryFilter
-              values={options.category ?? []}
-              include={f.categoriesInclude ?? (f.category ? [f.category] : [])}
-              exclude={f.categoriesExclude ?? []}
-              onChange={(categoriesInclude, categoriesExclude) =>
-                setF({ ...f, category: "", categoriesInclude, categoriesExclude })
-              }
-            />
+          {incompatible.length > 0 && (
+            <div className="incompatible-alert" role="status">
+              <AlertTriangle size={15} />
+              <div className="incompatible-body">
+                <strong>Seleções incompatíveis com o recorte atual</strong>
+                <ul>
+                  {incompatible.map((item) => (
+                    <li key={item.dimension}>{item.message}</li>
+                  ))}
+                </ul>
+                <button
+                  type="button"
+                  className="soft compact"
+                  onClick={() => setF((curr) => removeIncompatibleSelections(curr, incompatible))}
+                >
+                  Corrigir seleções incompatíveis
+                </button>
+              </div>
+            </div>
           )}
 
-          {selectedDimensions
-            .filter((k) => k !== "category" || s.data?.source !== "manual")
-            .map((k) => {
-              const multiKey = MULTI_KEY_FOR_DIM[k];
-              return (
-                <DimensionField
-                  key={k}
-                  dimension={k}
-                  title={capabilities.labels?.[k] ?? DIMENSION_LABELS[k]}
-                  value={f[k] ?? ""}
-                  multiValues={multiKey ? (f[multiKey] ?? []) : []}
-                  options={options[k] ?? []}
-                  optionLabels={optionLabels[k] ?? {}}
-                  capabilities={capabilities}
-                  s={s}
-                  filters={f}
-                  focusClient={focusClient}
-                  onChange={(val) => setF({ ...f, [k]: val })}
-                  onChangeMulti={
-                    multiKey
-                      ? (nextMulti) =>
-                          setF({ ...f, [multiKey]: nextMulti.length ? nextMulti : undefined })
-                      : undefined
-                  }
-                />
-              );
-            })}
+          {capabilities.filters.includes("category") &&
+            s.data?.source === "manual" &&
+            !hasSplitPowerBiCategories && (
+              <CategoryFilter
+                values={optionsPayload?.values?.category ?? []}
+                include={f.categoriesInclude ?? (f.category ? [f.category] : [])}
+                exclude={f.categoriesExclude ?? []}
+                onChange={(categoriesInclude, categoriesExclude) =>
+                  setF({ ...f, category: "", categoriesInclude, categoriesExclude })
+                }
+              />
+            )}
+
+          {DIMENSION_SECTIONS.map((sec) => {
+            const dims = sec.dims.filter((dim) => isDimensionSupported(dim, capabilities));
+            if (!dims.length) return null;
+            return (
+              <div className="filter-section-group" key={sec.title}>
+                <h3 className="filter-section-heading">{sec.title}</h3>
+                <div className="filter-accordion-grid">
+                  {dims.map((dim) => {
+                    const restricted =
+                      !isNational && dim === "region" && s.user.regions.length
+                        ? s.user.regions
+                        : !isNational && dim === "client" && s.user.clients.length
+                          ? s.user.clients
+                          : undefined;
+                    const incList = incompatible
+                      .filter((x) => x.dimension === dim)
+                      .flatMap((x) => x.values);
+                    const capLabel =
+                      capabilities.labels?.[dim as FilterDimension | ExtendedFilterDimension] ??
+                      DEFAULT_DIM_LABELS[dim];
+                    const searchSupported =
+                      s.data?.source === "manual" &&
+                      Boolean(s.data.ready) &&
+                      (dim === "client" || dim === "product" || dim === "municipality");
+                    return (
+                      <DimensionMultiFilter
+                        key={dim}
+                        dimension={dim}
+                        title={capLabel}
+                        open={openDims.has(dim)}
+                        onToggle={() => toggleDim(dim)}
+                        filters={f}
+                        onChangeFilters={setF}
+                        options={optionsPayload?.values?.[dim] ?? []}
+                        labels={optionsPayload?.labels?.[dim] ?? {}}
+                        registeredProducts={
+                          dim === "product" ? optionsPayload?.registeredProducts ?? [] : []
+                        }
+                        registeredHasMore={
+                          dim === "product" ? Boolean(optionsPayload?.meta?.productHasMoreRegistered) : false
+                        }
+                        incompatibleValues={incList}
+                        searchEndpointSupported={searchSupported}
+                        restrictedOptions={restricted}
+                        autoFocusSearch={focusClient && dim === "client"}
+                        scopeHint={
+                          dim === "region" && capabilities.labels?.region === "Representante"
+                            ? "Permissões de representante são aplicadas automaticamente no servidor."
+                            : undefined
+                        }
+                      />
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
 
           {s.data?.source === "manual" && (
-            <fieldset className="category-filter">
-              <legend>Faixas e direção de variação</legend>
-              <label>
-                Direção da variação (ranking)
-                <select
-                  value={f.variationDirection ?? "all"}
-                  onChange={(e) =>
-                    setF({
-                      ...f,
-                      variationDirection:
-                        e.target.value === "all"
-                          ? undefined
-                          : (e.target.value as "growth" | "decline"),
-                    })
-                  }
+            <section className={rangeOpen ? "filter-card open" : "filter-card"}>
+              <div className="filter-card-top">
+                <button
+                  type="button"
+                  className="filter-card-head"
+                  aria-expanded={rangeOpen}
+                  data-filter-dim="ranges"
+                  onClick={() => setRangeOpen((v) => !v)}
                 >
-                  <option value="all">Todas as variações</option>
-                  <option value="growth">Somente crescimento (Δ &gt; 0)</option>
-                  <option value="decline">Somente queda (Δ &lt; 0)</option>
-                </select>
-              </label>
-              <div className="formgrid">
-                <label>
-                  Faturamento mín. (R$)
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={f.revenueMin ?? ""}
-                    placeholder="Sem mínimo"
-                    onChange={(e) => setNum("revenueMin", e.target.value)}
-                  />
-                </label>
-                <label>
-                  Faturamento máx. (R$)
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={f.revenueMax ?? ""}
-                    placeholder="Sem máximo"
-                    onChange={(e) => setNum("revenueMax", e.target.value)}
-                  />
-                </label>
-                <label>
-                  Ticket mín. (R$)
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={f.ticketMin ?? ""}
-                    placeholder="Sem mínimo"
-                    onChange={(e) => setNum("ticketMin", e.target.value)}
-                  />
-                </label>
-                <label>
-                  Ticket máx. (R$)
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={f.ticketMax ?? ""}
-                    placeholder="Sem máximo"
-                    onChange={(e) => setNum("ticketMax", e.target.value)}
-                  />
-                </label>
+                  <span className="filter-card-title">Faixas e direção de variação</span>
+                  <span className="filter-card-badges">
+                    {rangeCount > 0 && <span className="filter-pill include">{rangeCount}</span>}
+                  </span>
+                  <span className="filter-card-chevron" aria-hidden="true">
+                    {rangeOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                  </span>
+                </button>
               </div>
-            </fieldset>
+              {rangeOpen && (
+                <div className="filter-card-body">
+                  <label>
+                    Direção da variação (ranking)
+                    <select
+                      value={f.variationDirection ?? "all"}
+                      onChange={(e) =>
+                        setF({
+                          ...f,
+                          variationDirection:
+                            e.target.value === "all"
+                              ? undefined
+                              : (e.target.value as "growth" | "decline"),
+                        })
+                      }
+                    >
+                      <option value="all">Todas as variações</option>
+                      <option value="growth">Somente crescimento (Δ &gt; 0)</option>
+                      <option value="decline">Somente queda (Δ &lt; 0)</option>
+                    </select>
+                  </label>
+                  <div className="formgrid">
+                    <label>
+                      Faturamento mín. (R$)
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={f.revenueMin ?? ""}
+                        placeholder="Sem mínimo"
+                        onChange={(e) => setNum("revenueMin", e.target.value)}
+                      />
+                    </label>
+                    <label>
+                      Faturamento máx. (R$)
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={f.revenueMax ?? ""}
+                        placeholder="Sem máximo"
+                        onChange={(e) => setNum("revenueMax", e.target.value)}
+                      />
+                    </label>
+                    <label>
+                      Ticket mín. (R$)
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={f.ticketMin ?? ""}
+                        placeholder="Sem mínimo"
+                        onChange={(e) => setNum("ticketMin", e.target.value)}
+                      />
+                    </label>
+                    <label>
+                      Ticket máx. (R$)
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={f.ticketMax ?? ""}
+                        placeholder="Sem máximo"
+                        onChange={(e) => setNum("ticketMax", e.target.value)}
+                      />
+                    </label>
+                  </div>
+                </div>
+              )}
+            </section>
           )}
           {err && <ErrorBox>{err}</ErrorBox>}
         </div>
