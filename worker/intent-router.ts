@@ -82,6 +82,15 @@ function extractPeriod(question: string, active: Filters): { from: string; to: s
     if (mm) return { from: `${yyyy}-${mm}`, to: `${yyyy}-${mm}` };
   }
 
+  const standaloneMonth = folded.match(
+    /\b(?:em|de|no\s+mes\s+de|mes\s+de)\s+(janeiro|fevereiro|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)\b/u,
+  );
+  if (standaloneMonth) {
+    const mm = MONTHS[standaloneMonth[1]];
+    const yyyy = active.to.slice(0, 4);
+    if (mm && /^\d{4}$/.test(yyyy)) return { from: `${yyyy}-${mm}`, to: `${yyyy}-${mm}` };
+  }
+
   const yearMatch = cleaned.match(/\b(20\d{2})\b/u);
   if (yearMatch) {
     const yyyy = yearMatch[1];
@@ -284,7 +293,7 @@ export function routeCommercialIntent(
     return null;
   }
   if (
-    /\b(?:analis[ea]|como estamos|avali[ea]|explique|por que|motivo|causa|diagnostique|estrategia|parecer)\b/u.test(
+    /\b(?:analis[ea]|como estamos|avali[ea]|explique|explicam|por que|motivo|causa|diagnostique|estrategia|parecer|risco|abandono|oportunidad|fator|fatores|priorizar|potencial|recuperacao|tendencia|tendencias|recomend|acoes comerciais|acao comercial)\b/u.test(
       f,
     )
   ) {
@@ -364,7 +373,10 @@ export function routeCommercialIntent(
       plan: { group: "client", metric: "revenue", order: "decline", filters },
     };
   }
-  if (/\b(?:quais|top|principais|maiores)\s+.*clientes?\b.*\b(?:cresceram|crescimento|alta|faturaram|compraram)\b/u.test(f)) {
+  if (
+    /\b(?:quais|top|principais|maiores)\s+(?:os\s+)?(?:\d+\s+)?(?:principais\s+|maiores\s+)?.*clientes?\b.*\b(?:cresceram|crescimento|alta|faturaram|compraram)\b/u.test(f) ||
+    /\b(?:quais\s+(?:sao\s+)?(?:os\s+)?|top\s+)\d*\s*(?:maiores|principais)\s+clientes?\b/u.test(f)
+  ) {
     const order = /\b(?:cresceram|crescimento|alta)\b/u.test(f) ? "growth" : "current";
     return {
       kind: "ranking",
@@ -413,11 +425,21 @@ export function routeCommercialIntent(
     };
   }
 
+  const detectGroupBy = (): Group => {
+    if (/\bpor\s+regional\b/u.test(f) && (!capabilities || capabilities.groups.includes("regional"))) return "regional";
+    if (/\bpor\s+(?:uf|estado)\b/u.test(f) && (!capabilities || capabilities.groups.includes("state"))) return "state";
+    if (/\bpor\s+categoria\b/u.test(f) && (!capabilities || capabilities.groups.includes("category"))) return "category";
+    if (/\bpor\s+cliente\b/u.test(f) && (!capabilities || capabilities.groups.includes("client"))) return "client";
+    if (/\bpor\s+produto\b/u.test(f) && (!capabilities || capabilities.groups.includes("product"))) return "product";
+    if (/\bpor\s+representante\b/u.test(f) && (!capabilities || capabilities.groups.includes("region"))) return "region";
+    return "month";
+  };
+
   // 7. Returns total
   if (/(?:\bquais?\b|\bquanto\b|\bqual\b|\btotal\b|\bvalor\b).*\bdevoluc(?:ao|oes)\b/u.test(f)) {
     return {
       kind: "metric_summary",
-      plan: { group: "month", metric: "returns", order: "current", filters },
+      plan: { group: detectGroupBy(), metric: "returns", order: "current", filters },
     };
   }
 
@@ -425,25 +447,29 @@ export function routeCommercialIntent(
   if (/(?:\bqual\b|\bquanto\b|\btotal\b|\bvalor\b).*\bfaturamento\s+brut/u.test(f)) {
     return {
       kind: "metric_summary",
-      plan: { group: "month", metric: "gross", order: "current", filters },
+      plan: { group: detectGroupBy(), metric: "gross", order: "current", filters },
     };
   }
   if (
     /(?:\bqual\b|\bquanto\b|\btotal\b|\bvalor\b).*\bfaturamento\s+liquid/u.test(f) ||
     /\bfaturamento\s+em\s+20\d{2}\b/u.test(f) ||
-    /\b(?:quanto|qual)\s+(?:foi\s+o\s+|o\s+)?(?:nosso\s+)?(?:fatur(?:amos|ou|ado|amento)|vend(?:emos|eu|as))\b/u.test(f)
+    /\b(?:quanto|qual)\s+(?:foi\s+o\s+|o\s+)?(?:nosso\s+)?(?:fatur(?:ei|amos|ou|ado|amento)|vend(?:i|emos|eu|as))\b/u.test(f)
   ) {
     return {
       kind: "metric_summary",
-      plan: { group: "month", metric: "revenue", order: "current", filters },
+      plan: { group: detectGroupBy(), metric: "revenue", order: "current", filters },
     };
   }
 
   // 8. YoY growth question
-  if (/\b(?:qual\b|\bquanto\b).*\bcrescimento\b|\bcrescimento\s+(?:yoy|em\s+relacao|vs|comparado|frente)\b/u.test(f)) {
+  if (
+    /\b(?:qual\b|\bquanto\b).*\b(?:crescimento|cresci|crescemos|cresceu)\b|\bcrescimento\s+(?:yoy|em\s+relacao|vs|comparado|frente)\b/u.test(
+      f,
+    )
+  ) {
     return {
       kind: "yoy_growth",
-      plan: { group: "month", metric: "revenue", order: "current", filters },
+      plan: { group: detectGroupBy(), metric: "revenue", order: "current", filters },
     };
   }
 

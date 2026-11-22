@@ -386,7 +386,7 @@ test("deterministic commercial queries stay available when OpenAI credits are un
            verification_reference='synthetic-proof-only', pricing_valid_until=?
        WHERE id=1`,
     )
-    .run(s.adminId, ts - 86401, ts + 3600, ts + 3600);
+    .run(s.adminId, ts - 86401, ts - 10, ts + 3600);
 
   const opId = "op-det";
   const secretOp = "c".repeat(64);
@@ -445,7 +445,7 @@ test("deterministic commercial queries stay available when OpenAI credits are un
     assert.ok(typeof res.json.commentary?.summary === "string" && res.json.commentary.summary.length > 10);
   }
 
-  // Non-admin commercial user still executes Mode 1 with ACL strictly applied, while Mode 2 stays 403
+  // Non-admin commercial user still executes Mode 1 with ACL strictly applied, while Mode 2 stays blocked by expired credits (503)
   const spDet = await callApi(
     "chat",
     "POST",
@@ -464,7 +464,7 @@ test("deterministic commercial queries stay available when OpenAI credits are un
     },
     s.secretSp,
   );
-  assert.equal(spOpen.status, 403);
+  assert.equal(spOpen.status, 503);
 
   // Update operator remains blocked (403) even on Mode 1 deterministic questions
   const opDenied = await callApi(
