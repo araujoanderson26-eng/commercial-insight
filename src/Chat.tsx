@@ -50,7 +50,7 @@ function advancedModeBadge(reason?: AssistantStatus["reason"]) {
     case "policy_disabled":
       return "Aguardando liberação financeira";
     case "account_not_authorized":
-      return "Restrita ao administrador autorizado";
+      return "Sem permissão para IA avançada";
     case "request_in_progress":
       return "Chamada em conciliação";
     case "source_disabled":
@@ -102,8 +102,13 @@ function Answer({ turn, onLoad }: { turn: Turn; onLoad: (r: Report, c: Commentar
         </h2>
         <p className="sub">
           {period(turn.plan.filters)}
-          {turn.report ? ` · ${filterLabel(turn.report)}` : ""}
         </p>
+        {turn.report && (
+          <details className="chat-filter-details">
+            <summary>Filtros e período usados nesta análise</summary>
+            <p className="sub">{filterLabel(turn.report)}</p>
+          </details>
+        )}
         {turn.visit ? <VisitResult briefing={turn.visit} /> : turn.report ? (
           <>
             <ReportContext r={turn.report} />
@@ -117,6 +122,30 @@ function Answer({ turn, onLoad }: { turn: Turn; onLoad: (r: Report, c: Commentar
                     <Sparkles size={16} /> Leitura dos resultados
                   </h3>
                   <p>{turn.commentary.summary}</p>
+                  {turn.commentary.facts && turn.commentary.facts.length > 0 && (
+                    <div className="ai-section">
+                      <strong>Fatos observados</strong>
+                      <ul>{turn.commentary.facts.map((item, i) => <li key={i}>{item}</li>)}</ul>
+                    </div>
+                  )}
+                  {turn.commentary.indicators && turn.commentary.indicators.length > 0 && (
+                    <div className="ai-section">
+                      <strong>Indicadores calculados</strong>
+                      <ul>{turn.commentary.indicators.map((item, i) => <li key={i}>{item}</li>)}</ul>
+                    </div>
+                  )}
+                  {turn.commentary.hypotheses && turn.commentary.hypotheses.length > 0 && (
+                    <div className="ai-section">
+                      <strong>Hipóteses para verificação</strong>
+                      <ul>{turn.commentary.hypotheses.map((item, i) => <li key={i}>{item}</li>)}</ul>
+                    </div>
+                  )}
+                  {turn.commentary.limitations && turn.commentary.limitations.length > 0 && (
+                    <div className="ai-section">
+                      <strong>Limitações dos dados</strong>
+                      <ul>{turn.commentary.limitations.map((item, i) => <li key={i}>{item}</li>)}</ul>
+                    </div>
+                  )}
                 </div>
                 {turn.commentary.actions.length > 0 && (
                   <div className="actionsbox">

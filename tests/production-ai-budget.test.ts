@@ -67,22 +67,32 @@ test('production origin cannot bypass financial policy by removing its flag or m
   s.sql.exec('DROP TABLE ai_production_policy');
   await assert.rejects(reserveHmlOpenAI(s.env,s.body(),'plano_comercial','owner'),failsWith(503));
 });
-test('only the named, active administrator can reserve; other administrators and missing actors cannot',async t=>{
+test('active authorized commercial users can reserve under active admin policy; operators, inactive and missing actors cannot',async t=>{
   const s=setup();t.after(()=>s.sql.close());
-  for(const actor of ['other-admin','sales','unknown']) {
+  s.sql.prepare("INSERT INTO users(id,email,name,password,role,created,update_only) VALUES('op','op@synthetic.test','op','unused','comercial',?,1)").run(now());
+  for(const actor of ['op','unknown']) {
     await assert.rejects(s.reserve(actor),failsWith(403));
     assert.equal((await productionAIStatus(s.env,actor)).budget,undefined);
   }
   await assert.rejects(reserveProductionAI(s.env,s.body(),'plano_comercial'),failsWith(403));
+  // Commercial user (sales) is authorized to use AI without seeing admin-only budget ledger
+  assert.equal((await productionAIStatus(s.env,'sales')).ready,true);
+  assert.equal((await productionAIStatus(s.env,'sales')).budget,undefined);
+  // If authorizing administrator becomes inactive, non-admin or update_only, everyone is blocked
   for(const patch of ["active=0","active=1,role='comercial'","role='admin',update_only=1"]){
-    s.sql.exec('UPDATE users SET '+patch+" WHERE id='owner'");await assert.rejects(s.reserve(),failsWith(403));
+    s.sql.exec('UPDATE users SET '+patch+" WHERE id='owner'");
+    await assert.rejects(s.reserve('owner'),failsWith(403));
+    await assert.rejects(s.reserve('sales'),failsWith(403));
   }
   assert.equal(s.sql.prepare('SELECT COUNT(*) n FROM ai_production_attempts').get()!.n,0);
 });
-test('unknown, expired, stale or unfunded credits always prevent fetch',async t=>{
+test('unknown, expired or unfunded credits always prevent fetch without requiring daily 24h manual re-verification',async t=>{
   const s=setup();t.after(()=>s.sql.close());let calls=0;
   t.mock.method(globalThis,'fetch',async()=>{calls++;throw Error('must not fetch');});
-  for(const patch of ['enabled=0','credit_ceiling_nano_usd=0',`credit_valid_until=${now()-1}`,`credit_verified_at=${now()-86401}`,
+  // Verification older than 24h remains valid while credit_valid_until and pricing_valid_until are still valid
+  s.sql.prepare('UPDATE ai_production_policy SET credit_verified_at=? WHERE id=1').run(now()-86401*5);
+  assert.equal((await productionAIStatus(s.env,'owner')).ready,true);
+  for(const patch of ['enabled=0','credit_ceiling_nano_usd=0',`credit_valid_until=${now()-1}`,`credit_verified_at=0`,
     `credit_verified_at=${now()+100}`,"organization_id=NULL","project_id=NULL","verification_reference=NULL",`pricing_valid_until=${now()-1}`]){
     s.sql.exec('SAVEPOINT scenario');s.sql.exec('UPDATE ai_production_policy SET '+patch);
     await assert.rejects(interpret(s.env,model,'Como estamos?',filters,[],'owner'),failsWith(503));s.sql.exec('ROLLBACK TO scenario; RELEASE scenario');
@@ -179,17 +189,22 @@ test('billing exhaustion disables subsequent calls and stores only allowlisted d
   assert.equal((await productionAIStatus(s.env,'owner')).reason,'policy_disabled');
   assert.doesNotMatch(JSON.stringify(s.sql.prepare('SELECT * FROM ai_production_attempts').all()),/PRIVATE_DO_NOT_STORE/);
 });
-test('API denies unauthorized chat and hides financial details even when the source allows AI',async t=>{
+test('API authorizes active commercial users, hides financial details from non-owners and denies operators',async t=>{
   const s=setup();t.after(()=>s.sql.close());const mocked=t.mock.method(globalThis,'fetch',async()=>{throw Error('no outbound');});
-  for(const actor of ['owner','other-admin','sales']){
+  s.sql.prepare("INSERT INTO users(id,email,name,password,role,created,update_only) VALUES('op','op@synthetic.test','op','unused','comercial',?,1)").run(now());
+  for(const actor of ['owner','other-admin','sales','op']){
     const token=crypto.randomUUID().replaceAll('-','').repeat(2);
     s.sql.prepare('INSERT INTO sessions(hash,user_id,version,expires,seen) VALUES(?,?,1,?,?)').run(await digest(token),actor,now()+600,now());
     async function request(path:string,method='GET',payload?:unknown){
       return worker.fetch(new Request(s.env.APP_ORIGIN+'/api/'+path,{method,headers:{Origin:s.env.APP_ORIGIN,Cookie:'__Host-ci='+token,'Content-Type':'application/json'},body:payload?JSON.stringify(payload):undefined}),s.env,{waitUntil(){}} as unknown as ExecutionContext);
     }
+    if(actor==='op'){
+      assert.equal((await request('chat','POST',{question:'Como estamos?',filters,conversation:null})).status,403);
+      continue;
+    }
     const status=await (await request('assistant/status')).json() as {ready:boolean;budget?:unknown};
-    assert.equal(status.ready,actor==='owner');assert.equal(Boolean(status.budget),actor==='owner');
-    if(actor!=='owner')assert.equal((await request('chat','POST',{question:'Como estamos?',filters,conversation:null})).status,403);
+    assert.equal(status.ready,true);
+    assert.equal(Boolean(status.budget),actor==='owner');
   }
   assert.equal(mocked.mock.callCount(),0);
 });

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { calcYoYPercent } from "./metrics";
 export const roles = {
   admin: "Administrador",
   diretoria: "Diretoria",
@@ -280,7 +281,14 @@ export type Report = {
     capabilities?: DataCapabilities;
   };
 };
-export type Commentary = { summary: string; actions: string[] };
+export type Commentary = {
+  summary: string;
+  actions: string[];
+  facts?: string[];
+  indicators?: string[];
+  hypotheses?: string[];
+  limitations?: string[];
+};
 export type User = {
   id: string;
   name: string;
@@ -351,9 +359,7 @@ export const configSchema = z
   });
 export type ModelConfig = z.infer<typeof configSchema>;
 export function change(p: Pair, m: Metric) {
-  if (p.current === null || p.previous === null || !Number.isFinite(p.current) || !Number.isFinite(p.previous)) return null;
-  if (m === "margin") return p.current - p.previous;
-  return p.previous <= 0 ? null : (100 * (p.current - p.previous)) / p.previous;
+  return calcYoYPercent(p, m);
 }
 /** Growth percentages require a positive denominator. Absolute movement remains observable. */
 export function comparison(p: Pair, m: Metric) {

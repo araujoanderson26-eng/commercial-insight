@@ -16,20 +16,29 @@ export type ProductionAIBlock = 'policy_disabled' | 'account_not_authorized' | '
 export type ProductionAIBudget = AssistantBudget;
 const messages: Record<ProductionAIBlock, string> = {
   policy_disabled: 'A IA de produção aguarda a liberação financeira verificada do administrador.',
-  account_not_authorized: 'A IA está liberada exclusivamente para a conta administrativa autorizada.',
-  credits_unverified: 'Créditos disponíveis, projeto e validade ainda não foram verificados, ou a verificação expirou. Nenhuma chamada será iniciada.',
-  budget_exhausted: 'O orçamento mensal ou a parcela de créditos verificados não comporta novas chamadas.',
+  account_not_authorized: 'Sua conta não possui permissão para utilizar a IA avançada neste ambiente.',
+  credits_unverified: 'A validade dos créditos ou o escopo de projeto da OpenAI precisam ser confirmados pelo administrador. Nenhuma chamada paga será iniciada.',
+  budget_exhausted: 'O orçamento mensal de US$ 20 ou o teto de créditos verificados foi atingido. Novas chamadas pagas estão bloqueadas.',
   request_in_progress: 'Há uma chamada em andamento ou com consumo pendente de conciliação. Novas chamadas estão bloqueadas.',
-  budget_unavailable: 'O controle financeiro da IA está indisponível ou precisa de revisão. Nenhuma chamada será iniciada.',
+  budget_unavailable: 'O controle financeiro da IA está indisponível ou precisa de revisão de validade/modelo. Nenhuma chamada paga será iniciada.',
 };
 export const productionAIControlled = (e: Env) => e.APP_ORIGIN === productionOrigin || e.PRODUCTION_AI_BUDGET === 'true';
 const monthAt = (timestamp: number) => new Date(timestamp * 1000).toISOString().slice(0, 7);
 async function policy(e: Env) {
   return stmt(e, 'SELECT * FROM ai_production_policy WHERE id=1').first<Policy>();
 }
-async function authorized(e: Env, p: Policy, actorId?: string) {
+async function authorizedAdmin(e: Env, p: Policy, actorId?: string) {
   return Boolean(actorId && p.administrator_id === actorId && await stmt(e,
     "SELECT id FROM users WHERE id=? AND active=1 AND role='admin' AND update_only=0", actorId).first());
+}
+async function authorizedUser(e: Env, p: Policy, actorId?: string) {
+  if (!actorId || !p.administrator_id) return false;
+  const adminOk = await stmt(e,
+    "SELECT id FROM users WHERE id=? AND active=1 AND role='admin' AND update_only=0", p.administrator_id).first();
+  if (!adminOk) return false;
+  return Boolean(await stmt(e,
+    "SELECT id FROM users WHERE id=? AND active=1 AND role IN ('admin','diretoria','gerente','comercial') AND update_only=0",
+    actorId).first());
 }
 function policyBlock(e: Env, p: Policy, timestamp: number): ProductionAIBlock | null {
   if (!p.enabled) return 'policy_disabled';
@@ -37,10 +46,12 @@ function policyBlock(e: Env, p: Policy, timestamp: number): ProductionAIBlock | 
     || e.OPENAI_MODEL !== productionAIModel || p.pricing_valid_until <= timestamp
     || !Number.isSafeInteger(p.monthly_cap_nano_usd) || p.monthly_cap_nano_usd <= 0 || p.monthly_cap_nano_usd > cap)
     return 'budget_unavailable';
+  // Política sustentável: exige registro administrativo válido (sem revalidação manual diária a cada 24h)
+  // respeitando estritamente o teto mensal de US$ 20 e a validade explícita dos créditos (credit_valid_until).
   if (!p.organization_id || !/^org-[A-Za-z0-9_-]+$/.test(p.organization_id)
     || !p.project_id || !/^proj_[A-Za-z0-9_-]+$/.test(p.project_id) || !p.verification_reference
     || p.credit_ceiling_nano_usd <= 0 || !Number.isSafeInteger(p.credit_ceiling_nano_usd)
-    || p.credit_verified_at <= 0 || p.credit_verified_at > timestamp || timestamp - p.credit_verified_at > 86400
+    || p.credit_verified_at <= 0 || p.credit_verified_at > timestamp
     || p.credit_valid_until <= timestamp + 60) return 'credits_unverified';
   return null;
 }
@@ -51,7 +62,8 @@ export async function productionAIStatus(e: Env, actorId?: string): Promise<{
   try {
     const p = await policy(e);
     if (!p) return { ready: false, reason: 'budget_unavailable', message: messages.budget_unavailable };
-    if (!await authorized(e, p, actorId)) return { ready: false, reason: 'account_not_authorized', message: messages.account_not_authorized };
+    if (!await authorizedUser(e, p, actorId)) return { ready: false, reason: 'account_not_authorized', message: messages.account_not_authorized };
+    const isAdmin = await authorizedAdmin(e, p, actorId);
     const timestamp = now(), month = monthAt(timestamp);
     const totals = await stmt(e, `SELECT COALESCE(SUM(reserved_nano_usd),0) lifetime,
       COALESCE(SUM(CASE WHEN month=? THEN reserved_nano_usd ELSE 0 END),0) committed,
@@ -70,7 +82,7 @@ export async function productionAIStatus(e: Env, actorId?: string): Promise<{
     const reason = policyBlock(e, p, timestamp)
       ?? (totals.committed >= p.monthly_cap_nano_usd || totals.lifetime >= p.credit_ceiling_nano_usd ? 'budget_exhausted'
         : totals.pending ? 'request_in_progress' : undefined);
-    return { ready: !reason, ...(reason ? { reason, message: messages[reason] } : {}), budget };
+    return { ready: !reason, ...(reason ? { reason, message: messages[reason] } : {}), ...(isAdmin ? { budget } : {}) };
   } catch { return { ready: false, reason: 'budget_unavailable', message: messages.budget_unavailable }; }
 }
 export async function assertProductionAI(e: Env, actorId?: string) {
@@ -83,7 +95,7 @@ export async function assertProductionAI(e: Env, actorId?: string) {
 export async function productionAIModelPreflight(e: Env, actorId: string) {
   if (e.APP_ORIGIN !== productionOrigin || e.PRODUCTION_AI_BUDGET !== 'true') fail(403, 'Pré-checagem exclusiva da produção controlada.');
   const p = await policy(e);
-  if (!p || !await authorized(e,p,actorId)) fail(403, messages.account_not_authorized);
+  if (!p || !await authorizedAdmin(e,p,actorId)) fail(403, messages.account_not_authorized);
   if (!e.OPENAI_API_KEY) fail(409, 'Cadastre OPENAI_API_KEY de produção por entrada segura antes da pré-checagem.');
   if (!p.organization_id || !/^org-[A-Za-z0-9_-]+$/.test(p.organization_id)
     || !p.project_id || !/^proj_[A-Za-z0-9_-]+$/.test(p.project_id)
@@ -128,16 +140,17 @@ export async function reserveProductionAI(e: Env, body: string, purpose: string,
     row = await stmt(e, `INSERT INTO ai_production_attempts
       (id,owner,policy_revision,month,model,purpose,reserved_nano_usd,reserved_input_tokens,output_limit,status,created)
       SELECT ?,?,revision,?,?,?,?,?,1200,'reserved',? FROM ai_production_policy
-      WHERE id=1 AND enabled=1 AND revision=? AND administrator_id=? AND model=?
+      WHERE id=1 AND enabled=1 AND revision=? AND model=?
       AND monthly_cap_nano_usd>0 AND monthly_cap_nano_usd<=20000000000
-      AND credit_verified_at BETWEEN ? AND ? AND credit_valid_until>? AND pricing_valid_until>?
+      AND credit_verified_at>0 AND credit_verified_at<=? AND credit_valid_until>? AND pricing_valid_until>?
       AND organization_id=? AND project_id=? AND verification_reference IS NOT NULL
-      AND EXISTS(SELECT 1 FROM users WHERE id=? AND active=1 AND role='admin' AND update_only=0)
+      AND EXISTS(SELECT 1 FROM users WHERE id=ai_production_policy.administrator_id AND active=1 AND role='admin' AND update_only=0)
+      AND EXISTS(SELECT 1 FROM users WHERE id=? AND active=1 AND role IN ('admin','diretoria','gerente','comercial') AND update_only=0)
       AND COALESCE((SELECT SUM(reserved_nano_usd) FROM ai_production_attempts WHERE month=?),0)+?<=monthly_cap_nano_usd
       AND COALESCE((SELECT SUM(reserved_nano_usd) FROM ai_production_attempts),0)+?<=credit_ceiling_nano_usd
       AND NOT EXISTS(SELECT 1 FROM ai_production_attempts WHERE status IN (${blockedStatuses})) RETURNING id`,
     id, actorId!, month, productionAIModel, purpose, estimate.nanoUsd, estimate.inputTokens, timestamp, p.revision,
-    actorId!, productionAIModel, timestamp - 86400, timestamp, timestamp + 60, timestamp, p.organization_id, p.project_id,
+    productionAIModel, timestamp, timestamp + 60, timestamp, p.organization_id, p.project_id,
     actorId!, month, estimate.nanoUsd, estimate.nanoUsd).first<{ id: string }>();
   } catch { fail(503, messages.budget_unavailable); }
   if (!row) {
