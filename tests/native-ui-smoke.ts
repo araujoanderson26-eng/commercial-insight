@@ -70,7 +70,7 @@ try {
   await expect(page.locator(".kpis")).not.toContainText("Margem comercial");
   await page.getByLabel(/^Indicador/).selectOption("gross");
   await expect.poll(() => plans.at(-1)?.metric).toBe("gross");
-  await page.getByRole("button", { name: /^Filtros/ }).click();
+  await page.getByRole("button", { name: /^(Filtros|Consultar filtros)/ }).first().click();
   const dialog = page.getByRole("dialog");
   await expect.poll(() => optionRequests.length).toBeGreaterThan(0);
   await page.clock.install({ time: new Date("2026-11-19T12:00:00Z") });
@@ -83,7 +83,7 @@ try {
   expect(optionRequests.length).toBe(beforeRapidEdits);
   await dialog.getByRole("button", { name: "Fechar", exact: true }).click({ force: true });
   await page.clock.runFor(1000); expect(optionRequests.length).toBe(beforeRapidEdits);
-  await page.getByRole("button", { name: /^Filtros/ }).click({ force: true });
+  await page.getByRole("button", { name: /^(Filtros|Consultar filtros)/ }).first().click({ force: true });
   await dialog.getByLabel("Primeiro mês", { exact: true }).fill("2026-01");
   await dialog.getByLabel("Último mês", { exact: true }).fill("2026-10");
   await page.clock.runFor(299); expect(optionRequests.length).toBe(beforeRapidEdits);
@@ -95,12 +95,18 @@ try {
   await dialog.getByRole("button", { name: "Fechar", exact: true }).click({ force: true });
   await expect.poll(() => cancelledOptions).toBe(1); await expect(page.getByRole("alert")).toHaveCount(0);
   delayOptions = false; await page.clock.resume();
-  await page.getByRole("button", { name: /^Filtros/ }).click();
-  for (const key of ["region", "regional", "state", "manager"] as const) await expect(dialog.locator(`[list="source-options-${key}"]`)).toBeVisible();
-  await dialog.locator('[list="source-options-region"]').fill("Representante SINTÉTICO");
-  await dialog.locator('[list="source-options-regional"]').fill("Regional SINTÉTICA");
-  await dialog.locator('[list="source-options-state"]').fill("SP");
-  await dialog.locator('[list="source-options-manager"]').fill("Gerente SINTÉTICO");
+  await page.getByRole("button", { name: /^(Filtros|Consultar filtros)/ }).first().click();
+  for (const key of ["region", "regional", "state", "manager"] as const) {
+    await expect(dialog.locator(`[data-filter-dim="${key}"]`)).toBeVisible();
+  }
+  const selectDimOption = async (dim: string, optionText: string) => {
+    await dialog.locator(`[data-filter-dim="${dim}"]`).click();
+    await dialog.locator(".filter-option-row", { hasText: optionText }).locator('input[type="checkbox"]').check();
+  };
+  await selectDimOption("region", "Representante SINTÉTICO");
+  await selectDimOption("regional", "Regional SINTÉTICA");
+  await selectDimOption("state", "SP");
+  await selectDimOption("manager", "Gerente SINTÉTICO");
   await dialog.getByRole("button", { name: "Aplicar filtros" }).click();
   await expect.poll(() => plans.at(-1)?.filters.manager).toBe("Gerente SINTÉTICO");
   expect(plans.at(-1)?.filters.region).toBe("Representante SINTÉTICO"); expect(plans.at(-1)?.filters.regional).toBe("Regional SINTÉTICA");

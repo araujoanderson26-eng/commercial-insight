@@ -363,7 +363,25 @@ export function Reports({
         ? filters.categoriesInclude?.length === 1
           ? filters.categoriesInclude[0]
           : filters.category || undefined
-        : filters[effectiveGroup as FilterDimension] || undefined;
+        : (() => {
+            const dim = effectiveGroup as FilterDimension;
+            if (filters[dim]) return filters[dim];
+            const multiKey =
+              dim === "region"
+                ? filters.regions
+                : dim === "client"
+                  ? filters.clients
+                  : dim === "product"
+                    ? filters.products
+                    : dim === "regional"
+                      ? filters.regionals
+                      : dim === "state"
+                        ? filters.states
+                        : dim === "manager"
+                          ? filters.managers
+                          : undefined;
+            return multiKey?.length === 1 ? multiKey[0] : undefined;
+          })();
   const title = navs.find((n) => n.p === page)?.label || "Relatórios";
   return (
     <div className="stack">

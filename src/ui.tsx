@@ -28,6 +28,7 @@ import {
   type Session,
 } from "../shared/domain";
 import { SmartChart, type SmartChartMode } from "./components/SmartChart";
+import { filterLabel } from "./export-model";
 import { projectCompatibleReport } from "./lib/analytics";
 import {
   canonicalPlanKey,
@@ -417,14 +418,35 @@ export function ReportContext({ r }: { r: Report }) {
   const sourceDate = r.sourceInfo?.extractedAt ?? r.asOf;
   const date = (value: string) =>
     new Date(value + "T12:00:00Z").toLocaleDateString("pt-BR", { timeZone: "UTC" });
+  const activeSummary = (() => {
+    const f = r.plan.filters;
+    const hasAny = Boolean(
+      f.region || f.regions?.length || f.regionsExclude?.length ||
+      f.regional || f.regionals?.length || f.regionalsExclude?.length ||
+      f.state || f.states?.length || f.statesExclude?.length ||
+      f.manager || f.managers?.length || f.managersExclude?.length ||
+      f.municipality || f.municipalities?.length || f.municipalitiesExclude?.length ||
+      f.client || f.clients?.length || f.clientsExclude?.length ||
+      f.product || f.products?.length || f.productsExclude?.length ||
+      f.channels?.length || f.channelsExclude?.length ||
+      f.segments?.length || f.segmentsExclude?.length ||
+      f.brands?.length || f.brandsExclude?.length ||
+      f.category || f.categoriesInclude?.length || f.categoriesExclude?.length ||
+      (f.variationDirection && f.variationDirection !== "all") ||
+      f.revenueMin !== undefined || f.revenueMax !== undefined ||
+      f.ticketMin !== undefined || f.ticketMax !== undefined
+    );
+    return hasAny;
+  })();
   return (
     <div className="report-context">
       {r.plan.filters.categoriesInclude?.length || r.plan.filters.categoriesExclude?.length ? (
-        <p>
+        <p className="print-only">
           Incluir: {r.plan.filters.categoriesInclude?.join(", ") || "Todas"}. Excluir:{" "}
           {r.plan.filters.categoriesExclude?.join(", ") || "Nenhuma"}.
         </p>
       ) : null}
+      {activeSummary ? <p className="report-filter-summary print-only">Filtros: {filterLabel(r)}</p> : null}
       <span>
         <Info size={12} />
         {r.comparison
@@ -561,11 +583,6 @@ export function Graph({
         <span>
           {metricLabel(metric, capabilities)} · {period(f)}
         </span>
-        {activeFilterValue && (
-          <span className="chart-active-badge">
-            Filtro no gráfico: <b>{activeFilterValue}</b>
-          </span>
-        )}
       </div>
       {data.every((x) => x.atual === null && x.anterior === null) ? (
         <Empty title="Sem valores no recorte">Confira o indicador e os filtros selecionados.</Empty>

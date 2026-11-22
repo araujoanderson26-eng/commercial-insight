@@ -11,7 +11,7 @@ export interface DataProvider {
   versionId: string | null;
   semantics: Pick<ModelConfig, "allowAI" | "measures"> & { capabilities?: DataCapabilities };
   query(plan: Plan): Promise<Report>;
-  search?(filters: Plan["filters"], dimension: "client" | "product" | "category", query: string): Promise<{ items: { key: string; name: string }[]; truncated: boolean }>;
+  search?(filters: Plan["filters"], dimension: "client" | "product" | "category" | "municipality", query: string): Promise<{ items: { key: string; name: string; hasSalesInPeriod?: boolean }[]; truncated: boolean }>;
   customerDetails?(filters: Plan["filters"]): Promise<CustomerDetails>;
 }
 

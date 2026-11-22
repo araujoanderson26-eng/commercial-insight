@@ -410,7 +410,12 @@ export async function executeDeterministicQA(
     const grossPair = report.total.values.gross;
     const retPair = report.total.values.returns;
     const filterDesc = [
-      plan.filters.state ? `UF ${plan.filters.state}` : "",
+      plan.filters.regional || plan.filters.regionals?.length
+        ? `Regional ${[plan.filters.regional, ...(plan.filters.regionals ?? [])].filter(Boolean).join(", ")}`
+        : "",
+      plan.filters.state || plan.filters.states?.length
+        ? `UF ${[plan.filters.state, ...(plan.filters.states ?? [])].filter(Boolean).join(", ")}`
+        : "",
       plan.filters.categoriesInclude?.length
         ? `Incluindo: ${plan.filters.categoriesInclude.join(", ")}`
         : "",

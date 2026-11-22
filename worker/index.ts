@@ -46,7 +46,7 @@ function edgeCache(): Cache | null {
 
 async function edgeCacheKey(endpoint: string, scopeParts: (string | number | null)[], payload: unknown): Promise<Request> {
   const keyHash = await digest(JSON.stringify([scopeParts, payload]));
-  return new Request("https://cache.commercial-insight.internal/v1/" + endpoint + "/" + keyHash, { method: "GET" });
+  return new Request("https://cache.commercial-insight.internal/v2/" + endpoint + "/" + keyHash, { method: "GET" });
 }
 
 function withCors(res: Response, e: Env, req: Request): Response {
@@ -125,7 +125,8 @@ async function api(req: Request, e: Env, ctx: ExecutionContext) {
     });
   }
   if (p === "/data/status" || p === "/data/options" || p === "/data/search" || p.startsWith("/admin/data")) {
-    if ((p === "/data/options" || p === "/data/search") && method === "POST") await limit(e, "options:" + owner, 30, 60);
+    if (p === "/data/options" && method === "POST") await limit(e, "options:" + owner, 30, 60);
+  if (p === "/data/search" && method === "POST") await limit(e, "search:" + owner, 60, 60);
     const cache = edgeCache();
     if (cache && p === "/data/options" && method === "POST") {
       if (u.role === "operador" || u.update_only) fail(403, "O operador de atualização não possui acesso às análises comerciais.");

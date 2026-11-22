@@ -250,6 +250,43 @@ export async function interpret(
       fail(422, "Altere o filtro ativo para analisar outra entidade.");
     if (filters[k]) plan.data.filters[k] = filters[k];
   }
+  if (filters.municipality) plan.data.filters.municipality = filters.municipality;
+  else if (result.inheritContext === true && !plan.data.filters.municipality && inherited?.municipality) {
+    plan.data.filters.municipality = inherited.municipality;
+  }
+  const arrayFields = [
+    "regions",
+    "regionsExclude",
+    "regionals",
+    "regionalsExclude",
+    "states",
+    "statesExclude",
+    "managers",
+    "managersExclude",
+    "municipalities",
+    "municipalitiesExclude",
+    "clients",
+    "clientsExclude",
+    "products",
+    "productsExclude",
+    "channels",
+    "channelsExclude",
+    "segments",
+    "segmentsExclude",
+    "brands",
+    "brandsExclude",
+  ] as const;
+  for (const field of arrayFields) {
+    if (filters[field]?.length) plan.data.filters[field] = filters[field];
+    else if (result.inheritContext === true && inherited?.[field]?.length) plan.data.filters[field] = inherited[field];
+  }
+  if (filters.revenueMin !== undefined) plan.data.filters.revenueMin = filters.revenueMin;
+  if (filters.revenueMax !== undefined) plan.data.filters.revenueMax = filters.revenueMax;
+  if (filters.ticketMin !== undefined) plan.data.filters.ticketMin = filters.ticketMin;
+  if (filters.ticketMax !== undefined) plan.data.filters.ticketMax = filters.ticketMax;
+  if (filters.variationDirection && filters.variationDirection !== "all") {
+    plan.data.filters.variationDirection = filters.variationDirection;
+  }
   for(const field of ["categoriesInclude","categoriesExclude"]as const){
     if(filters[field]?.length){
       if(plan.data.filters[field]?.length&&JSON.stringify([...new Set(plan.data.filters[field])].sort())!==JSON.stringify([...new Set(filters[field])].sort()))fail(422,"Altere as categorias ativas para consultar outro recorte.");

@@ -21,6 +21,7 @@ import {
 } from "../shared/domain";
 import type { AssistantStatus, VisitBriefing } from "../shared/commercial";
 import { VisitResult } from "./Visits";
+import { filterLabel } from "./export-model";
 import { api, Busy, Empty, ErrorBox, Graph, Kpis, message, period, groupLabel, metricLabel, ReportContext } from "./ui";
 import { exportReport } from "./exports";
 type Turn = {
@@ -101,9 +102,7 @@ function Answer({ turn, onLoad }: { turn: Turn; onLoad: (r: Report, c: Commentar
         </h2>
         <p className="sub">
           {period(turn.plan.filters)}
-          {[turn.plan.filters.region, turn.plan.filters.client, turn.plan.filters.product, turn.plan.filters.regional, turn.plan.filters.state, turn.plan.filters.manager, turn.plan.filters.category]
-            .filter(Boolean)
-            .map((t) => " · " + t)}
+          {turn.report ? ` · ${filterLabel(turn.report)}` : ""}
         </p>
         {turn.visit ? <VisitResult briefing={turn.visit} /> : turn.report ? (
           <>

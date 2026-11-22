@@ -3,22 +3,25 @@ import { CalendarDays, Download, Printer, Search, Target } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { Filters, Session } from "../shared/domain";
 import type { VisitBriefing } from "../shared/commercial";
+import { canonicalFiltersKey } from "./lib/cache";
 import { api, Busy, Empty, ErrorBox, Graph, Kpis, message, period, ReportContext } from "./ui";
 import { downloadWorkbook, reportSheet } from "./exports";
 
 export default function Visits({ filters, s }: { filters: Filters; s: Session }) {
-  const [query, Q] = useState(filters.client), [client, C] = useState(filters.client),
+  const initialClient = filters.client.trim() || (filters.clients?.length === 1 ? filters.clients[0].trim() : "");
+  const [query, Q] = useState(initialClient), [client, C] = useState(initialClient),
     [options, O] = useState<string[]>([]), [labels, L] = useState<Record<string, string>>({}),
     [briefing, V] = useState<VisitBriefing | null>(null), [busy, B] = useState(false), [error, E] = useState("");
+  const cascadeKey = canonicalFiltersKey({ ...filters, client: "", clients: undefined, clientsExclude: undefined });
   useEffect(() => {
     if (s.data?.source !== "manual" || !s.data.ready) return;
     if (!query.trim() || (client && query === labels[client])) { O([]); return; }
     let alive = true;
-    const timer = setTimeout(() => { void api<{ items: { key: string; name: string }[]; truncated: boolean }>("data/search", "POST", { filters: { ...filters, client: "" }, dimension: "client", query: query.trim() }).then((data) => {
+    const timer = setTimeout(() => { void api<{ items: { key: string; name: string }[]; truncated: boolean }>("data/search", "POST", { filters: { ...filters, client: "", clients: undefined, clientsExclude: undefined }, dimension: "client", query: query.trim() }).then((data) => {
       if (alive) { O(data.items.map((item) => item.key)); L((previous) => ({ ...previous, ...Object.fromEntries(data.items.map((item) => [item.key, item.name])) })); E(""); }
     }).catch((err) => { if (alive) E(message(err)); }); }, 250);
     return () => { alive = false; clearTimeout(timer); };
-  }, [s.data?.activeVersionId, filters.from, filters.to, filters.region, filters.regional, filters.state, query]);
+  }, [s.data?.activeVersionId, cascadeKey, query]);
   async function prepare() {
     if (!client.trim() || busy) return;
     E(""); B(true); V(null);

@@ -2331,6 +2331,7 @@ dialog.filter-sheet {
 }
 @page { size: A4; margin: 14mm; }
 @media print {
+  .print-only { display: block !important; }
   :root { font-size: 11px; background: #fff; }
   * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .workspace { display: block; min-height: auto; }
@@ -2366,6 +2367,15 @@ dialog.filter-sheet {
   .chatbody { overflow: visible; }
 }
 
+.print-only{display:none}
+.filter-status-btn{display:inline-flex;align-items:center;gap:8px;min-height:36px;padding:7px 12px;border-radius:10px;border:1px solid #d6deea;background:#fff;color:#273449;font-size:12px;font-weight:620;cursor:pointer;max-width:100%;transition:border-color .15s ease,background .15s ease,box-shadow .15s ease}
+.filter-status-btn:hover{border-color:#9e92ef;background:#f8f7ff;color:#3f2da3}
+.filter-status-btn.has-active{border-color:#b8b0f0;background:#f3f1fd;color:#3f2da3}
+.filter-status-btn svg{flex-shrink:0}
+.filter-status-label{text-align:left;overflow-wrap:anywhere}
+.filter-count-pill{display:inline-flex;align-items:center;justify-content:center;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;background:#5942d6;color:#fff;white-space:nowrap;flex-shrink:0}
+.filter-conflict-dot{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:700;background:#fff3d6;color:#824f09;border:1px solid #f2cf8d;flex-shrink:0}
+
 .category-filter{border:1px solid #dce3df;border-radius:14px;padding:16px;min-width:0;display:grid;gap:12px}.category-options{max-height:230px;overflow:auto;display:grid;gap:8px}.category-options label{display:flex;align-items:center;gap:10px;overflow-wrap:anywhere}.category-options input{width:18px;min-width:18px;height:18px}.category-filter .report-actions{flex-wrap:wrap}
 .multi-dim-input{display:flex;gap:8px;align-items:center}.multi-dim-input input,.multi-dim-input select{flex:1;min-width:0}
 .multi-selected-tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
@@ -2374,3 +2384,92 @@ dialog.filter-sheet {
 .conflict-alert p{margin:0}
 .quick-views{display:flex;flex-wrap:wrap;gap:8px;min-width:0}
 .quick-views button.active-view{background:#f0edff;border-color:#6e53e5;color:#3f2da3;font-weight:700}
+
+/* Responsive Filter Side Drawer (Desktop) & Bottom Sheet (Mobile) */
+dialog.filter-sheet{margin:0 0 0 auto;width:min(560px,100vw);max-width:100vw;height:100dvh;max-height:100dvh;border-radius:18px 0 0 18px;padding:0;border:0;box-shadow:-12px 0 36px rgba(10,28,54,.22);overflow:hidden;background:#fff}
+dialog.filter-sheet[open]{display:flex;flex-direction:column}
+dialog.filter-sheet .sheet-form{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;gap:0}
+dialog.filter-sheet .sheet-head{padding:16px 20px 12px;border-bottom:1px solid var(--line);margin:0;flex-shrink:0}
+dialog.filter-sheet .sheet-body{flex:1 1 auto;min-height:0;max-height:none;overflow-y:auto;padding:14px 20px;display:grid;align-content:start;gap:14px}
+dialog.filter-sheet .sheet-footer{padding:12px 20px;border-top:1px solid var(--line);background:#fff;flex-shrink:0;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px}
+.sheet-footer-actions{display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sheet-head-title{display:flex;flex-wrap:wrap;align-items:center;gap:10px;min-width:0}
+.sheet-loading-pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#55657d;background:#f1f5f9;padding:3px 9px;border-radius:999px}
+
+.sheet-selected-box{display:grid;gap:8px;padding:10px 12px;border-radius:12px;border:1px solid #dfe5f0;background:#f8fafc;min-width:0}
+.sheet-selected-head{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}
+.sheet-selected-head h3{margin:0;font-size:12px;font-weight:700;color:#273449}
+.sheet-selected-empty{margin:0;font-size:12px;color:#64748b;line-height:1.4}
+.sheet-selected-list{display:flex;flex-wrap:wrap;gap:6px;min-width:0}
+.sheet-selected-chip{display:inline-flex;align-items:center;gap:5px;max-width:100%;padding:4px 7px 4px 9px;border-radius:999px;border:1px solid #d5d2f4;background:#f4f2ff;color:#3f2da3;font-size:11px;min-width:0}
+.sheet-selected-chip.exclude{background:#fff1f3;border-color:#f5c2ca;color:#9f1239}
+.sheet-selected-chip-label{font-weight:700;flex-shrink:0}
+.sheet-selected-chip-value{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:240px}
+.sheet-selected-chip button{display:inline-grid;place-items:center;width:18px;height:18px;border-radius:50%;border:0;background:#e3dffd;color:#3f2da3;padding:0;cursor:pointer;flex-shrink:0}
+.sheet-selected-chip.exclude button{background:#ffe4e6;color:#9f1239}
+
+.filter-section-group{display:grid;gap:8px;min-width:0}
+.filter-section-heading{margin:4px 0 0;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#64748b}
+.filter-accordion-grid{display:grid;grid-template-columns:1fr;gap:8px;min-width:0}
+.filter-card{border:1px solid #dce3df;border-radius:12px;background:#fff;min-width:0;overflow:hidden;transition:border-color .15s ease}
+.filter-card.open{border-color:#b8b0f0}
+.filter-card-top{display:flex;align-items:stretch;min-width:0}
+.filter-card-head{flex:1;display:flex;align-items:center;gap:8px;padding:11px 12px;min-height:44px;background:transparent;border:0;text-align:left;cursor:pointer;min-width:0;font:inherit;color:#142033}
+.filter-card-head:hover{background:#f8fafc}
+.filter-card-title{font-size:13px;font-weight:600;flex:1;min-width:0;overflow-wrap:anywhere}
+.filter-card-badges{display:inline-flex;align-items:center;gap:4px;flex-shrink:0}
+.filter-pill{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:20px;padding:0 6px;border-radius:999px;font-size:11px;font-weight:700}
+.filter-pill.include{background:#ede9fe;color:#4c1d95}
+.filter-pill.exclude{background:#ffe4e6;color:#9f1239}
+.filter-pill.warn{background:#fef3c7;color:#92400e}
+.filter-count-muted{font-size:11px;color:#64748b;min-width:18px;text-align:right}
+.filter-card-chevron{display:inline-flex;color:#64748b;flex-shrink:0}
+.filter-card-clear{display:inline-flex;align-items:center;justify-content:center;width:38px;min-height:44px;border:0;border-left:1px solid #edf2ef;background:#fafcfb;color:#64748b;cursor:pointer;flex-shrink:0}
+.filter-card-clear:hover{background:#f1f5f9;color:#0f172a}
+.filter-card-body{display:grid;gap:10px;padding:0 12px 12px;border-top:1px solid #eef2f0;min-width:0}
+.filter-mode-tabs{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:10px}
+.filter-mode-btn{min-height:36px;padding:6px 10px;border-radius:8px;border:1px solid #dbe2ea;background:#f8fafc;font:inherit;font-size:12px;font-weight:600;color:#334155;cursor:pointer}
+.filter-mode-btn.active.include{background:#f0edff;border-color:#6e53e5;color:#3f2da3}
+.filter-mode-btn.active.exclude{background:#fff1f3;border-color:#e11d48;color:#9f1239}
+.filter-search-box{display:flex;align-items:center;gap:8px;padding:0 10px;border:1px solid #d5dde5;border-radius:9px;background:#fff;min-height:38px}
+.filter-search-box input{border:0;outline:0;width:100%;min-width:0;min-height:36px;font:inherit;font-size:13px;background:transparent}
+.filter-quick-actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.filter-link-btn{border:0;background:transparent;padding:2px 0;font:inherit;font-size:12px;font-weight:600;color:#4f46e5;cursor:pointer}
+.filter-link-btn:disabled{color:#94a3b8;cursor:default}
+.filter-registered-toggle{display:flex;align-items:center;gap:8px;font-size:12px;color:#334155;cursor:pointer}
+.filter-registered-toggle input{width:16px;height:16px;min-width:16px}
+.filter-option-status,.filter-option-empty{margin:0;font-size:12px;color:#64748b;padding:6px 2px}
+.filter-option-list{max-height:240px;overflow:auto;display:grid;gap:4px;border:1px solid #edf1f5;border-radius:9px;padding:6px;background:#fcfdfd}
+.filter-option-row{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:7px;cursor:pointer;min-height:36px;min-width:0}
+.filter-option-row:hover{background:#f3f6fa}
+.filter-option-row.overlap{background:#fffbeb}
+.filter-option-row.incompatible{background:#fef2f2}
+.filter-option-row input{width:17px;min-width:17px;height:17px;margin:0}
+.filter-option-text{flex:1;min-width:0;font-size:13px;overflow-wrap:anywhere;color:#1e293b}
+.filter-option-badges{display:inline-flex;flex-wrap:wrap;gap:4px;flex-shrink:0}
+.filter-option-badge{padding:2px 6px;border-radius:6px;font-size:10px;font-weight:700;line-height:1.2}
+.filter-option-badge.include{background:#ede9fe;color:#4c1d95}
+.filter-option-badge.exclude{background:#ffe4e6;color:#9f1239}
+.filter-option-badge.warn{background:#fef3c7;color:#92400e}
+.filter-option-badge.muted{background:#e2e8f0;color:#475569}
+.filter-load-more-btn{margin-top:4px;width:100%;padding:8px 10px;border-radius:8px;border:1px dashed #c8d1e0;background:#f8fafc;color:#3f2da3;font:inherit;font-size:12px;font-weight:600;cursor:pointer}
+.filter-load-more-btn:hover{background:#f0edff;border-color:#9e92ef}
+.filter-truncated-hint{display:block;font-size:11px;color:#64748b;line-height:1.35}
+.incompatible-alert{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:10px;border:1px solid #f5b5b5;background:#fef2f2;color:#991b1b;font-size:12px;line-height:1.45}
+.incompatible-alert svg{flex-shrink:0;margin-top:2px}
+.incompatible-body{display:grid;gap:6px;min-width:0}
+.incompatible-body ul{margin:0;padding-left:16px;display:grid;gap:2px}
+@media(max-width:768px){
+  .filterbar-actions{width:100%}
+  .filter-status-btn{width:100%;justify-content:space-between;flex-wrap:wrap;min-height:42px}
+  dialog.filter-sheet{width:100vw;max-width:100vw;height:auto;max-height:92dvh;margin:auto 0 0 0;border-radius:20px 20px 0 0;padding:0;box-shadow:0 -10px 32px rgba(10,28,54,.24)}
+  dialog.filter-sheet .sheet-handle{display:block;width:42px;height:4px;border-radius:99px;background:#cbd5e1;margin:10px auto 2px;flex-shrink:0}
+  dialog.filter-sheet .sheet-head{padding:10px calc(16px + var(--sar)) 10px calc(16px + var(--sal))}
+  dialog.filter-sheet .sheet-body{max-height:none;padding:12px calc(16px + var(--sar)) 14px calc(16px + var(--sal))}
+  dialog.filter-sheet .sheet-footer{padding:10px calc(16px + var(--sar)) calc(14px + var(--sab)) calc(16px + var(--sal))}
+  dialog.filter-sheet .sheet-footer button{min-height:44px}
+  .filter-option-row{min-height:44px}
+  .filter-mode-btn{min-height:44px}
+  .filter-search-box{min-height:44px}
+  .filter-load-more-btn{min-height:42px}
+}
